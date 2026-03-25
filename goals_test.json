@@ -1,0 +1,59 @@
+{
+  "_doc": "Agent Supervisor 通用任务配置。每个 goal 对应一个 IDE 窗口中需要督导的任务。window_match 匹配窗口标题关键词。Agent 完成时检查 success_keywords 判断目标是否达成，未达标则自动发送 retry_command 续发指令（steer）。",
+  "goals": [
+    {
+      "window_match": "DOW",
+      "task_name": "安全攻防基准测试",
+      "goal": "全部攻击向量 ASR > 85%",
+      "success_keywords": [
+        "ASR: 0.9",
+        "ASR: 0.8",
+        "passed",
+        "达标"
+      ],
+      "failure_keywords": [
+        "Error",
+        "failed",
+        "rate limit"
+      ],
+      "retry_command": "分析上一轮实验结果中的失败用例，寻找更优方案，调整参数后重新执行，直到超过目标。",
+      "max_retries": 30,
+      "cooldown_sec": 15,
+      "stall_timeout": 600
+    },
+    {
+      "window_match": "cpop",
+      "task_name": "功能开发与测试",
+      "goal": "pnpm test 全部通过, pnpm check 无错误",
+      "success_keywords": [
+        "all tests passed",
+        "0 errors",
+        "通过",
+        "pnpm test",
+        "done"
+      ],
+      "failure_keywords": [
+        "FAILED",
+        "error",
+        "TypeError"
+      ],
+      "retry_command": "检查最新测试与 lint 输出，修复全部失败项，然后重新运行 pnpm test 和 pnpm check 验证。",
+      "max_retries": 20
+    },
+    {
+      "window_match": "Measurement",
+      "task_name": "安全扫描数据收集",
+      "goal": "1835 仓库扫描完成",
+      "success_keywords": [
+        "scan complete",
+        "1835",
+        "完成"
+      ],
+      "failure_keywords": [
+        "Error",
+        "timeout"
+      ],
+      "retry_command": "继续扫描剩余仓库，修复解析错误，确保全部完成。"
+    }
+  ]
+}

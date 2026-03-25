@@ -1,0 +1,80 @@
+﻿============================================================
+  UIA Agent Module - Integration Test
+============================================================
+
+============================================================
+  Layer 1: ProcessTree
+============================================================
+  Found 13 GUI processes:
+    PID=  1672 | Antigravity.exe           | Measurement - Antigravity - Walkthrough,
+    PID= 18364 | ApplicationFrameHost.exe  | 鏃堕挓
+    PID= 46636 | chrome.exe                | Supported Models - Cerebras Inference - 
+    PID=  8380 | chrome.exe                | 鎼滅储 - Microsoft 蹇呭簲 - Google Chrome
+    PID= 17636 | explorer.exe              | 浠诲姟鏍? 涓绘枃浠跺す - 鏂囦欢璧勬簮绠＄悊鍣?
+    PID= 33176 | msedge.exe                | Personal Access Tokens (Classic) 鍜屽彟澶?6 涓?
+    PID=  4696 | NVIDIA Overlay.exe        | NVIDIA GeForce Overlay
+    PID= 20000 | TgfishVPN.exe             | TgfishVPN
+    PID= 25976 | vmware.exe                | QLV10-1 - VMware Workstation
+    PID=  6344 | WeChatAppEx.exe           | 寰俊
+
+  find_by_name('edge'): 1 results
+  find_by_title('Antigravity'): 1 results
+  >> PASS
+
+============================================================
+  Layer 2: ElementFinder
+============================================================
+  Global input scan: 37 input fields found
+    [Antigravity.exe] name="Terminal 2, Antigravity Agent " value="Terminal 2, Antigrav"
+    [Antigravity.exe] name="" value="锟?
+    [Antigravity.exe] name="Select a conversation" value="锟?
+    [Antigravity.exe] name="" value="锟?
+    [Antigravity.exe] name="Terminal 1, Antigravity Agent " value="Terminal 1, Antigrav"
+
+  Element tree for Antigravity.exe:
+    Total elements: 646
+    Group: 141
+    Button: 115
+    DataItem: 102
+    TabItem: 89
+    ToolBar: 85
+  >> PASS
+
+============================================================
+  Layer 3: UIAController
+============================================================
+  list_processes(): 13 processes
+  connect_to(1672): Antigravity.exe
+  connected: True
+  find_inputs(): 3 inputs
+  find_buttons(): 50 buttons
+  get_tree(): 2158 elements
+  global_find_inputs(): 40 inputs across all processes
+  >> PASS
+
+============================================================
+  Layer 4: AgentBridge (JSON interface)
+============================================================
+  list_processes: 13 processes, success=True
+  global_find_inputs (JSON): 36 inputs, success=True
+  snapshot: 2610 total elements, success=True
+    Total processes in snapshot: 13
+      Antigravity.exe: 2165 elements, 397.8MB
+      ApplicationFrameHost.exe: 0 elements, 36.0MB
+      chrome.exe: 43 elements, 201.9MB
+      chrome.exe: 44 elements, 181.1MB
+      explorer.exe: 37 elements, 426.9MB
+
+  Batch execution: 2 actions, all success=True
+  >> PASS
+
+============================================================
+  FINAL RESULTS
+============================================================
+  [PASS] ProcessTree
+  [PASS] ElementFinder
+  [PASS] UIAController
+  [PASS] AgentBridge
+
+  Total time: 33.5s
+  All layers operational: True

@@ -1,0 +1,20 @@
+{
+    "target_process": "Antigravity.exe",
+    "poll_interval_sec": 2,
+    "health_check_interval_sec": 60,
+    "max_memory_mb": 500,
+    "log_dir": "logs",
+    "log_retention_days": 7,
+    "auto_reconnect": true,
+    "max_consecutive_errors": 10,
+    "use_com_events": false,
+    "max_events_per_second": 50,
+    "event_queue_max_size": 10000,
+    "console_output": true,
+
+    "ollama_base_url": "http://localhost:11434",
+    "ollama_model": "qwen2.5:latest",
+    "max_steps": 15,
+    "temperature": 0.3,
+    "verbose": true
+}

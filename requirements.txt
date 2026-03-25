@@ -1,0 +1,4 @@
+pywinauto>=0.6.9
+psutil>=5.9.0
+comtypes>=1.4.0
+requests>=2.28.0
