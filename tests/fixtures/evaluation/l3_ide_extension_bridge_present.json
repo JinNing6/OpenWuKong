@@ -1,0 +1,66 @@
+{
+  "suite": "l3-ide-extension-bridge-present",
+  "description": "Goal-profile L3 shadow fixture for IDE targets where a deterministic extension bridge URL is configured. Expectations avoid exact PID/window replay fields and keep control disabled.",
+  "states": [
+    {
+      "timestamp": 1779160000.0,
+      "pid": 6201,
+      "process_name": "Cursor.exe",
+      "project_name": "openwukong",
+      "window_title": "main.py - openwukong - Cursor"
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "l3_ide_bridge_capabilities",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "L3 IDE bridge capabilities",
+        "goal": "Plan bridge capability discovery for a configured IDE extension bridge.",
+        "retry_command": "IDE CAPABILITIES",
+        "connector_hint": "ide-extension",
+        "workspace_path": "E:\\ideaProjects\\agent\\openwukong",
+        "ide_bridge_url": "http://127.0.0.1:8787"
+      },
+      "expect": {
+        "connector_id": "ide-extension",
+        "workspace_id_prefix": "workspace:openwukong",
+        "min_match_score": 1000
+      }
+    },
+    {
+      "case_id": "l3_ide_bridge_state",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "L3 IDE bridge state",
+        "goal": "Plan semantic IDE state read through the extension bridge.",
+        "retry_command": "IDE STATE",
+        "connector_hint": "ide-extension",
+        "workspace_path": "E:\\ideaProjects\\agent\\openwukong",
+        "ide_bridge_url": "http://127.0.0.1:8787"
+      },
+      "expect": {
+        "connector_id": "ide-extension",
+        "workspace_id_prefix": "workspace:openwukong",
+        "min_match_score": 1000
+      }
+    },
+    {
+      "case_id": "l3_ide_bridge_chat_cursor",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "L3 IDE bridge chat",
+        "goal": "Plan Cursor chat adapter dispatch through the extension bridge.",
+        "retry_command": "IDE CHAT cursor\n\nContinue the openwukong task",
+        "connector_hint": "ide-extension",
+        "workspace_path": "E:\\ideaProjects\\agent\\openwukong",
+        "ide_bridge_url": "http://127.0.0.1:8787"
+      },
+      "expect": {
+        "connector_id": "ide-extension",
+        "workspace_id_prefix": "workspace:openwukong",
+        "min_match_score": 1000
+      }
+    }
+  ]
+}

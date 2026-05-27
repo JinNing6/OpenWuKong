@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openwukong"
+version = "0.1.0"
+description = "OpenWuKong — 通用 IDE Agent 督导系统"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "pywinauto>=0.6.8",
+    "psutil>=5.9.0",
+    "comtypes>=1.2.0",
+    "requests>=2.28.0",
+    "pyperclip>=1.8.0",
+]
+
+[project.optional-dependencies]
+gui = [
+    "customtkinter>=5.2.0",
+]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+openwukong = "openwukong.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools]
+py-modules = []

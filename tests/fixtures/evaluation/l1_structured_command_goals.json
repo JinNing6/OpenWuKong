@@ -1,0 +1,93 @@
+{
+  "suite": "l1-structured-command-goals",
+  "cases": [
+    {
+      "case_id": "pytest_run_plan",
+      "goal": {
+        "window_match": "terminal",
+        "task_name": "Plan pytest run",
+        "goal": "Plan a focused pytest run without executing it.",
+        "retry_command": "do not parse retry_command",
+        "connector_hint": "terminal",
+        "workspace_path": ".",
+        "command_operation": "pytest.run",
+        "command_args": [
+          "tests/test_command_planner.py",
+          "-k",
+          "CommandPlanner"
+        ]
+      },
+      "states": [],
+      "expect": {
+        "matched_pid": 0,
+        "connector_id": "terminal",
+        "command_plan": {
+          "ok": true,
+          "operation": "pytest.run",
+          "profile_id": "workspace-write",
+          "effects": [
+            "workspace_write"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "npm_run_plan",
+      "goal": {
+        "window_match": "terminal",
+        "task_name": "Plan npm script",
+        "goal": "Plan an npm test script without executing it.",
+        "retry_command": "do not parse retry_command",
+        "connector_hint": "terminal",
+        "workspace_path": ".",
+        "command_operation": "npm.run",
+        "command_args": [
+          "test",
+          "--grep=planner"
+        ]
+      },
+      "states": [],
+      "expect": {
+        "matched_pid": 0,
+        "connector_id": "terminal",
+        "command_plan": {
+          "ok": true,
+          "operation": "npm.run",
+          "profile_id": "workspace-write",
+          "effects": [
+            "workspace_write"
+          ]
+        }
+      }
+    },
+    {
+      "case_id": "docker_compose_dry_run_up_plan",
+      "goal": {
+        "window_match": "terminal",
+        "task_name": "Plan docker compose dry-run",
+        "goal": "Plan docker compose dry-run up without changing daemon state.",
+        "retry_command": "do not parse retry_command",
+        "connector_hint": "terminal",
+        "workspace_path": ".",
+        "command_operation": "docker.compose.dry-run-up",
+        "command_args": [
+          "--build",
+          "-d"
+        ]
+      },
+      "states": [],
+      "expect": {
+        "matched_pid": 0,
+        "connector_id": "terminal",
+        "command_plan": {
+          "ok": true,
+          "operation": "docker.compose.dry-run-up",
+          "profile_id": "read-only",
+          "effects": [
+            "read"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -21,8 +21,18 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
+log.txt
+upload_log.txt
+run_test.bat
+tests/perf_out*.txt
+tests/windows_dump.txt
 
-# Distribution
+# Sensitive (contains PyPI token)
+batch_register_pypi.py
+test_upload.py
+
+# Build artifacts
+*.egg-info/
 dist/
 build/
-*.egg-info/

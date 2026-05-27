@@ -1,0 +1,603 @@
+# -*- coding: utf-8 -*-
+"""Real no-loss probes for the primary user scenarios.
+
+This runner is intentionally stricter than "live automation": every scenario
+must either use an owned resource or a read-only probe. It never sends chat
+messages, types into user windows, opens user files, modifies user files, or
+submits agent tasks.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import json
+import time
+from pathlib import Path
+from typing import Callable, Optional
+
+from openwukong.control.session_readiness_plan import (
+    SessionReadinessLauncher,
+    SessionReadinessTerminator,
+)
+from openwukong.evaluation.accessibility_probe import (
+    PywinautoAccessibilityObserver,
+    WindowsCapabilityProbe,
+)
+from openwukong.evaluation.ide_bridge_capture import capture_ide_bridge_capabilities
+from openwukong.evaluation.primary_scenario_smoke import (
+    OwnedBrowserHelperActionRunner,
+    OwnedBrowserHelperReadinessProbe,
+    run_primary_scenario_smoke,
+)
+from openwukong.evaluation.simulation import (
+    L1SimulationHarness,
+    load_simulation_fixture,
+)
+from openwukong.evaluation.wechat_locator import build_wechat_locator_report
+
+
+IDEBridgeProbe = Callable[[str], dict]
+
+
+@dataclasses.dataclass(frozen=True)
+class PrimaryRealNoLossCase:
+    case_id: str
+    scenario_id: str
+    status: str
+    passed: bool
+    real_verified: bool
+    real_probe_kind: str
+    artifact_path: str = ""
+    details: dict = dataclasses.field(default_factory=dict)
+    send_attempts: int = 0
+    submit_attempts: int = 0
+    start_agent_attempts: int = 0
+    window_input_attempts: int = 0
+    owned_filesystem_scan_attempts: int = 0
+    real_user_filesystem_scan_attempts: int = 0
+    user_file_modification_attempts: int = 0
+    owned_app_launch_attempts: int = 0
+    errors: tuple[str, ...] = ()
+
+    @property
+    def mode(self) -> str:
+        return "primary-scenario-real-no-loss-case"
+
+    @property
+    def safety_mode(self) -> str:
+        return "real_no_loss"
+
+    @property
+    def control_allowed(self) -> bool:
+        return False
+
+    @property
+    def control_attempts(self) -> int:
+        return 0
+
+    def to_dict(self, *, include_details: bool = True) -> dict:
+        data = {
+            "mode": self.mode,
+            "safety_mode": self.safety_mode,
+            "control_allowed": self.control_allowed,
+            "control_attempts": self.control_attempts,
+            "case_id": self.case_id,
+            "scenario_id": self.scenario_id,
+            "status": self.status,
+            "passed": self.passed,
+            "real_verified": self.real_verified,
+            "real_probe_kind": self.real_probe_kind,
+            "artifact_path": self.artifact_path,
+            "send_attempts": self.send_attempts,
+            "submit_attempts": self.submit_attempts,
+            "start_agent_attempts": self.start_agent_attempts,
+            "window_input_attempts": self.window_input_attempts,
+            "owned_filesystem_scan_attempts": self.owned_filesystem_scan_attempts,
+            "real_user_filesystem_scan_attempts": self.real_user_filesystem_scan_attempts,
+            "user_file_modification_attempts": self.user_file_modification_attempts,
+            "owned_app_launch_attempts": self.owned_app_launch_attempts,
+            "errors": list(self.errors),
+        }
+        if include_details:
+            data["details"] = dict(self.details)
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
+class PrimaryRealNoLossReport:
+    suite: str
+    output_root: str
+    cases: tuple[PrimaryRealNoLossCase, ...]
+    elapsed_ms: float = 0.0
+
+    @property
+    def mode(self) -> str:
+        return "primary-scenario-real-no-loss"
+
+    @property
+    def safety_mode(self) -> str:
+        return "real_no_loss"
+
+    @property
+    def control_allowed(self) -> bool:
+        return False
+
+    @property
+    def control_attempts(self) -> int:
+        return 0
+
+    @property
+    def external_communication_attempts(self) -> int:
+        return sum(case.send_attempts for case in self.cases)
+
+    @property
+    def window_input_attempts(self) -> int:
+        return sum(case.window_input_attempts for case in self.cases)
+
+    @property
+    def real_user_filesystem_scan_attempts(self) -> int:
+        return sum(case.real_user_filesystem_scan_attempts for case in self.cases)
+
+    @property
+    def user_file_modification_attempts(self) -> int:
+        return sum(case.user_file_modification_attempts for case in self.cases)
+
+    @property
+    def owned_app_launch_attempts(self) -> int:
+        return sum(case.owned_app_launch_attempts for case in self.cases)
+
+    @property
+    def total_cases(self) -> int:
+        return len(self.cases)
+
+    @property
+    def passed_cases(self) -> int:
+        return sum(1 for case in self.cases if case.passed)
+
+    @property
+    def failed_cases(self) -> int:
+        return self.total_cases - self.passed_cases
+
+    @property
+    def real_verified_cases(self) -> int:
+        return sum(1 for case in self.cases if case.real_verified)
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "suite": self.suite,
+            "safety_mode": self.safety_mode,
+            "control_allowed": self.control_allowed,
+            "control_attempts": self.control_attempts,
+            "external_communication_attempts": self.external_communication_attempts,
+            "window_input_attempts": self.window_input_attempts,
+            "real_user_filesystem_scan_attempts": self.real_user_filesystem_scan_attempts,
+            "user_file_modification_attempts": self.user_file_modification_attempts,
+            "owned_app_launch_attempts": self.owned_app_launch_attempts,
+            "output_root": self.output_root,
+            "total_cases": self.total_cases,
+            "passed_cases": self.passed_cases,
+            "failed_cases": self.failed_cases,
+            "real_verified_cases": self.real_verified_cases,
+            "cases": [case.to_dict() for case in self.cases],
+            "elapsed_ms": round(self.elapsed_ms, 3),
+        }
+
+
+def run_primary_real_no_loss(
+    fixture: dict,
+    *,
+    output_root: str | Path = "",
+    harness: L1SimulationHarness | None = None,
+    allow_owned_browser_helper_launch: bool = False,
+    owned_browser_helper_launcher: SessionReadinessLauncher | None = None,
+    owned_browser_helper_terminator: SessionReadinessTerminator | None = None,
+    owned_browser_helper_readiness_probe: OwnedBrowserHelperReadinessProbe | None = None,
+    owned_browser_helper_action_runner: OwnedBrowserHelperActionRunner | None = None,
+    owned_browser_debug_port: int = 9238,
+    owned_browser_executable: str = "chrome.exe",
+    owned_browser_url: str = "",
+    accessibility_observer: object | None = None,
+    wechat_win32_observer: object | None = None,
+    ide_bridge_urls: tuple[str, ...] = ("http://127.0.0.1:8787",),
+    ide_bridge_probe: IDEBridgeProbe | None = None,
+) -> PrimaryRealNoLossReport:
+    started = time.perf_counter()
+    root = _resolve_output_root(output_root)
+    root.mkdir(parents=True, exist_ok=True)
+
+    active_harness = harness or L1SimulationHarness()
+    l1_report = active_harness.run_suite(fixture)
+    plans = [
+        _plan_row(result.to_dict())
+        for result in l1_report.results
+    ]
+    browser_smoke_cases = _browser_smoke_cases(
+        fixture,
+        output_root=root,
+        allow_owned_browser_helper_launch=allow_owned_browser_helper_launch,
+        owned_browser_helper_launcher=owned_browser_helper_launcher,
+        owned_browser_helper_terminator=owned_browser_helper_terminator,
+        owned_browser_helper_readiness_probe=owned_browser_helper_readiness_probe,
+        owned_browser_helper_action_runner=owned_browser_helper_action_runner,
+        owned_browser_debug_port=owned_browser_debug_port,
+        owned_browser_executable=owned_browser_executable,
+        owned_browser_url=owned_browser_url,
+    )
+
+    cases: list[PrimaryRealNoLossCase] = []
+    for row in plans:
+        scenario_id = str(row["plan"].get("scenario_id", "") or "")
+        if scenario_id == "browser.research.collect_sources":
+            case = _browser_case(row, root, browser_smoke_cases)
+        elif scenario_id == "wechat.chat.draft_reply":
+            case = _wechat_case(row, root, accessibility_observer, wechat_win32_observer)
+        elif scenario_id == "files.search.find_candidate":
+            case = _file_case(row, root)
+        elif scenario_id == "codex.project.submit_task_draft":
+            case = _codex_case(row, root, ide_bridge_urls, ide_bridge_probe)
+        else:
+            case = _generic_unavailable_case(row, root)
+        cases.append(_write_case_artifact(root, case))
+
+    return PrimaryRealNoLossReport(
+        suite=str(l1_report.suite),
+        output_root=str(root),
+        cases=tuple(cases),
+        elapsed_ms=(time.perf_counter() - started) * 1000,
+    )
+
+
+def summarize_report(report: PrimaryRealNoLossReport) -> dict:
+    return {
+        "mode": "primary-scenario-real-no-loss-summary",
+        "suite": report.suite,
+        "safety_mode": report.safety_mode,
+        "control_allowed": report.control_allowed,
+        "control_attempts": report.control_attempts,
+        "external_communication_attempts": report.external_communication_attempts,
+        "window_input_attempts": report.window_input_attempts,
+        "real_user_filesystem_scan_attempts": report.real_user_filesystem_scan_attempts,
+        "user_file_modification_attempts": report.user_file_modification_attempts,
+        "owned_app_launch_attempts": report.owned_app_launch_attempts,
+        "total_cases": report.total_cases,
+        "passed_cases": report.passed_cases,
+        "failed_cases": report.failed_cases,
+        "real_verified_cases": report.real_verified_cases,
+        "scenarios": [
+            case.to_dict(include_details=False)
+            for case in report.cases
+        ],
+    }
+
+
+def _plan_row(result: dict) -> dict:
+    return {
+        "case_id": str(result.get("case_id", "") or "unnamed-case"),
+        "source_l1_passed": bool(result.get("passed", False)),
+        "plan": dict(result.get("primary_scenario_plan", {}) or {}),
+    }
+
+
+def _browser_smoke_cases(
+    fixture: dict,
+    *,
+    output_root: Path,
+    allow_owned_browser_helper_launch: bool,
+    owned_browser_helper_launcher: SessionReadinessLauncher | None,
+    owned_browser_helper_terminator: SessionReadinessTerminator | None,
+    owned_browser_helper_readiness_probe: OwnedBrowserHelperReadinessProbe | None,
+    owned_browser_helper_action_runner: OwnedBrowserHelperActionRunner | None,
+    owned_browser_debug_port: int,
+    owned_browser_executable: str,
+    owned_browser_url: str,
+) -> dict[str, dict]:
+    report = run_primary_scenario_smoke(
+        fixture,
+        output_root=output_root / "owned_browser_primary_smoke",
+        allow_owned_browser_helper_launch=allow_owned_browser_helper_launch,
+        owned_browser_helper_launcher=owned_browser_helper_launcher,
+        owned_browser_helper_terminator=owned_browser_helper_terminator,
+        owned_browser_helper_readiness_probe=owned_browser_helper_readiness_probe,
+        owned_browser_helper_action_runner=owned_browser_helper_action_runner,
+        owned_browser_debug_port=owned_browser_debug_port,
+        owned_browser_executable=owned_browser_executable,
+        owned_browser_url=owned_browser_url,
+    )
+    return {case.case_id: case.to_dict() for case in report.cases}
+
+
+def _browser_case(
+    row: dict,
+    output_root: Path,
+    browser_smoke_cases: dict[str, dict],
+) -> PrimaryRealNoLossCase:
+    case_id = str(row["case_id"])
+    smoke_case = browser_smoke_cases.get(case_id, {})
+    helper_path = str(smoke_case.get("owned_browser_helper_artifact_path", "") or "")
+    if not helper_path:
+        return PrimaryRealNoLossCase(
+            case_id=case_id,
+            scenario_id="browser.research.collect_sources",
+            status="skipped_requires_owned_browser_helper_opt_in",
+            passed=True,
+            real_verified=False,
+            real_probe_kind="owned-browser-devtools-read-page",
+            details={"reason": "allow_owned_browser_helper_launch was false"},
+        )
+    try:
+        helper = json.loads(Path(helper_path).read_text(encoding="utf-8"))
+    except Exception as exc:
+        return PrimaryRealNoLossCase(
+            case_id=case_id,
+            scenario_id="browser.research.collect_sources",
+            status="failed",
+            passed=False,
+            real_verified=False,
+            real_probe_kind="owned-browser-devtools-read-page",
+            errors=(f"helper_artifact_read_failed:{exc}",),
+            owned_app_launch_attempts=1,
+        )
+    action = dict(helper.get("owned_browser_action", {}) or {})
+    action_report = dict(action.get("action_report", {}) or {})
+    action_result = dict(action_report.get("action_result", {}) or {})
+    ok = (
+        helper.get("status") == "started_and_stopped"
+        and bool(helper.get("readiness_probe", {}).get("target_match_ok", False))
+        and bool(action.get("ok", False))
+        and int(helper.get("owned_browser_action_control_attempts", 0) or 0) == 0
+    )
+    return PrimaryRealNoLossCase(
+        case_id=case_id,
+        scenario_id="browser.research.collect_sources",
+        status="verified" if ok else "failed",
+        passed=ok,
+        real_verified=ok,
+        real_probe_kind="owned-browser-devtools-read-page",
+        owned_app_launch_attempts=1,
+        details={
+            "helper_artifact_path": helper_path,
+            "helper_status": str(helper.get("status", "") or ""),
+            "target_match_ok": bool(helper.get("readiness_probe", {}).get("target_match_ok", False)),
+            "action": str(action_report.get("action", "") or ""),
+            "action_title": str(action_result.get("title", "") or ""),
+            "action_text_excerpt": str(action_result.get("textExcerpt", "") or "")[:500],
+        },
+        errors=tuple(str(item) for item in helper.get("errors", []) or []),
+    )
+
+
+def _wechat_case(
+    row: dict,
+    output_root: Path,
+    accessibility_observer: object | None,
+    wechat_win32_observer: object | None,
+) -> PrimaryRealNoLossCase:
+    del output_root
+    observer = accessibility_observer or PywinautoAccessibilityObserver(
+        max_windows=40,
+        max_elements_per_window=120,
+    )
+    report = WindowsCapabilityProbe(observer=observer).run()
+    matches = [
+        window
+        for window in report.windows
+        if _is_wechat_window(window.process_name, window.window_title)
+    ]
+    locator = build_wechat_locator_report(
+        report.windows,
+        win32_observer=wechat_win32_observer,
+    )
+    details = {
+        "matching_window_count": len(matches),
+        "windows": [
+            window.to_dict(include_elements=False)
+            for window in matches
+        ],
+        "locator": locator.to_dict(include_children=False),
+        "total_scanned_windows": report.window_count,
+        "total_scanned_elements": report.total_elements,
+    }
+    return PrimaryRealNoLossCase(
+        case_id=str(row["case_id"]),
+        scenario_id="wechat.chat.draft_reply",
+        status="verified" if matches else "unavailable",
+        passed=True,
+        real_verified=bool(matches),
+        real_probe_kind="wechat-uia-win32-read-only-locator",
+        details=details,
+        send_attempts=0,
+        window_input_attempts=0,
+    )
+
+
+def _file_case(row: dict, output_root: Path) -> PrimaryRealNoLossCase:
+    case_id = str(row["case_id"])
+    plan = dict(row["plan"])
+    intent = dict(plan.get("draft_action", {}).get("intent", {}) or {})
+    query = str(intent.get("query", "") or "openwukong")
+    owned_root = output_root / "owned_file_search" / _safe_filename(case_id)
+    owned_root.mkdir(parents=True, exist_ok=True)
+    seed_files = {
+        "openwukong-plan.md": "# openwukong plan\nreal no-loss primary scenario probe\n",
+        "openwukong-index.json": json.dumps(
+            {"project": "openwukong", "probe": "real-no-loss"},
+            ensure_ascii=False,
+        ),
+        "unrelated.txt": "not a candidate\n",
+    }
+    for filename, content in seed_files.items():
+        (owned_root / filename).write_text(content, encoding="utf-8")
+
+    candidate_paths = _search_owned_files(owned_root, query)
+    return PrimaryRealNoLossCase(
+        case_id=case_id,
+        scenario_id="files.search.find_candidate",
+        status="verified" if candidate_paths else "failed",
+        passed=bool(candidate_paths),
+        real_verified=bool(candidate_paths),
+        real_probe_kind="owned-filesystem-temp-index",
+        owned_filesystem_scan_attempts=1,
+        real_user_filesystem_scan_attempts=0,
+        user_file_modification_attempts=0,
+        details={
+            "owned_root": str(owned_root),
+            "query": query,
+            "created_file_count": len(seed_files),
+            "candidate_count": len(candidate_paths),
+            "candidate_paths": [str(path) for path in candidate_paths],
+        },
+    )
+
+
+def _codex_case(
+    row: dict,
+    output_root: Path,
+    ide_bridge_urls: tuple[str, ...],
+    ide_bridge_probe: IDEBridgeProbe | None,
+) -> PrimaryRealNoLossCase:
+    plan = dict(row["plan"])
+    intent = dict(plan.get("draft_action", {}).get("intent", {}) or {})
+    workspace = str(intent.get("workspace", "") or output_root)
+    reports: list[dict] = []
+    active_probe = ide_bridge_probe or (
+        lambda url: capture_ide_bridge_capabilities(
+            url,
+            workspace_path=workspace,
+            request_timeout=0.3,
+        ).to_dict()
+    )
+    for bridge_url in ide_bridge_urls:
+        data = active_probe(str(bridge_url))
+        reports.append(dict(data) if isinstance(data, dict) else {"ok": False, "error": "invalid_probe_result"})
+        if reports[-1].get("ok"):
+            break
+
+    ok_reports = [report for report in reports if report.get("ok")]
+    ok = bool(ok_reports)
+    return PrimaryRealNoLossCase(
+        case_id=str(row["case_id"]),
+        scenario_id="codex.project.submit_task_draft",
+        status="verified" if ok else "unavailable",
+        passed=True,
+        real_verified=ok,
+        real_probe_kind="ide-bridge-capabilities-read-only",
+        submit_attempts=0,
+        start_agent_attempts=0,
+        details={
+            "workspace": workspace,
+            "probed_bridge_urls": list(ide_bridge_urls),
+            "ok_bridge_url": str(ok_reports[0].get("bridge_url", "")) if ok_reports else "",
+            "reports": reports,
+        },
+    )
+
+
+def _generic_unavailable_case(row: dict, output_root: Path) -> PrimaryRealNoLossCase:
+    del output_root
+    plan = dict(row["plan"])
+    return PrimaryRealNoLossCase(
+        case_id=str(row["case_id"]),
+        scenario_id=str(plan.get("scenario_id", "") or ""),
+        status="unavailable",
+        passed=True,
+        real_verified=False,
+        real_probe_kind="none",
+        details={"reason": "unsupported primary real no-loss scenario"},
+    )
+
+
+def _write_case_artifact(output_root: Path, case: PrimaryRealNoLossCase) -> PrimaryRealNoLossCase:
+    artifact_dir = output_root / "real_no_loss"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = artifact_dir / f"{_safe_filename(case.case_id)}.json"
+    data = case.to_dict()
+    artifact_path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return dataclasses.replace(case, artifact_path=str(artifact_path))
+
+
+def _search_owned_files(root: Path, query: str) -> list[Path]:
+    terms = [
+        term.lower()
+        for term in str(query or "").replace("/", " ").replace("\\", " ").split()
+        if term.strip()
+    ]
+    if not terms:
+        terms = ["openwukong"]
+    candidates: list[Path] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace").lower()
+        except OSError:
+            continue
+        haystack = f"{path.name.lower()} {text}"
+        if any(term in haystack for term in terms):
+            candidates.append(path.resolve())
+    return candidates
+
+
+def _is_wechat_window(process_name: str, window_title: str) -> bool:
+    process = str(process_name or "").lower()
+    title = str(window_title or "").lower()
+    return process in {"wechat.exe", "weixin.exe"} or "微信" in title or "wechat" in title
+
+
+def _resolve_output_root(output_root: str | Path) -> Path:
+    if output_root:
+        return Path(output_root).expanduser().resolve()
+    return (Path("logs") / "runtime" / "primary-real-no-loss").resolve()
+
+
+def _safe_filename(value: str) -> str:
+    text = "".join(
+        char if char.isalnum() or char in {"-", "_", "."} else "_"
+        for char in str(value or "").strip()
+    )
+    return text.strip("._") or "unnamed"
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run real no-loss probes for primary user scenarios."
+    )
+    parser.add_argument("fixture", help="Path to an L1 primary user scenario fixture JSON file.")
+    parser.add_argument("--output-root", default="")
+    parser.add_argument("--summary-json", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--allow-owned-browser-helper-launch", action="store_true")
+    parser.add_argument("--owned-browser-debug-port", type=int, default=9238)
+    parser.add_argument("--owned-browser-executable", default="chrome.exe")
+    parser.add_argument("--owned-browser-url", default="")
+    parser.add_argument("--ide-bridge-url", action="append", default=None)
+    args = parser.parse_args(argv)
+
+    report = run_primary_real_no_loss(
+        load_simulation_fixture(args.fixture),
+        output_root=args.output_root,
+        allow_owned_browser_helper_launch=args.allow_owned_browser_helper_launch,
+        owned_browser_debug_port=args.owned_browser_debug_port,
+        owned_browser_executable=args.owned_browser_executable,
+        owned_browser_url=args.owned_browser_url,
+        ide_bridge_urls=tuple(args.ide_bridge_url or ("http://127.0.0.1:8787",)),
+    )
+    if args.summary_json:
+        print(json.dumps(summarize_report(report), ensure_ascii=False, indent=2))
+    elif args.json:
+        print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(
+            "Primary real no-loss: "
+            f"{report.passed_cases}/{report.total_cases} no-loss passed, "
+            f"real_verified={report.real_verified_cases}"
+        )
+    return 0 if report.failed_cases == 0 else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

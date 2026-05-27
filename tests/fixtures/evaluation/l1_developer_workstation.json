@@ -1,0 +1,262 @@
+{
+  "suite": "l1-developer-workstation-baseline",
+  "cases": [
+    {
+      "case_id": "codex_route_openwukong",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "Route Codex task",
+        "goal": "Find the recorded Codex session for openwukong.",
+        "retry_command": "status",
+        "connector_hint": "codex"
+      },
+      "states": [
+        {
+          "pid": 1101,
+          "process_name": "Codex.exe",
+          "project_name": "openwukong",
+          "window_title": "openwukong - Codex"
+        },
+        {
+          "pid": 2201,
+          "process_name": "Cursor.exe",
+          "project_name": "otherrepo",
+          "window_title": "main.py - otherrepo - Cursor"
+        }
+      ],
+      "expect": {
+        "matched_pid": 1101,
+        "connector_id": "codex",
+        "workspace_id_prefix": "workspace:openwukong"
+      }
+    },
+    {
+      "case_id": "cursor_route_fixture_workspace",
+      "goal": {
+        "window_match": "fixture-app",
+        "task_name": "Route Cursor task",
+        "goal": "Find the recorded Cursor session for fixture-app.",
+        "retry_command": "status",
+        "connector_hint": "cursor"
+      },
+      "states": [
+        {
+          "pid": 1202,
+          "process_name": "Cursor.exe",
+          "project_name": "fixture-app",
+          "window_title": "index.ts - fixture-app - Cursor"
+        },
+        {
+          "pid": 1203,
+          "process_name": "Codex.exe",
+          "project_name": "openwukong",
+          "window_title": "openwukong - Codex"
+        }
+      ],
+      "expect": {
+        "matched_pid": 1202,
+        "connector_id": "cursor",
+        "workspace_id_prefix": "workspace:fixture-app"
+      }
+    },
+    {
+      "case_id": "cursor_preference_same_workspace",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "Prefer Cursor for same workspace",
+        "goal": "Disambiguate same workspace across Codex and Cursor.",
+        "retry_command": "status",
+        "connector_hint": "cursor"
+      },
+      "states": [
+        {
+          "pid": 1204,
+          "process_name": "Codex.exe",
+          "project_name": "openwukong",
+          "window_title": "openwukong - Codex"
+        },
+        {
+          "pid": 1205,
+          "process_name": "Cursor.exe",
+          "project_name": "openwukong",
+          "window_title": "main.py - openwukong - Cursor"
+        }
+      ],
+      "expect": {
+        "matched_pid": 1205,
+        "connector_id": "cursor",
+        "workspace_id_prefix": "workspace:openwukong",
+        "min_match_score": 1000
+      }
+    },
+    {
+      "case_id": "codex_wrong_target_guard",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "Guard against wrong Codex target",
+        "goal": "Ensure the expected Codex target is selected instead of a forbidden similarly named window.",
+        "retry_command": "status",
+        "connector_hint": "codex"
+      },
+      "states": [
+        {
+          "pid": 1210,
+          "process_name": "Codex.exe",
+          "project_name": "openwukong-archive",
+          "window_title": "openwukong-archive - Codex"
+        },
+        {
+          "pid": 1211,
+          "process_name": "Codex.exe",
+          "project_name": "openwukong",
+          "window_title": "openwukong - Codex"
+        }
+      ],
+      "expect": {
+        "matched_pid": 1211,
+        "forbidden_matched_pid": 1210,
+        "connector_id": "codex",
+        "workspace_id_prefix": "workspace:openwukong"
+      }
+    },
+    {
+      "case_id": "cursor_ambiguous_title_prefers_exact_project",
+      "goal": {
+        "window_match": "fixture-app",
+        "task_name": "Ambiguous Cursor title",
+        "goal": "Prefer exact project identity over a similar title.",
+        "retry_command": "status",
+        "connector_hint": "cursor"
+      },
+      "states": [
+        {
+          "pid": 1220,
+          "process_name": "Cursor.exe",
+          "project_name": "fixture-app-docs",
+          "window_title": "README.md - fixture-app-docs - Cursor"
+        },
+        {
+          "pid": 1221,
+          "process_name": "Cursor.exe",
+          "project_name": "fixture-app",
+          "window_title": "index.ts - fixture-app - Cursor"
+        }
+      ],
+      "expect": {
+        "matched_pid": 1221,
+        "connector_id": "cursor",
+        "workspace_id_prefix": "workspace:fixture-app"
+      }
+    },
+    {
+      "case_id": "cursor_same_name_different_path",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "Same name different path",
+        "goal": "Select the openwukong workspace rooted under beta, not alpha.",
+        "retry_command": "status",
+        "connector_hint": "cursor",
+        "workspace_path": "E:\\fixtures\\beta\\openwukong"
+      },
+      "states": [
+        {
+          "pid": 1230,
+          "process_name": "Cursor.exe",
+          "project_name": "openwukong",
+          "window_title": "E:\\fixtures\\alpha\\openwukong\\src\\main.py - openwukong - Cursor"
+        },
+        {
+          "pid": 1231,
+          "process_name": "Cursor.exe",
+          "project_name": "openwukong",
+          "window_title": "E:\\fixtures\\beta\\openwukong\\src\\main.py - openwukong - Cursor"
+        }
+      ],
+      "expect": {
+        "matched_pid": 1231,
+        "forbidden_matched_pid": 1230,
+        "connector_id": "cursor",
+        "workspace_id_prefix": "workspace:openwukong",
+        "min_match_score": 1000
+      }
+    },
+    {
+      "case_id": "chrome_route_local_page",
+      "goal": {
+        "window_match": "local-browser-fixture",
+        "task_name": "Route browser task",
+        "goal": "Find a recorded Chrome browser session.",
+        "retry_command": "GET /",
+        "connector_hint": "browser",
+        "resource_url": "http://127.0.0.1:8765/"
+      },
+      "states": [
+        {
+          "pid": 1303,
+          "process_name": "chrome.exe",
+          "project_name": "local-browser-fixture",
+          "window_title": "local-browser-fixture - Google Chrome"
+        }
+      ],
+      "expect": {
+        "matched_pid": 1303,
+        "connector_id": "browser",
+        "workspace_id_prefix": "workspace:127-0-0-1-8765"
+      }
+    },
+    {
+      "case_id": "terminal_direct_route",
+      "goal": {
+        "window_match": "openwukong-terminal",
+        "task_name": "Route terminal task",
+        "goal": "Use the managed terminal connector without live windows.",
+        "retry_command": "python -m unittest",
+        "connector_hint": "terminal",
+        "workspace_path": "."
+      },
+      "states": [],
+      "expect": {
+        "matched_pid": 0,
+        "connector_id": "terminal"
+      }
+    },
+    {
+      "case_id": "git_direct_route",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "Route git task",
+        "goal": "Use the managed git connector without live windows.",
+        "retry_command": "git status --short",
+        "connector_hint": "git",
+        "workspace_path": "."
+      },
+      "states": [],
+      "expect": {
+        "matched_pid": 0,
+        "connector_id": "git"
+      }
+    },
+    {
+      "case_id": "missing_project_no_match",
+      "goal": {
+        "window_match": "missing-project",
+        "task_name": "No match for missing project",
+        "goal": "Keep unmatched project unmatched.",
+        "retry_command": "status",
+        "connector_hint": "auto"
+      },
+      "states": [
+        {
+          "pid": 1505,
+          "process_name": "Cursor.exe",
+          "project_name": "other-project",
+          "window_title": "main.py - other-project - Cursor"
+        }
+      ],
+      "expect": {
+        "matched": false,
+        "connector_id": ""
+      }
+    }
+  ]
+}

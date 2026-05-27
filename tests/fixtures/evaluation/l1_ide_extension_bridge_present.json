@@ -1,0 +1,63 @@
+{
+  "suite": "l1-ide-extension-bridge-present",
+  "description": "Offline bridge-present IDE fixture. It verifies that an explicit IDE bridge URL routes directly to ide-extension without live window matching or UIA control.",
+  "cases": [
+    {
+      "case_id": "ide_bridge_capabilities_windowless",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "IDE bridge capabilities",
+        "goal": "Read IDE bridge capability metadata without matching a live window.",
+        "retry_command": "IDE CAPABILITIES",
+        "connector_hint": "ide-extension",
+        "workspace_path": "E:\\ideaProjects\\agent\\openwukong",
+        "ide_bridge_url": "http://127.0.0.1:8787"
+      },
+      "states": [],
+      "expect": {
+        "matched_pid": 0,
+        "connector_id": "ide-extension",
+        "workspace_id_prefix": "workspace:openwukong",
+        "min_match_score": 1000
+      }
+    },
+    {
+      "case_id": "ide_bridge_state_windowless",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "IDE bridge state",
+        "goal": "Read IDE state through the bridge instead of UIA.",
+        "retry_command": "IDE STATE",
+        "connector_hint": "ide-extension",
+        "workspace_path": "E:\\ideaProjects\\agent\\openwukong",
+        "ide_bridge_url": "http://127.0.0.1:8787"
+      },
+      "states": [],
+      "expect": {
+        "matched_pid": 0,
+        "connector_id": "ide-extension",
+        "workspace_id_prefix": "workspace:openwukong",
+        "min_match_score": 1000
+      }
+    },
+    {
+      "case_id": "ide_bridge_chat_windowless",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "IDE bridge chat",
+        "goal": "Send a chat message through the configured Cursor adapter without visual targeting.",
+        "retry_command": "IDE CHAT cursor\n\nContinue the openwukong task",
+        "connector_hint": "ide-extension",
+        "workspace_path": "E:\\ideaProjects\\agent\\openwukong",
+        "ide_bridge_url": "http://127.0.0.1:8787"
+      },
+      "states": [],
+      "expect": {
+        "matched_pid": 0,
+        "connector_id": "ide-extension",
+        "workspace_id_prefix": "workspace:openwukong",
+        "min_match_score": 1000
+      }
+    }
+  ]
+}

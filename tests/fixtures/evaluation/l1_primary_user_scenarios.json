@@ -1,0 +1,213 @@
+{
+  "suite": "l1-primary-user-scenarios",
+  "cases": [
+    {
+      "case_id": "wechat_chat_draft_reply",
+      "goal": {
+        "window_match": "文件传输助手",
+        "task_name": "微信草稿回复",
+        "goal": "在微信中找到文件传输助手并准备一条回复草稿，不发送。",
+        "connector_hint": "auto"
+      },
+      "states": [
+        {
+          "timestamp": 1.0,
+          "pid": 2101,
+          "process_name": "WeChat.exe",
+          "project_name": "微信",
+          "window_title": "文件传输助手 - 微信",
+          "ai_status": "unknown",
+          "ai_element_count": 42
+        }
+      ],
+      "primary_scenario": {
+        "scenario_id": "wechat.chat.draft_reply",
+        "family": "wechat",
+        "intent": {
+          "contact": "文件传输助手",
+          "message": "这是 L1 仿真生成的草稿，不会真实发送。"
+        },
+        "recorded_context": {
+          "evidence_ids": [
+            "uia.window_metadata",
+            "uia.chat_list",
+            "uia.input_box"
+          ],
+          "input_locator": {
+            "automation_id": "edit_message",
+            "control_type": "Edit",
+            "name": "输入"
+          }
+        }
+      },
+      "expect": {
+        "matched_pid": 2101,
+        "connector_id": "uia-ide",
+        "primary_scenario_plan": {
+          "scenario_id": "wechat.chat.draft_reply",
+          "route_id": "uia-semantic-chat-draft",
+          "connector_id": "desktop-uia",
+          "proposed_action": "draft_chat_message",
+          "requires_confirmation": true,
+          "contains_evidence_id": "uia.input_box",
+          "contains_blocked_primitive": "send_message"
+        }
+      }
+    },
+    {
+      "case_id": "browser_research_collect_sources",
+      "goal": {
+        "window_match": "资料搜索",
+        "task_name": "浏览器资料查找",
+        "goal": "仿真搜索 Windows UI Automation 和 Chrome DevTools 的资料并生成来源草稿。",
+        "connector_hint": "browser",
+        "resource_url": "https://example.test/search?q=uia+cdp"
+      },
+      "states": [
+        {
+          "timestamp": 1.0,
+          "pid": 2201,
+          "process_name": "chrome.exe",
+          "project_name": "资料搜索",
+          "window_title": "UI Automation Chrome DevTools - Google Chrome",
+          "ai_status": "unknown",
+          "ai_element_count": 0
+        }
+      ],
+      "primary_scenario": {
+        "scenario_id": "browser.research.collect_sources",
+        "family": "browser",
+        "intent": {
+          "query": "Windows UI Automation Chrome DevTools Protocol",
+          "source_count": 3
+        },
+        "recorded_context": {
+          "evidence_ids": [
+            "cdp.target_metadata",
+            "cdp.dom_snapshot",
+            "search.results_snapshot"
+          ],
+          "result_titles": [
+            "UI Automation Overview - Microsoft Learn",
+            "Chrome DevTools Protocol",
+            "Querying the Windows Search Index"
+          ]
+        }
+      },
+      "expect": {
+        "matched_pid": 2201,
+        "connector_id": "browser",
+        "primary_scenario_plan": {
+          "scenario_id": "browser.research.collect_sources",
+          "route_id": "browser-devtools-or-extension",
+          "connector_id": "browser",
+          "proposed_action": "draft_browser_research_plan",
+          "requires_confirmation": false,
+          "contains_evidence_id": "cdp.dom_snapshot"
+        }
+      }
+    },
+    {
+      "case_id": "files_search_find_candidate",
+      "goal": {
+        "window_match": "file-search",
+        "task_name": "电脑找文件",
+        "goal": "仿真在本机索引中查找最近的 openwukong 规划文档候选文件。",
+        "connector_hint": "terminal",
+        "workspace_path": "."
+      },
+      "states": [],
+      "primary_scenario": {
+        "scenario_id": "files.search.find_candidate",
+        "family": "files",
+        "intent": {
+          "query": "openwukong 规划",
+          "file_types": [
+            ".md",
+            ".json"
+          ],
+          "recency": "recent"
+        },
+        "recorded_context": {
+          "evidence_ids": [
+            "windows_search.index_snapshot",
+            "file.metadata_candidates"
+          ],
+          "candidates": [
+            {
+              "path": "E:/ideaProjects/agent/openwukong/.agents/conversation_index.md",
+              "score": 98
+            },
+            {
+              "path": "E:/ideaProjects/agent/openwukong/tests/fixtures/evaluation/l1_developer_workstation.json",
+              "score": 74
+            }
+          ]
+        }
+      },
+      "expect": {
+        "matched_pid": 0,
+        "connector_id": "terminal",
+        "primary_scenario_plan": {
+          "scenario_id": "files.search.find_candidate",
+          "route_id": "windows-search-index",
+          "connector_id": "file-search",
+          "proposed_action": "rank_file_candidates",
+          "requires_confirmation": false,
+          "contains_evidence_id": "windows_search.index_snapshot"
+        }
+      }
+    },
+    {
+      "case_id": "codex_project_submit_task_draft",
+      "goal": {
+        "window_match": "openwukong",
+        "task_name": "Codex 项目任务草稿",
+        "goal": "在 Codex 的 openwukong 项目中准备一个任务下达草稿，不启动真实 agent。",
+        "connector_hint": "codex",
+        "workspace_path": "E:/ideaProjects/agent/openwukong"
+      },
+      "states": [
+        {
+          "timestamp": 1.0,
+          "pid": 2301,
+          "process_name": "Codex.exe",
+          "project_name": "openwukong",
+          "window_title": "openwukong - Codex",
+          "ai_status": "unknown",
+          "ai_element_count": 12
+        }
+      ],
+      "primary_scenario": {
+        "scenario_id": "codex.project.submit_task_draft",
+        "family": "codex",
+        "intent": {
+          "workspace": "E:/ideaProjects/agent/openwukong",
+          "task": "继续实现 L1 主场景仿真任务集，先写测试再实现。"
+        },
+        "recorded_context": {
+          "evidence_ids": [
+            "codex.workspace_snapshot",
+            "codex.task_payload"
+          ],
+          "project_id": "openwukong",
+          "agent_mode": "draft_only"
+        }
+      },
+      "expect": {
+        "matched_pid": 2301,
+        "connector_id": "codex",
+        "workspace_id_prefix": "workspace:openwukong",
+        "primary_scenario_plan": {
+          "scenario_id": "codex.project.submit_task_draft",
+          "route_id": "codex-task-draft",
+          "connector_id": "codex",
+          "proposed_action": "draft_codex_project_task",
+          "requires_confirmation": true,
+          "contains_evidence_id": "codex.task_payload",
+          "contains_blocked_primitive": "submit_task"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "name": "openwukong-vscode-bridge",
+  "displayName": "OpenWukong IDE Bridge",
+  "description": "Local IDE extension bridge for OpenWukong connector-first supervision.",
+  "version": "0.1.0",
+  "publisher": "openwukong-local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:openwukong.startBridge",
+    "onCommand:openwukong.stopBridge"
+  ],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "openwukong.startBridge",
+        "title": "OpenWukong: Start IDE Bridge"
+      },
+      {
+        "command": "openwukong.stopBridge",
+        "title": "OpenWukong: Stop IDE Bridge"
+      }
+    ],
+    "configuration": {
+      "title": "OpenWukong IDE Bridge",
+      "properties": {
+        "openwukong.bridge.port": {
+          "type": "number",
+          "default": 8787,
+          "minimum": 1024,
+          "maximum": 65535,
+          "description": "Local port used by the OpenWukong IDE bridge."
+        },
+        "openwukong.bridge.host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Local host interface used by the OpenWukong IDE bridge."
+        },
+        "openwukong.bridge.sendCommand": {
+          "type": "string",
+          "default": "",
+          "description": "Optional IDE command id that receives OpenWukong send-message payloads."
+        },
+        "openwukong.bridge.allowedCommands": {
+          "type": "array",
+          "default": [
+            "workbench.action.files.save",
+            "vscode.editorChat.start"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "IDE command ids that OpenWukong may execute through /v1/ide/command."
+        },
+        "openwukong.bridge.chatAdapters": {
+          "type": "object",
+          "default": {
+            "cursor": {
+              "label": "Cursor Chat",
+              "commandId": "",
+              "commandCandidates": []
+            },
+            "copilot": {
+              "label": "GitHub Copilot Chat",
+              "commandId": "",
+              "commandCandidates": []
+            },
+            "codex": {
+              "label": "Codex",
+              "commandId": "",
+              "commandCandidates": []
+            }
+          },
+          "description": "Named IDE chat adapters. Configure commandId or commandCandidates after inspecting commands exposed by the current IDE/product."
+        },
+        "openwukong.bridge.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Start the local IDE bridge when the extension activates."
+        }
+      }
+    }
+  }
+}

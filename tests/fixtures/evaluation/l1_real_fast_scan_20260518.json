@@ -1,0 +1,375 @@
+{
+  "suite": "l1-real-fast-scan-20260518",
+  "description": "Recorded from a real L3 read-only fast-scan on 2026-05-18. This fixture contains window metadata only and does not require live desktop control.",
+  "cases": [
+    {
+      "case_id": "real_codex_title_only",
+      "goal": {
+        "window_match": "Codex",
+        "task_name": "Real Codex title-only route",
+        "goal": "Route to a real Codex desktop window observed by L3 fast-scan.",
+        "retry_command": "continue",
+        "connector_hint": "codex"
+      },
+      "states": [
+        {
+          "timestamp": 1779083376.3471296,
+          "pid": 25520,
+          "process_name": "Codex.exe",
+          "project_name": "Codex",
+          "window_title": "Codex"
+        },
+        {
+          "timestamp": 1779083376.349513,
+          "pid": 65780,
+          "process_name": "msedge.exe",
+          "project_name": "SSH\u8fde\u63a5\u865a\u62df\u673a\u95ee\u9898",
+          "window_title": "SSH\u8fde\u63a5\u865a\u62df\u673a\u95ee\u9898 - \u4e2a\u4eba - Microsoft\u200b Edge"
+        },
+        {
+          "timestamp": 1779083376.35109,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "class",
+          "window_title": "class - Antigravity - .env"
+        },
+        {
+          "timestamp": 1779083376.351922,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "TZ",
+          "window_title": "TZ - Antigravity - main.pdf"
+        },
+        {
+          "timestamp": 1779083376.3529334,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "README_USB_DIRECT_BOOT.md - trustusb-2",
+          "window_title": "README_USB_DIRECT_BOOT.md - trustusb-2 [SSH: QLV10-1] - Cursor"
+        },
+        {
+          "timestamp": 1779083376.3537276,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "Cursor",
+          "window_title": "Cursor"
+        },
+        {
+          "timestamp": 1779083376.3542378,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "config",
+          "window_title": "config - PaoPaoHeZi - Cursor"
+        },
+        {
+          "timestamp": 1779083376.3549619,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "time",
+          "window_title": "time - Antigravity - plan.md"
+        }
+      ],
+      "expect": {
+        "matched_pid": 25520,
+        "connector_id": "codex",
+        "workspace_id_prefix": "workspace:codex",
+        "min_match_score": 900
+      }
+    },
+    {
+      "case_id": "real_edge_browser_window",
+      "goal": {
+        "window_match": "SSH\u8fde\u63a5\u865a\u62df\u673a\u95ee\u9898",
+        "task_name": "Real Edge browser route",
+        "goal": "Route to a real Microsoft Edge browser window observed by L3 fast-scan.",
+        "retry_command": "observe page",
+        "connector_hint": "browser"
+      },
+      "states": [
+        {
+          "timestamp": 1779083376.3471296,
+          "pid": 25520,
+          "process_name": "Codex.exe",
+          "project_name": "Codex",
+          "window_title": "Codex"
+        },
+        {
+          "timestamp": 1779083376.349513,
+          "pid": 65780,
+          "process_name": "msedge.exe",
+          "project_name": "SSH\u8fde\u63a5\u865a\u62df\u673a\u95ee\u9898",
+          "window_title": "SSH\u8fde\u63a5\u865a\u62df\u673a\u95ee\u9898 - \u4e2a\u4eba - Microsoft\u200b Edge"
+        },
+        {
+          "timestamp": 1779083376.35109,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "class",
+          "window_title": "class - Antigravity - .env"
+        },
+        {
+          "timestamp": 1779083376.351922,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "TZ",
+          "window_title": "TZ - Antigravity - main.pdf"
+        },
+        {
+          "timestamp": 1779083376.3529334,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "README_USB_DIRECT_BOOT.md - trustusb-2",
+          "window_title": "README_USB_DIRECT_BOOT.md - trustusb-2 [SSH: QLV10-1] - Cursor"
+        },
+        {
+          "timestamp": 1779083376.3537276,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "Cursor",
+          "window_title": "Cursor"
+        },
+        {
+          "timestamp": 1779083376.3542378,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "config",
+          "window_title": "config - PaoPaoHeZi - Cursor"
+        },
+        {
+          "timestamp": 1779083376.3549619,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "time",
+          "window_title": "time - Antigravity - plan.md"
+        }
+      ],
+      "expect": {
+        "matched_pid": 65780,
+        "connector_id": "browser",
+        "min_match_score": 900
+      }
+    },
+    {
+      "case_id": "real_cursor_remote_workspace",
+      "goal": {
+        "window_match": "trustusb-2",
+        "task_name": "Real Cursor remote workspace route",
+        "goal": "Route to a real Cursor remote workspace window observed by L3 fast-scan.",
+        "retry_command": "continue",
+        "connector_hint": "cursor"
+      },
+      "states": [
+        {
+          "timestamp": 1779083376.3471296,
+          "pid": 25520,
+          "process_name": "Codex.exe",
+          "project_name": "Codex",
+          "window_title": "Codex"
+        },
+        {
+          "timestamp": 1779083376.349513,
+          "pid": 65780,
+          "process_name": "msedge.exe",
+          "project_name": "SSH\u8fde\u63a5\u865a\u62df\u673a\u95ee\u9898",
+          "window_title": "SSH\u8fde\u63a5\u865a\u62df\u673a\u95ee\u9898 - \u4e2a\u4eba - Microsoft\u200b Edge"
+        },
+        {
+          "timestamp": 1779083376.35109,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "class",
+          "window_title": "class - Antigravity - .env"
+        },
+        {
+          "timestamp": 1779083376.351922,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "TZ",
+          "window_title": "TZ - Antigravity - main.pdf"
+        },
+        {
+          "timestamp": 1779083376.3529334,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "README_USB_DIRECT_BOOT.md - trustusb-2",
+          "window_title": "README_USB_DIRECT_BOOT.md - trustusb-2 [SSH: QLV10-1] - Cursor"
+        },
+        {
+          "timestamp": 1779083376.3537276,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "Cursor",
+          "window_title": "Cursor"
+        },
+        {
+          "timestamp": 1779083376.3542378,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "config",
+          "window_title": "config - PaoPaoHeZi - Cursor"
+        },
+        {
+          "timestamp": 1779083376.3549619,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "time",
+          "window_title": "time - Antigravity - plan.md"
+        }
+      ],
+      "expect": {
+        "matched_pid": 29220,
+        "connector_id": "cursor",
+        "workspace_id_prefix": "workspace:trustusb-2",
+        "min_match_score": 900
+      }
+    },
+    {
+      "case_id": "real_cursor_local_project",
+      "goal": {
+        "window_match": "PaoPaoHeZi",
+        "task_name": "Real Cursor local project route",
+        "goal": "Route to a real Cursor local project window observed by L3 fast-scan.",
+        "retry_command": "continue",
+        "connector_hint": "cursor"
+      },
+      "states": [
+        {
+          "timestamp": 1779083376.3471296,
+          "pid": 25520,
+          "process_name": "Codex.exe",
+          "project_name": "Codex",
+          "window_title": "Codex"
+        },
+        {
+          "timestamp": 1779083376.349513,
+          "pid": 65780,
+          "process_name": "msedge.exe",
+          "project_name": "SSH\u8fde\u63a5\u865a\u62df\u673a\u95ee\u9898",
+          "window_title": "SSH\u8fde\u63a5\u865a\u62df\u673a\u95ee\u9898 - \u4e2a\u4eba - Microsoft\u200b Edge"
+        },
+        {
+          "timestamp": 1779083376.35109,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "class",
+          "window_title": "class - Antigravity - .env"
+        },
+        {
+          "timestamp": 1779083376.351922,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "TZ",
+          "window_title": "TZ - Antigravity - main.pdf"
+        },
+        {
+          "timestamp": 1779083376.3529334,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "README_USB_DIRECT_BOOT.md - trustusb-2",
+          "window_title": "README_USB_DIRECT_BOOT.md - trustusb-2 [SSH: QLV10-1] - Cursor"
+        },
+        {
+          "timestamp": 1779083376.3537276,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "Cursor",
+          "window_title": "Cursor"
+        },
+        {
+          "timestamp": 1779083376.3542378,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "config",
+          "window_title": "config - PaoPaoHeZi - Cursor"
+        },
+        {
+          "timestamp": 1779083376.3549619,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "time",
+          "window_title": "time - Antigravity - plan.md"
+        }
+      ],
+      "expect": {
+        "matched_pid": 29220,
+        "connector_id": "cursor",
+        "workspace_id_prefix": "workspace:paopaohezi",
+        "min_match_score": 900
+      }
+    },
+    {
+      "case_id": "real_antigravity_fallback",
+      "goal": {
+        "window_match": "time",
+        "task_name": "Real Antigravity fallback route",
+        "goal": "Route a real Antigravity window through the generic UIA IDE fallback.",
+        "retry_command": "continue",
+        "connector_hint": "auto"
+      },
+      "states": [
+        {
+          "timestamp": 1779083376.3471296,
+          "pid": 25520,
+          "process_name": "Codex.exe",
+          "project_name": "Codex",
+          "window_title": "Codex"
+        },
+        {
+          "timestamp": 1779083376.349513,
+          "pid": 65780,
+          "process_name": "msedge.exe",
+          "project_name": "SSH\u8fde\u63a5\u865a\u62df\u673a\u95ee\u9898",
+          "window_title": "SSH\u8fde\u63a5\u865a\u62df\u673a\u95ee\u9898 - \u4e2a\u4eba - Microsoft\u200b Edge"
+        },
+        {
+          "timestamp": 1779083376.35109,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "class",
+          "window_title": "class - Antigravity - .env"
+        },
+        {
+          "timestamp": 1779083376.351922,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "TZ",
+          "window_title": "TZ - Antigravity - main.pdf"
+        },
+        {
+          "timestamp": 1779083376.3529334,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "README_USB_DIRECT_BOOT.md - trustusb-2",
+          "window_title": "README_USB_DIRECT_BOOT.md - trustusb-2 [SSH: QLV10-1] - Cursor"
+        },
+        {
+          "timestamp": 1779083376.3537276,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "Cursor",
+          "window_title": "Cursor"
+        },
+        {
+          "timestamp": 1779083376.3542378,
+          "pid": 29220,
+          "process_name": "Cursor.exe",
+          "project_name": "config",
+          "window_title": "config - PaoPaoHeZi - Cursor"
+        },
+        {
+          "timestamp": 1779083376.3549619,
+          "pid": 33832,
+          "process_name": "Antigravity.exe",
+          "project_name": "time",
+          "window_title": "time - Antigravity - plan.md"
+        }
+      ],
+      "expect": {
+        "matched_pid": 33832,
+        "connector_id": "uia-ide",
+        "workspace_id_prefix": "workspace:time",
+        "min_match_score": 1000
+      }
+    }
+  ]
+}

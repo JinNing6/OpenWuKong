@@ -1,0 +1,112 @@
+{
+  "suite": "l1-broker-managed-process-lifecycle",
+  "cases": [
+    {
+      "case_id": "broker_managed_http_server_visible",
+      "goal": {
+        "window_match": "openwukong-terminal",
+        "task_name": "Managed HTTP server",
+        "goal": "Plan a long-running background HTTP server and verify its broker inventory visibility.",
+        "retry_command": "do not parse this text",
+        "connector_hint": "terminal",
+        "workspace_path": ".",
+        "command_operation": "raw.argv",
+        "command_argv": [
+          "python",
+          "-m",
+          "http.server",
+          "8765"
+        ],
+        "command_effects": [
+          "network"
+        ],
+        "command_profile": "network-enabled",
+        "command_run_mode": "long-running",
+        "command_process_storage_path": "logs/runtime/processes.json"
+      },
+      "states": [],
+      "process_broker_snapshots": [
+        {
+          "mode": "command-process-broker-snapshot",
+          "safety_mode": "read_only",
+          "control_allowed": false,
+          "control_attempts": 0,
+          "active_count": 1,
+          "stale_count": 0,
+          "processes": [
+            {
+              "process_id": "proc-l1-http",
+              "pid": 8765,
+              "argv": [
+                "python",
+                "-m",
+                "http.server",
+                "8765"
+              ],
+              "cwd": ".",
+              "reason": "Managed HTTP server: Plan a long-running background HTTP server and verify its broker inventory visibility.",
+              "effects": [
+                "network"
+              ],
+              "ownership": {
+                "owned": true,
+                "ownership_source": "l1-fixture",
+                "route_id": "terminal-native-session",
+                "connector_id": "terminal",
+                "workspace_root": ".",
+                "cleanup_ready": true
+              },
+              "running": true,
+              "exit_code": null,
+              "started_at": 1780000000.0,
+              "restored": true
+            }
+          ],
+          "stale_processes": [],
+          "broker": {
+            "workspace_root": ".",
+            "storage_path": "logs/runtime/processes.json",
+            "profile_id": "network-enabled",
+            "timeout_sec": 60.0,
+            "audit_log_path": "",
+            "require_owned_session": false
+          }
+        }
+      ],
+      "expect": {
+        "matched_pid": 0,
+        "connector_id": "terminal",
+        "command_plan": {
+          "ok": true,
+          "operation": "raw.argv",
+          "profile_id": "network-enabled",
+          "effects": [
+            "network"
+          ],
+          "argv": [
+            "python",
+            "-m",
+            "http.server",
+            "8765"
+          ]
+        },
+        "session_registry": {
+          "session_count": 1,
+          "app_family_counts": {
+            "managed-process": 1
+          },
+          "preferred_route_counts": {
+            "command-process-broker": 1
+          },
+          "ownership_counts": {
+            "owned": 1,
+            "unowned": 0
+          },
+          "contains_session_id": "command-process:proc-l1-http",
+          "contains_capability_id": "command_process_broker",
+          "contains_action_id": "stop_process"
+        }
+      }
+    }
+  ]
+}
