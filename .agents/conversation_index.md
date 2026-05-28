@@ -5048,3 +5048,56 @@ When a new conversation starts in this repo:
       background sending, so a WeChat native bridge/hook or controlled
       foreground-prep plus confirmation remains required before background
       write actions can be enabled
+- 2026-05-28 added real no-loss Agent CLI background probes:
+  - implementation:
+    - added `openwukong.evaluation.agent_cli_real_no_loss`, a no-focus
+      real runner for Codex/Claude CLI transports
+    - the runner creates owned temporary workspaces under `logs\runtime`,
+      sends a marker-based no-loss prompt through existing guarded
+      `run_agent_conversation`, records foreground HWND before/after, checks
+      workspace file deltas, and writes ASCII-safe JSON artifacts
+    - statuses classify execution outcomes without treating environment
+      blockers as control failures:
+      `verified`, `cli_auth_required`, `cli_access_denied`,
+      `cli_executable_not_found`, `background_cli_unavailable`,
+      `skipped_requires_cli_execution_opt_in`, `failed_workspace_mutated`
+  - official-doc basis:
+    - Anthropic Claude Code CLI supports non-interactive `-p`, JSON output,
+      max turns, and `--permission-mode plan`
+    - local Codex CLI help was blocked by WindowsApps alias access, so the
+      runner relies on existing local surface resolution and the established
+      Codex no-loss command shape:
+      `--sandbox read-only --ask-for-approval never -C <owned-workspace> exec
+      --skip-git-repo-check --ephemeral --ignore-rules --json`
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.agent_cli_real_no_loss --agent claude --agent codex --output-root logs\runtime\agent-cli-real-no-loss-r1 --output logs\runtime\agent-cli-real-no-loss-r1\report.json --allow-cli-execution --timeout-sec 45 --json`
+    - result:
+      `passed_cases=2/2`, `failed_cases=0`, `verified_cases=1`,
+      `agent_command_attempts=2`, `window_input_attempts=0`,
+      `foreground_focus_stable=true`
+    - Codex CLI:
+      `status=verified`, `real_verified=true`, returned
+      `OPENWUKONG_AGENT_CLI_NO_LOSS: PASS`, workspace stayed clean, foreground
+      HWND stayed stable
+    - Claude CLI:
+      `status=cli_auth_required`, `real_verified=false`, command returned
+      `Not logged in - Please run /login`, workspace stayed clean, foreground
+      HWND stayed stable
+    - report parse verification:
+      PowerShell `ConvertFrom-Json` parsed
+      `logs\runtime\agent-cli-real-no-loss-r1\report.json` and confirmed per
+      case status, command attempts, zero window input, clean workspace, and
+      stable foreground focus
+  - verification:
+    - `python -m unittest discover tests`: `432 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK
+  - current conclusion:
+    - Codex now has a real verified no-focus background task path through the
+      standalone CLI transport
+    - Claude CLI is structurally ready but blocked by local authentication,
+      while Claude Desktop remains app-bridge/foreground-gated
+    - this advances the target state for agent products without weakening the
+      rule that explicit app/desktop requests must not silently fall back to
+      CLI
