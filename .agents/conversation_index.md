@@ -4646,3 +4646,44 @@ When a new conversation starts in this repo:
       touching real apps
     - only after bridge readiness is proven, add a gated real app-message
       sender path
+- 2026-05-28 added the app-side native bridge dry-run contract:
+  - implementation:
+    - added `openwukong.control.agent_app_bridge` with
+      `AgentAppBridgeRequest`, `AgentAppBridgeDryRunReport`, and
+      `AgentAppBridgeDryRunAdapter`
+    - the bridge request records schema version, request id, selected agent
+      transport, target UIA evidence, native endpoint readiness, no-focus
+      screenshot stability, payload, and required/forbidden result markers
+    - `run_agent_conversation(...)` now attaches `app_bridge_dry_run` to both
+      returned reports and saved draft artifacts when an app/desktop surface
+      is bridge-required and the read-only app-surface probe returned evidence
+    - no real bridge send is attempted in this layer:
+      `control_attempts=0` and `bridge_send_attempts=0`
+  - TDD coverage added:
+    - ready native/UIA probe builds a dry-run bridge payload without attempting
+      a send
+    - missing native endpoint and missing target evidence are reported as
+      explicit dry-run decisions instead of falling back to foreground or CLI
+    - conversation drafts persist the bridge dry-run contract alongside the
+      existing app-surface probe diagnostics
+  - verification:
+    - `python -m unittest tests.test_agent_app_bridge tests.test_agent_conversation.AgentConversationTests.test_app_surface_probe_ready_attaches_bridge_dry_run_contract`: OK
+    - `python -m unittest tests.test_agent_conversation tests.test_agent_app_bridge tests.test_agent_native_connector_probe`: OK
+    - `python -m compileall -q src tests`: OK
+    - `python -m unittest discover tests`: `405 tests OK`
+  - reusable pattern:
+    - updated global skill `desktop-background-control-testing` so future app
+      send work must first expose a dry-run bridge contract with target,
+      endpoint, payload, marker, and zero-send evidence
+  - current conclusion:
+    - the control layer now has a stable, audited contract for app-side agent
+      message submission
+    - this is still not a real sender; it is the gate that prevents imprecise
+      app UI typing and ensures a future sender only runs against proven
+      native endpoint readiness
+  - next high-value steps:
+    - implement the first real native bridge adapter behind this contract for
+      an owned/exposed endpoint only
+    - add post-send readback verification against required markers before any
+      app-side execution is marked accepted
+    - keep Cursor/VS Code out of near-term scope per the latest user direction

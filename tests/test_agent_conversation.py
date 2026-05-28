@@ -299,6 +299,50 @@ class AgentConversationTests(unittest.TestCase):
             1,
         )
 
+    def test_app_surface_probe_ready_attaches_bridge_dry_run_contract(self):
+        resolver = _resolver_with_claude_desktop()
+        executor = _FakeCommandExecutor()
+
+        def _fake_probe_runner(**kwargs):
+            del kwargs
+            return _ready_native_bridge_probe()
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = run_agent_conversation(
+                agent="claude desktop",
+                project_name="openwukong",
+                task_name="desktop-message",
+                message="Send this through the app surface.",
+                required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+                workspace_root=str(root),
+                output_root=str(root / "out"),
+                execute=True,
+                allow_agent_task=True,
+                confirmed_effect_ids=(
+                    "agent_task_submission.submit_task",
+                    "agent_start.start_agent",
+                ),
+                resolver=resolver,
+                command_executor=executor,
+                app_surface_probe_runner=_fake_probe_runner,
+            )
+            data = report.to_dict()
+            draft = json.loads(Path(data["draft_artifact_path"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(data["decision"], "agent_conversation_requires_app_bridge_or_foreground")
+        self.assertEqual(data["agent_command_attempts"], 0)
+        self.assertEqual(data["app_bridge_dry_run"]["decision"], "app_bridge_dry_run_ready")
+        self.assertEqual(data["app_bridge_dry_run"]["bridge_send_attempts"], 0)
+        self.assertEqual(
+            data["app_bridge_dry_run"]["request"]["payload"]["required_markers"],
+            ["OPENWUKONG_ACCEPTANCE: PASS"],
+        )
+        self.assertEqual(
+            draft["app_bridge_dry_run"]["request"]["target"]["hwnd"],
+            138024,
+        )
+
     def test_main_writes_json_report(self):
         resolver = _resolver_with_codex_cli()
 
@@ -488,6 +532,45 @@ def _resolver_with_claude_desktop():
             ),
         )
     )
+
+
+def _ready_native_bridge_probe():
+    return {
+        "mode": "agent-native-connector-probe",
+        "decision": "agent_native_connector_ready",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "endpoint_count": 1,
+        "ready_endpoint_count": 1,
+        "endpoints": [
+            {
+                "debugger_url": "http://127.0.0.1:9333",
+                "ready": True,
+                "targets": [
+                    {
+                        "target_id": "page-1",
+                        "title": "Claude",
+                        "url": "app://claude/index.html",
+                        "ready": True,
+                    }
+                ],
+            }
+        ],
+        "app_uia_probe": {
+            "decision": "agent_app_uia_ready",
+            "target_matched": True,
+            "semantic_composer_count": 1,
+            "background_screenshot_focus_stable": True,
+            "matched_windows": [
+                {
+                    "process_name": "claude.exe",
+                    "pid": 77064,
+                    "window_title": "Claude",
+                    "hwnd": 138024,
+                }
+            ],
+        },
+    }
 
 
 if __name__ == "__main__":

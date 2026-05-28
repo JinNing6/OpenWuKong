@@ -44,6 +44,13 @@ from openwukong.control.agent_surface import (
     AgentTransportSurface,
     build_agent_surface_binding,
 )
+from openwukong.control.agent_app_bridge import (
+    BRIDGE_SCHEMA_VERSION,
+    AgentAppBridgeDryRunAdapter,
+    AgentAppBridgeDryRunReport,
+    AgentAppBridgeRequest,
+    build_agent_app_bridge_request,
+)
 from openwukong.control.agent_conversation import (
     DEFAULT_ACCEPTANCE_MARKER,
     AgentConversationAcceptanceReport,
@@ -140,6 +147,7 @@ __all__ = [
     "AGENT_TASK_EFFECT_IDS",
     "AGENT_COMMAND_EFFECTS",
     "DEFAULT_ACCEPTANCE_MARKER",
+    "BRIDGE_SCHEMA_VERSION",
     "AppIdentity",
     "AppIdentityRegistry",
     "AppPathsRegistryCandidateProvider",
@@ -149,6 +157,9 @@ __all__ = [
     "AppResolutionReport",
     "AgentSurfaceBindingReport",
     "AgentTransportSurface",
+    "AgentAppBridgeDryRunAdapter",
+    "AgentAppBridgeDryRunReport",
+    "AgentAppBridgeRequest",
     "AgentCommandPlan",
     "AgentTaskRunReport",
     "AgentConversationAcceptanceReport",
@@ -207,6 +218,7 @@ __all__ = [
     "WindowsRunningProcessCandidateProvider",
     "WindowsStartAppsCandidateProvider",
     "build_foreground_takeover_request",
+    "build_agent_app_bridge_request",
     "build_agent_surface_binding",
     "build_agent_command_plan",
     "compose_agent_conversation_message",

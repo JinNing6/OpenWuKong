@@ -10,6 +10,10 @@ import uuid
 from pathlib import Path
 from typing import Callable
 
+from openwukong.control.agent_app_bridge import (
+    AgentAppBridgeDryRunAdapter,
+    build_agent_app_bridge_request,
+)
 from openwukong.control.agent_task import AgentTaskRunReport, run_agent_task
 from openwukong.control.app_resolution import WindowsAppResolver
 from openwukong.control.foreground_takeover import ForegroundTakeoverRequest
@@ -69,6 +73,7 @@ class AgentConversationRunReport:
     draft_artifact_path: str = ""
     foreground_takeover_request: ForegroundTakeoverRequest | None = None
     app_surface_probe: dict = dataclasses.field(default_factory=dict)
+    app_bridge_dry_run: dict = dataclasses.field(default_factory=dict)
     elapsed_ms: float = 0.0
 
     @property
@@ -146,6 +151,7 @@ class AgentConversationRunReport:
                 else {}
             ),
             "app_surface_probe": dict(self.app_surface_probe),
+            "app_bridge_dry_run": dict(self.app_bridge_dry_run),
             "acceptance_report": self.acceptance_report.to_dict(),
             "agent_task_report": self.agent_task_report.to_dict(),
             "elapsed_ms": round(self.elapsed_ms, 3),
@@ -219,6 +225,18 @@ def run_agent_conversation(
         screenshot_dir=str(app_surface_screenshot_dir or "").strip(),
         enabled=bool(foreground_request),
     )
+    app_bridge_dry_run = _build_app_bridge_dry_run(
+        task_report=task_report,
+        agent=str(agent or "").strip(),
+        project_name=str(project_name or "").strip(),
+        task_name=str(task_name or "").strip(),
+        message=str(message or "").strip(),
+        composed_message=composed,
+        required_markers=normalized_required,
+        forbidden_markers=normalized_forbidden,
+        app_surface_probe=app_surface_probe,
+        enabled=bool(foreground_request and app_surface_probe),
+    )
     draft_path = _write_conversation_draft(
         task_report=task_report,
         agent=str(agent or "").strip(),
@@ -232,6 +250,7 @@ def run_agent_conversation(
         acceptance_report=acceptance,
         foreground_takeover_request=foreground_request,
         app_surface_probe=app_surface_probe,
+        app_bridge_dry_run=app_bridge_dry_run,
     )
     return AgentConversationRunReport(
         agent=str(agent or "").strip(),
@@ -247,6 +266,7 @@ def run_agent_conversation(
         draft_artifact_path=draft_path,
         foreground_takeover_request=foreground_request,
         app_surface_probe=app_surface_probe,
+        app_bridge_dry_run=app_bridge_dry_run,
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
 
@@ -324,6 +344,7 @@ def _write_conversation_draft(
     acceptance_report: AgentConversationAcceptanceReport,
     foreground_takeover_request: ForegroundTakeoverRequest | None,
     app_surface_probe: dict,
+    app_bridge_dry_run: dict,
 ) -> str:
     root = Path(task_report.output_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -348,6 +369,7 @@ def _write_conversation_draft(
             foreground_takeover_request.to_dict() if foreground_takeover_request else {}
         ),
         "app_surface_probe": dict(app_surface_probe),
+        "app_bridge_dry_run": dict(app_bridge_dry_run),
         "acceptance_report": acceptance_report.to_dict(),
         "agent_task_report": task_report.to_dict(),
     }
@@ -374,6 +396,37 @@ def _build_app_foreground_request(task_report: AgentTaskRunReport) -> Foreground
         ),
         request_reason="agent_app_conversation_requires_foreground_or_native_bridge",
     )
+
+
+def _build_app_bridge_dry_run(
+    *,
+    task_report: AgentTaskRunReport,
+    agent: str,
+    project_name: str,
+    task_name: str,
+    message: str,
+    composed_message: str,
+    required_markers: tuple[str, ...],
+    forbidden_markers: tuple[str, ...],
+    app_surface_probe: dict,
+    enabled: bool,
+) -> dict:
+    selected = task_report.surface_binding.selected_transport
+    if not enabled or selected is None:
+        return {}
+    request = build_agent_app_bridge_request(
+        agent=agent,
+        agent_id=task_report.surface_binding.agent_id,
+        project_name=project_name,
+        task_name=task_name,
+        message=message,
+        composed_message=composed_message,
+        selected_transport=selected.to_dict(),
+        app_surface_probe=app_surface_probe,
+        required_markers=required_markers,
+        forbidden_markers=forbidden_markers,
+    )
+    return AgentAppBridgeDryRunAdapter().prepare(request).to_dict()
 
 
 def _requires_app_bridge(task_report: AgentTaskRunReport) -> bool:
