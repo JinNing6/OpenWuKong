@@ -12,6 +12,7 @@ from typing import Callable
 
 from openwukong.control.agent_app_bridge import (
     AgentAppBridgeDryRunAdapter,
+    AgentAppBridgeRequest,
     build_agent_app_bridge_request,
 )
 from openwukong.control.agent_task import AgentTaskRunReport, run_agent_task
@@ -23,6 +24,7 @@ DEFAULT_ACCEPTANCE_MARKER = "OPENWUKONG_ACCEPTANCE: PASS"
 
 
 AppSurfaceProbeRunner = Callable[..., object]
+AppBridgeSender = Callable[[AgentAppBridgeRequest], object]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -74,6 +76,7 @@ class AgentConversationRunReport:
     foreground_takeover_request: ForegroundTakeoverRequest | None = None
     app_surface_probe: dict = dataclasses.field(default_factory=dict)
     app_bridge_dry_run: dict = dataclasses.field(default_factory=dict)
+    app_bridge_send_report: dict = dataclasses.field(default_factory=dict)
     elapsed_ms: float = 0.0
 
     @property
@@ -98,6 +101,8 @@ class AgentConversationRunReport:
 
     @property
     def ok(self) -> bool:
+        if self.app_bridge_send_report:
+            return bool(self.app_bridge_send_report.get("ok", False))
         if self.decision == "agent_conversation_requires_app_bridge_or_foreground":
             return False
         if self.agent_task_report.execution_attempted:
@@ -106,6 +111,15 @@ class AgentConversationRunReport:
 
     @property
     def decision(self) -> str:
+        if self.app_bridge_send_report:
+            bridge_decision = str(self.app_bridge_send_report.get("decision", "") or "")
+            if bridge_decision == "app_bridge_send_accepted":
+                return "conversation_app_bridge_executed_and_accepted"
+            if bridge_decision == "app_bridge_message_submitted_acceptance_pending":
+                return "conversation_app_bridge_executed_acceptance_pending"
+            if int(self.app_bridge_send_report.get("bridge_send_attempts", 0) or 0) > 0:
+                return "conversation_app_bridge_execution_failed"
+            return bridge_decision or "conversation_app_bridge_not_executed"
         if _requires_app_bridge(self.agent_task_report):
             return "agent_conversation_requires_app_bridge_or_foreground"
         task_decision = self.agent_task_report.decision
@@ -152,6 +166,7 @@ class AgentConversationRunReport:
             ),
             "app_surface_probe": dict(self.app_surface_probe),
             "app_bridge_dry_run": dict(self.app_bridge_dry_run),
+            "app_bridge_send_report": dict(self.app_bridge_send_report),
             "acceptance_report": self.acceptance_report.to_dict(),
             "agent_task_report": self.agent_task_report.to_dict(),
             "elapsed_ms": round(self.elapsed_ms, 3),
@@ -177,6 +192,7 @@ def run_agent_conversation(
     command_executor: object | None = None,
     app_surface_probe_runner: AppSurfaceProbeRunner | None = None,
     app_surface_screenshot_dir: str = "",
+    app_bridge_sender: AppBridgeSender | object | None = None,
     timeout_sec: float = 120.0,
     audit_log_path: str = "",
 ) -> AgentConversationRunReport:
@@ -225,7 +241,7 @@ def run_agent_conversation(
         screenshot_dir=str(app_surface_screenshot_dir or "").strip(),
         enabled=bool(foreground_request),
     )
-    app_bridge_dry_run = _build_app_bridge_dry_run(
+    app_bridge_request = _build_app_bridge_request(
         task_report=task_report,
         agent=str(agent or "").strip(),
         project_name=str(project_name or "").strip(),
@@ -236,6 +252,17 @@ def run_agent_conversation(
         forbidden_markers=normalized_forbidden,
         app_surface_probe=app_surface_probe,
         enabled=bool(foreground_request and app_surface_probe),
+    )
+    app_bridge_dry_run = _build_app_bridge_dry_run(app_bridge_request)
+    app_bridge_send_report = _run_app_bridge_sender(
+        sender=app_bridge_sender,
+        request=app_bridge_request,
+        enabled=bool(
+            execute
+            and not dry_run
+            and task_report.side_effect_gate.allowed
+            and app_bridge_dry_run
+        ),
     )
     draft_path = _write_conversation_draft(
         task_report=task_report,
@@ -251,6 +278,7 @@ def run_agent_conversation(
         foreground_takeover_request=foreground_request,
         app_surface_probe=app_surface_probe,
         app_bridge_dry_run=app_bridge_dry_run,
+        app_bridge_send_report=app_bridge_send_report,
     )
     return AgentConversationRunReport(
         agent=str(agent or "").strip(),
@@ -267,6 +295,7 @@ def run_agent_conversation(
         foreground_takeover_request=foreground_request,
         app_surface_probe=app_surface_probe,
         app_bridge_dry_run=app_bridge_dry_run,
+        app_bridge_send_report=app_bridge_send_report,
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
 
@@ -345,6 +374,7 @@ def _write_conversation_draft(
     foreground_takeover_request: ForegroundTakeoverRequest | None,
     app_surface_probe: dict,
     app_bridge_dry_run: dict,
+    app_bridge_send_report: dict,
 ) -> str:
     root = Path(task_report.output_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -370,6 +400,7 @@ def _write_conversation_draft(
         ),
         "app_surface_probe": dict(app_surface_probe),
         "app_bridge_dry_run": dict(app_bridge_dry_run),
+        "app_bridge_send_report": dict(app_bridge_send_report),
         "acceptance_report": acceptance_report.to_dict(),
         "agent_task_report": task_report.to_dict(),
     }
@@ -398,7 +429,7 @@ def _build_app_foreground_request(task_report: AgentTaskRunReport) -> Foreground
     )
 
 
-def _build_app_bridge_dry_run(
+def _build_app_bridge_request(
     *,
     task_report: AgentTaskRunReport,
     agent: str,
@@ -410,11 +441,11 @@ def _build_app_bridge_dry_run(
     forbidden_markers: tuple[str, ...],
     app_surface_probe: dict,
     enabled: bool,
-) -> dict:
+) -> AgentAppBridgeRequest | None:
     selected = task_report.surface_binding.selected_transport
     if not enabled or selected is None:
-        return {}
-    request = build_agent_app_bridge_request(
+        return None
+    return build_agent_app_bridge_request(
         agent=agent,
         agent_id=task_report.surface_binding.agent_id,
         project_name=project_name,
@@ -426,7 +457,51 @@ def _build_app_bridge_dry_run(
         required_markers=required_markers,
         forbidden_markers=forbidden_markers,
     )
+
+
+def _build_app_bridge_dry_run(request: AgentAppBridgeRequest | None) -> dict:
+    if request is None:
+        return {}
     return AgentAppBridgeDryRunAdapter().prepare(request).to_dict()
+
+
+def _run_app_bridge_sender(
+    *,
+    sender: AppBridgeSender | object | None,
+    request: AgentAppBridgeRequest | None,
+    enabled: bool,
+) -> dict:
+    if not enabled or request is None or sender is None:
+        return {}
+    try:
+        send = getattr(sender, "send", None)
+        if callable(send):
+            return _report_to_dict(send(request))
+        if callable(sender):
+            return _report_to_dict(sender(request))
+        return {
+            "mode": "agent-app-bridge-send",
+            "safety_mode": "native_bridge_execute",
+            "ok": False,
+            "decision": "app_bridge_sender_not_callable",
+            "control_attempts": 0,
+            "window_input_attempts": 0,
+            "bridge_send_attempts": 0,
+            "native_call_attempts": 0,
+        }
+    except Exception as exc:
+        return {
+            "mode": "agent-app-bridge-send",
+            "safety_mode": "native_bridge_execute",
+            "ok": False,
+            "decision": "app_bridge_sender_failed",
+            "control_attempts": 0,
+            "window_input_attempts": 0,
+            "bridge_send_attempts": 1,
+            "native_call_attempts": 1,
+            "error": str(exc) or exc.__class__.__name__,
+            "request": request.to_dict(),
+        }
 
 
 def _requires_app_bridge(task_report: AgentTaskRunReport) -> bool:

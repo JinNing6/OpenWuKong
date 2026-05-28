@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import dataclasses
+import time
 import uuid
+
+from openwukong.connectors.browser import BrowserDevToolsClient, BrowserDevToolsTarget
 
 
 BRIDGE_SCHEMA_VERSION = "agent-app-bridge-v1"
@@ -197,6 +200,166 @@ class AgentAppBridgeDryRunAdapter:
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class AgentAppBridgeSendReport:
+    request: AgentAppBridgeRequest
+    dry_run_report: AgentAppBridgeDryRunReport
+    target: BrowserDevToolsTarget | None = None
+    action_result: dict = dataclasses.field(default_factory=dict)
+    native_call_attempts: int = 0
+    error: str = ""
+    elapsed_ms: float = 0.0
+
+    @property
+    def mode(self) -> str:
+        return "agent-app-bridge-send"
+
+    @property
+    def safety_mode(self) -> str:
+        return "native_bridge_execute"
+
+    @property
+    def control_allowed(self) -> bool:
+        return bool(self.dry_run_report.ok and self.target is not None and not self.error)
+
+    @property
+    def control_attempts(self) -> int:
+        return 0
+
+    @property
+    def window_input_attempts(self) -> int:
+        return 0
+
+    @property
+    def bridge_send_attempts(self) -> int:
+        return 1 if self.native_call_attempts else 0
+
+    @property
+    def readback_text(self) -> str:
+        return _first_text(
+            self.action_result,
+            "readbackText",
+            "readback_text",
+            "pageText",
+            "page_text",
+            "text",
+        )
+
+    @property
+    def missing_required_markers(self) -> tuple[str, ...]:
+        text = self.readback_text
+        return tuple(marker for marker in self.request.required_markers if marker not in text)
+
+    @property
+    def present_forbidden_markers(self) -> tuple[str, ...]:
+        text = self.readback_text
+        return tuple(marker for marker in self.request.forbidden_markers if marker in text)
+
+    @property
+    def accepted(self) -> bool:
+        return not self.missing_required_markers and not self.present_forbidden_markers
+
+    @property
+    def ok(self) -> bool:
+        return self.decision == "app_bridge_send_accepted"
+
+    @property
+    def decision(self) -> str:
+        if not self.dry_run_report.ok:
+            return "app_bridge_request_not_ready"
+        if self.error:
+            return "app_bridge_send_failed"
+        if self.target is None:
+            return "app_bridge_native_target_not_ready"
+        if not self.action_result.get("composerFound"):
+            return "app_bridge_composer_not_found"
+        if not self.action_result.get("messageSet"):
+            return "app_bridge_message_not_verified"
+        if not self.action_result.get("submitAttempted"):
+            return "app_bridge_submit_not_verified"
+        if self.action_result.get("submitVerified") is False:
+            return "app_bridge_submit_not_verified"
+        if self.present_forbidden_markers:
+            return "app_bridge_forbidden_marker_present"
+        if self.missing_required_markers:
+            return "app_bridge_message_submitted_acceptance_pending"
+        return "app_bridge_send_accepted"
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "safety_mode": self.safety_mode,
+            "ok": self.ok,
+            "decision": self.decision,
+            "accepted": self.accepted,
+            "control_allowed": self.control_allowed,
+            "control_attempts": self.control_attempts,
+            "window_input_attempts": self.window_input_attempts,
+            "bridge_send_attempts": self.bridge_send_attempts,
+            "native_call_attempts": int(self.native_call_attempts or 0),
+            "missing_required_markers": list(self.missing_required_markers),
+            "present_forbidden_markers": list(self.present_forbidden_markers),
+            "target": _devtools_target_to_dict(self.target),
+            "action_result": dict(self.action_result),
+            "error": self.error,
+            "dry_run_report": self.dry_run_report.to_dict(),
+            "request": self.request.to_dict(),
+            "elapsed_ms": round(self.elapsed_ms, 3),
+        }
+
+
+class AgentAppBridgeCdpAdapter:
+    def __init__(self, *, devtools_client: BrowserDevToolsClient | None = None):
+        self._devtools_client = devtools_client or BrowserDevToolsClient()
+
+    def send(self, request: AgentAppBridgeRequest) -> AgentAppBridgeSendReport:
+        started = time.perf_counter()
+        dry_run = AgentAppBridgeDryRunAdapter().prepare(request)
+        if not dry_run.ok:
+            return AgentAppBridgeSendReport(
+                request=request,
+                dry_run_report=dry_run,
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+
+        target = _select_devtools_target(request.endpoint)
+        if target is None:
+            return AgentAppBridgeSendReport(
+                request=request,
+                dry_run_report=dry_run,
+                error="devtools_target_not_ready",
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+
+        debugger_url = str(request.endpoint.get("debugger_url", "") or "").strip()
+        native_call_attempts = 1
+        try:
+            result = self._devtools_client.evaluate(
+                debugger_url,
+                target,
+                _bridge_send_expression(request.composed_message or request.message),
+            )
+            action_result = _remote_object_value(result)
+        except Exception as exc:
+            return AgentAppBridgeSendReport(
+                request=request,
+                dry_run_report=dry_run,
+                target=target,
+                native_call_attempts=native_call_attempts,
+                error=str(exc) or exc.__class__.__name__,
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+
+        return AgentAppBridgeSendReport(
+            request=request,
+            dry_run_report=dry_run,
+            target=target,
+            action_result=action_result,
+            native_call_attempts=native_call_attempts,
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
+
+
 def build_agent_app_bridge_request(
     *,
     agent: str,
@@ -263,6 +426,131 @@ def _endpoint_summary(endpoint: dict) -> dict:
     }
 
 
+def _select_devtools_target(endpoint: dict) -> BrowserDevToolsTarget | None:
+    targets = endpoint.get("targets")
+    if not isinstance(targets, list):
+        return None
+    candidates: list[BrowserDevToolsTarget] = []
+    for item in targets:
+        if not isinstance(item, dict):
+            continue
+        data = dict(item)
+        if "id" not in data and "target_id" in data:
+            data["id"] = data["target_id"]
+        target = BrowserDevToolsTarget.from_dict(data)
+        if target.web_socket_debugger_url:
+            candidates.append(target)
+    if not candidates:
+        return None
+    for target in candidates:
+        if (target.type or "").lower() in {"page", "webview"}:
+            return target
+    return candidates[0]
+
+
+def _remote_object_value(result: dict) -> dict:
+    if not isinstance(result, dict):
+        return {}
+    value = result.get("value")
+    if isinstance(value, dict):
+        return dict(value)
+    if result.get("type") == "exception":
+        return {"exception": result.get("exceptionDetails") or result}
+    return {"value": value}
+
+
+def _bridge_send_expression(message: str) -> str:
+    message_json = json_dumps_ascii(str(message or ""))
+    return (
+        "(() => {"
+        f"const message = {message_json};"
+        "const visible = (el) => {"
+        "if (!el) return false;"
+        "const rect = el.getBoundingClientRect();"
+        "const style = getComputedStyle(el);"
+        "return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';"
+        "};"
+        "const readText = (el) => {"
+        "if (!el) return '';"
+        "if ('value' in el) return String(el.value || '');"
+        "return String(el.innerText || el.textContent || '');"
+        "};"
+        "const setText = (el, text) => {"
+        "if ('value' in el) {"
+        "const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;"
+        "if (setter) setter.call(el, text); else el.value = text;"
+        "} else {"
+        "el.textContent = text;"
+        "}"
+        "const inputEvent = typeof InputEvent === 'function' "
+        "? new InputEvent('input', {bubbles: true, inputType: 'insertText', data: text}) "
+        ": new Event('input', {bubbles: true});"
+        "el.dispatchEvent(inputEvent);"
+        "el.dispatchEvent(new Event('change', {bubbles: true}));"
+        "};"
+        "const composerSelectors = ["
+        "'textarea',"
+        "'[contenteditable=\"true\"]',"
+        "'[role=\"textbox\"]',"
+        "'input[type=\"text\"]',"
+        "'input:not([type])'"
+        "];"
+        "const composers = Array.from(document.querySelectorAll(composerSelectors.join(','))).filter(visible);"
+        "const composer = composers[0] || null;"
+        "if (!composer) {"
+        "return {composerFound: false, composerCandidateCount: 0, messageSet: false, submitAttempted: false, submitVerified: false, readbackText: ''};"
+        "}"
+        "setText(composer, message);"
+        "const composerText = readText(composer);"
+        "const messageSet = composerText === message || composerText.includes(message);"
+        "const buttonSelectors = ['button', '[role=\"button\"]', 'input[type=\"submit\"]'];"
+        "const buttons = Array.from(document.querySelectorAll(buttonSelectors.join(','))).filter((el) => visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true');"
+        "const labelFor = (el) => String(el.getAttribute('aria-label') || el.getAttribute('title') || el.value || el.innerText || el.textContent || '').trim().toLowerCase();"
+        "const sendButton = buttons.find((el) => /send|submit|发送|提交|运行|开始/.test(labelFor(el))) || null;"
+        "if (!sendButton) {"
+        "return {composerFound: true, composerCandidateCount: composers.length, messageSet, submitAttempted: false, submitVerified: false, readbackText: document.body ? document.body.innerText.slice(0, 6000) : ''};"
+        "}"
+        "sendButton.click();"
+        "const readbackText = document.body ? document.body.innerText.slice(0, 6000) : '';"
+        "return {"
+        "composerFound: true,"
+        "composerCandidateCount: composers.length,"
+        "messageSet,"
+        "submitAttempted: true,"
+        "submitVerified: true,"
+        "sendButtonLabel: labelFor(sendButton),"
+        "readbackText"
+        "};"
+        "})()"
+    )
+
+
+def _devtools_target_to_dict(target: BrowserDevToolsTarget | None) -> dict:
+    if target is None:
+        return {}
+    return {
+        "target_id": target.target_id,
+        "type": target.type,
+        "title": target.title,
+        "url": target.url,
+        "webSocketDebuggerUrl": target.web_socket_debugger_url,
+    }
+
+
+def _first_text(data: dict, *keys: str) -> str:
+    for key in keys:
+        value = data.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def json_dumps_ascii(value: str) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=True)
+
+
 def _string_tuple(values: object) -> tuple[str, ...]:
     if values is None:
         return ()
@@ -277,8 +565,10 @@ def _string_tuple(values: object) -> tuple[str, ...]:
 
 __all__ = [
     "BRIDGE_SCHEMA_VERSION",
+    "AgentAppBridgeCdpAdapter",
     "AgentAppBridgeDryRunAdapter",
     "AgentAppBridgeDryRunReport",
     "AgentAppBridgeRequest",
+    "AgentAppBridgeSendReport",
     "build_agent_app_bridge_request",
 ]

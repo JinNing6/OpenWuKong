@@ -1,6 +1,7 @@
 import unittest
 
 from openwukong.control.agent_app_bridge import (
+    AgentAppBridgeCdpAdapter,
     AgentAppBridgeDryRunAdapter,
     build_agent_app_bridge_request,
 )
@@ -98,6 +99,105 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertEqual(report.decision, "app_bridge_target_not_ready")
         self.assertEqual(report.bridge_send_attempts, 0)
 
+    def test_cdp_adapter_sends_message_to_ready_endpoint_and_verifies_markers(self):
+        devtools = _FakeDevToolsClient(
+            {
+                "composerFound": True,
+                "messageSet": True,
+                "submitAttempted": True,
+                "submitVerified": True,
+                "readbackText": "OPENWUKONG_ACCEPTANCE: PASS\nSummarize the active task.",
+            }
+        )
+        request = build_agent_app_bridge_request(
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="bridge-contract",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: bridge-contract\n\nMessage:\nSummarize the active task.",
+            selected_transport={"transport_id": "claude-desktop-shell"},
+            app_surface_probe=_ready_probe(),
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+        )
+
+        report = AgentAppBridgeCdpAdapter(devtools_client=devtools).send(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_send_accepted")
+        self.assertEqual(data["bridge_send_attempts"], 1)
+        self.assertEqual(data["native_call_attempts"], 1)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(data["target"]["target_id"], "page-1")
+        self.assertEqual(devtools.evaluate_calls[0][0], "http://127.0.0.1:9333")
+        self.assertEqual(devtools.evaluate_calls[0][1].target_id, "page-1")
+        self.assertIn("Summarize the active task.", devtools.evaluate_calls[0][2])
+
+    def test_cdp_adapter_does_not_send_when_request_not_ready(self):
+        devtools = _FakeDevToolsClient({})
+        request = build_agent_app_bridge_request(
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="bridge-contract",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: bridge-contract",
+            selected_transport={"transport_id": "claude-desktop-shell"},
+            app_surface_probe={
+                **_ready_probe(),
+                "ready_endpoint_count": 0,
+                "endpoints": [],
+            },
+        )
+
+        report = AgentAppBridgeCdpAdapter(devtools_client=devtools).send(request)
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.decision, "app_bridge_request_not_ready")
+        self.assertEqual(report.bridge_send_attempts, 0)
+        self.assertEqual(report.native_call_attempts, 0)
+        self.assertEqual(devtools.evaluate_calls, [])
+
+    def test_cdp_adapter_reports_acceptance_pending_after_verified_submit(self):
+        devtools = _FakeDevToolsClient(
+            {
+                "composerFound": True,
+                "messageSet": True,
+                "submitAttempted": True,
+                "submitVerified": True,
+                "readbackText": "Task submitted but result is still pending.",
+            }
+        )
+        request = build_agent_app_bridge_request(
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="bridge-contract",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: bridge-contract",
+            selected_transport={"transport_id": "claude-desktop-shell"},
+            app_surface_probe=_ready_probe(),
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+        )
+
+        report = AgentAppBridgeCdpAdapter(devtools_client=devtools).send(request)
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.decision, "app_bridge_message_submitted_acceptance_pending")
+        self.assertEqual(report.bridge_send_attempts, 1)
+
+
+class _FakeDevToolsClient:
+    def __init__(self, value):
+        self.value = dict(value)
+        self.evaluate_calls = []
+
+    def evaluate(self, debugger_url, target, expression):
+        self.evaluate_calls.append((debugger_url, target, expression))
+        return {"type": "object", "value": dict(self.value)}
+
 
 def _ready_probe():
     return {
@@ -113,9 +213,12 @@ def _ready_probe():
                 "targets": [
                     {
                         "target_id": "page-1",
+                        "id": "page-1",
+                        "type": "page",
                         "title": "Claude",
                         "url": "app://claude/index.html",
                         "ready": True,
+                        "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/page-1",
                     }
                 ],
             }

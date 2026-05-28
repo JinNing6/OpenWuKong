@@ -18,6 +18,7 @@ def main(
     resolver_factory: object | None = None,
     command_executor: object | None = None,
     app_surface_probe_runner: object | None = None,
+    app_bridge_sender: object | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(
         description="Draft or execute a guarded targeted agent conversation message."
@@ -68,6 +69,11 @@ def main(
         default="",
         help="Optional no-focus screenshot directory for app/desktop surface diagnostics.",
     )
+    parser.add_argument(
+        "--allow-app-bridge-send",
+        action="store_true",
+        help="Allow the native app bridge sender when its dry-run contract is ready.",
+    )
     parser.add_argument("--strict", action="store_true", help="Return nonzero unless the report is ok.")
     args = parser.parse_args(argv)
 
@@ -77,6 +83,9 @@ def main(
         if callable(app_surface_probe_runner)
         else _default_app_surface_probe_runner
     )
+    bridge_sender = None
+    if args.allow_app_bridge_send:
+        bridge_sender = app_bridge_sender if app_bridge_sender is not None else _default_app_bridge_sender()
     report = run_agent_conversation(
         agent=args.agent,
         message=args.message,
@@ -95,6 +104,7 @@ def main(
         command_executor=command_executor,
         app_surface_probe_runner=probe_runner,
         app_surface_screenshot_dir=args.app_surface_screenshot_dir,
+        app_bridge_sender=bridge_sender,
         timeout_sec=args.timeout_sec,
         audit_log_path=args.audit_log,
     )
@@ -143,6 +153,12 @@ def _default_app_surface_probe_runner(**kwargs):
     )
 
     return run_agent_native_connector_probe(**kwargs)
+
+
+def _default_app_bridge_sender():
+    from openwukong.control.agent_app_bridge import AgentAppBridgeCdpAdapter
+
+    return AgentAppBridgeCdpAdapter()
 
 
 if __name__ == "__main__":

@@ -46,9 +46,11 @@ from openwukong.control.agent_surface import (
 )
 from openwukong.control.agent_app_bridge import (
     BRIDGE_SCHEMA_VERSION,
+    AgentAppBridgeCdpAdapter,
     AgentAppBridgeDryRunAdapter,
     AgentAppBridgeDryRunReport,
     AgentAppBridgeRequest,
+    AgentAppBridgeSendReport,
     build_agent_app_bridge_request,
 )
 from openwukong.control.agent_conversation import (
@@ -157,9 +159,11 @@ __all__ = [
     "AppResolutionReport",
     "AgentSurfaceBindingReport",
     "AgentTransportSurface",
+    "AgentAppBridgeCdpAdapter",
     "AgentAppBridgeDryRunAdapter",
     "AgentAppBridgeDryRunReport",
     "AgentAppBridgeRequest",
+    "AgentAppBridgeSendReport",
     "AgentCommandPlan",
     "AgentTaskRunReport",
     "AgentConversationAcceptanceReport",

@@ -4687,3 +4687,54 @@ When a new conversation starts in this repo:
     - add post-send readback verification against required markers before any
       app-side execution is marked accepted
     - keep Cursor/VS Code out of near-term scope per the latest user direction
+- 2026-05-28 implemented the gated app-side CDP native bridge sender:
+  - implementation:
+    - added `AgentAppBridgeCdpAdapter` and `AgentAppBridgeSendReport`
+    - the sender consumes the existing dry-run contract and refuses to call
+      the endpoint unless target evidence, native endpoint readiness, and
+      visual/no-focus stability gates are already ready
+    - the sender uses the exposed DevTools websocket target and
+      `Runtime.evaluate` to set a semantic composer, dispatch input/change
+      events, click a visible send/submit button, and read back page text
+    - reports now separate `bridge_send_attempts` and `native_call_attempts`
+      from `window_input_attempts`; CDP/native sends keep
+      `window_input_attempts=0`
+    - post-send readback is checked against required and forbidden markers
+      before a bridge execution can be reported as accepted
+    - `run_agent_conversation(...)` can now accept an injected
+      `app_bridge_sender`, and `agent_conversation_runner` exposes an explicit
+      `--allow-app-bridge-send` flag; without the flag/injected sender the CLI
+      remains probe/dry-run only
+  - TDD coverage added:
+    - ready CDP endpoint sends through the native adapter and verifies markers
+      without window input
+    - missing endpoint or non-ready dry-run requests do not call the native
+      endpoint
+    - verified submit with missing result markers is reported as acceptance
+      pending, not accepted
+    - conversation runner uses the bridge sender only when explicitly enabled
+      and side-effect confirmation has passed, while keeping CLI command
+      attempts at zero
+  - verification:
+    - `python -m unittest tests.test_agent_app_bridge tests.test_agent_conversation tests.test_agent_native_connector_probe tests.test_browser_connector`: OK
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+    - `python -m unittest discover tests`: `410 tests OK`
+  - reusable pattern:
+    - updated global skill `desktop-background-control-testing` to require
+      explicit opt-in, dry-run-contract consumption, native-call/window-input
+      counter separation, and marker-based readback for real app bridge sends
+  - current conclusion:
+    - the architecture now has a real no-keyboard/no-mouse bridge sender path
+      for app surfaces that expose a compatible DevTools/native endpoint
+    - Codex/Claude desktop apps still cannot be declared fully background
+      send-capable on this machine unless their real app surfaces expose such
+      an endpoint and the target/session is visible; otherwise they remain
+      correctly gated
+  - next high-value steps:
+    - run safe real probes against Codex App and Claude Desktop with
+      `--allow-app-bridge-send` only in an owned/test conversation where a
+      ready endpoint is detected
+    - add a live owned Electron/Chromium fixture test that exercises the real
+      websocket path end to end without touching user apps
+    - continue excluding Cursor/VS Code until the user reopens that scope

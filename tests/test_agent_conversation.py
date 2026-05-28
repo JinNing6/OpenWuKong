@@ -343,6 +343,77 @@ class AgentConversationTests(unittest.TestCase):
             138024,
         )
 
+    def test_app_bridge_sender_runs_when_ready_and_confirmed_without_cli_attempt(self):
+        resolver = _resolver_with_claude_desktop()
+        executor = _FakeCommandExecutor()
+        sender_calls = []
+
+        def _fake_probe_runner(**kwargs):
+            del kwargs
+            return _ready_native_bridge_probe()
+
+        def _fake_bridge_sender(request):
+            sender_calls.append(request)
+            return {
+                "mode": "agent-app-bridge-send",
+                "safety_mode": "native_bridge_execute",
+                "ok": True,
+                "decision": "app_bridge_send_accepted",
+                "accepted": True,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 1,
+                "native_call_attempts": 1,
+                "request": request.to_dict(),
+                "action_result": {
+                    "composerFound": True,
+                    "messageSet": True,
+                    "submitAttempted": True,
+                    "submitVerified": True,
+                    "readbackText": "OPENWUKONG_ACCEPTANCE: PASS",
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = run_agent_conversation(
+                agent="claude desktop",
+                project_name="openwukong",
+                task_name="desktop-message",
+                message="Send this through the app surface.",
+                required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+                workspace_root=str(root),
+                output_root=str(root / "out"),
+                execute=True,
+                allow_agent_task=True,
+                confirmed_effect_ids=(
+                    "agent_task_submission.submit_task",
+                    "agent_start.start_agent",
+                ),
+                resolver=resolver,
+                command_executor=executor,
+                app_surface_probe_runner=_fake_probe_runner,
+                app_bridge_sender=_fake_bridge_sender,
+            )
+            data = report.to_dict()
+            draft = json.loads(Path(data["draft_artifact_path"]).read_text(encoding="utf-8"))
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "conversation_app_bridge_executed_and_accepted")
+        self.assertEqual(data["agent_command_attempts"], 0)
+        self.assertEqual(len(executor.requests), 0)
+        self.assertEqual(len(sender_calls), 1)
+        self.assertEqual(data["app_bridge_send_report"]["bridge_send_attempts"], 1)
+        self.assertEqual(data["app_bridge_send_report"]["window_input_attempts"], 0)
+        self.assertEqual(
+            data["app_bridge_send_report"]["request"]["payload"]["message"],
+            "Send this through the app surface.",
+        )
+        self.assertEqual(
+            draft["app_bridge_send_report"]["decision"],
+            "app_bridge_send_accepted",
+        )
+
     def test_main_writes_json_report(self):
         resolver = _resolver_with_codex_cli()
 
@@ -499,6 +570,73 @@ class AgentConversationTests(unittest.TestCase):
             payload["app_surface_probe"]["app_uia_probe"]["background_screenshot_count"],
             1,
         )
+
+    def test_main_runs_app_bridge_sender_only_with_explicit_bridge_flag(self):
+        resolver = _resolver_with_claude_desktop()
+        sender_calls = []
+
+        def _fake_probe_runner(**kwargs):
+            del kwargs
+            return _ready_native_bridge_probe()
+
+        def _fake_bridge_sender(request):
+            sender_calls.append(request)
+            return {
+                "mode": "agent-app-bridge-send",
+                "safety_mode": "native_bridge_execute",
+                "ok": True,
+                "decision": "app_bridge_send_accepted",
+                "accepted": True,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 1,
+                "native_call_attempts": 1,
+                "request": request.to_dict(),
+                "action_result": {"readbackText": "OPENWUKONG_ACCEPTANCE: PASS"},
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "agent-conversation.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--agent",
+                        "claude desktop",
+                        "--project-name",
+                        "openwukong",
+                        "--task-name",
+                        "desktop-message",
+                        "--message",
+                        "Draft a message.",
+                        "--acceptance-marker",
+                        "OPENWUKONG_ACCEPTANCE: PASS",
+                        "--workspace-root",
+                        str(root),
+                        "--output-root",
+                        str(root / "out"),
+                        "--execute",
+                        "--allow-agent-task",
+                        "--confirm-effect",
+                        "agent_task_submission.submit_task",
+                        "--confirm-effect",
+                        "agent_start.start_agent",
+                        "--allow-app-bridge-send",
+                        "--output",
+                        str(output),
+                        "--json",
+                    ],
+                    resolver_factory=lambda args: resolver,
+                    app_surface_probe_runner=_fake_probe_runner,
+                    app_bridge_sender=_fake_bridge_sender,
+                )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["decision"], "conversation_app_bridge_executed_and_accepted")
+        self.assertEqual(payload["agent_command_attempts"], 0)
+        self.assertEqual(payload["app_bridge_send_report"]["bridge_send_attempts"], 1)
+        self.assertEqual(len(sender_calls), 1)
 
 
 def _resolver_with_codex_cli():
