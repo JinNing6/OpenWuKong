@@ -20,6 +20,7 @@ from openwukong.evaluation.agent_native_connector_probe import (
     run_agent_native_connector_probe,
     main,
 )
+from openwukong.evaluation.window_capture import BackgroundWindowCaptureReport
 
 
 class _FakeHTTPProbe:
@@ -144,6 +145,29 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(data["decision"], "agent_native_connector_not_exposed")
         self.assertFalse(data["app_uia_probe"]["target_matched"])
 
+    def test_passes_background_screenshot_options_to_app_uia_probe(self):
+        capture = _FakeBackgroundCaptureProvider()
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = run_agent_native_connector_probe(
+                agent="codex app",
+                project_name="openwukong",
+                task_name="鏀寔涓嶅悓 IDE 鐩戝伐杈撳叆",
+                observer=_observer_with_codex_target(hwnd=7101),
+                resolver=_resolver_with_codex_desktop(),
+                process_provider=lambda: (),
+                http_probe=_FakeHTTPProbe(),
+                screenshot_dir=root / "screenshots",
+                window_capture_provider=capture,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(capture.events, [7101])
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["app_uia_probe"]["background_screenshot_count"], 1)
+        self.assertTrue(data["app_uia_probe"]["background_screenshot_focus_stable"])
+
     def test_main_writes_json_report(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -172,14 +196,47 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(data["mode"], "agent-native-connector-probe")
         self.assertEqual(data["decision"], "agent_native_connector_not_exposed")
 
+    def test_main_writes_screenshot_metadata_when_requested(self):
+        capture = _FakeBackgroundCaptureProvider()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "native-probe.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--agent",
+                        "codex app",
+                        "--project-name",
+                        "openwukong",
+                        "--task-name",
+                        "鏀寔涓嶅悓 IDE 鐩戝伐杈撳叆",
+                        "--screenshot-dir",
+                        str(root / "screenshots"),
+                        "--output",
+                        str(output),
+                        "--json",
+                    ],
+                    resolver_factory=lambda args: _resolver_with_codex_desktop(),
+                    observer=_observer_with_codex_target(hwnd=7201),
+                    process_provider=lambda: (),
+                    http_probe=_FakeHTTPProbe(),
+                    window_capture_provider=capture,
+                )
+            data = json.loads(output.read_text(encoding="utf-8"))
 
-def _observer_with_codex_target():
+        self.assertEqual(code, 0)
+        self.assertEqual(capture.events, [7201])
+        self.assertEqual(data["app_uia_probe"]["background_screenshot_count"], 1)
+
+
+def _observer_with_codex_target(*, hwnd=0):
     return StaticAccessibilityObserver(
         [
             AccessibilityWindowSnapshot(
                 pid=42,
                 process_name="Codex.exe",
                 window_title="Codex",
+                hwnd=int(hwnd or 0),
                 elements=(
                     AccessibilityElementSnapshot(
                         control_type="ListItem",
@@ -216,6 +273,26 @@ def _resolver_with_codex_desktop():
             ),
         )
     )
+
+
+class _FakeBackgroundCaptureProvider:
+    def __init__(self):
+        self.events = []
+
+    def capture_window(self, hwnd: int, output_path: Path) -> BackgroundWindowCaptureReport:
+        self.events.append(int(hwnd))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"fake")
+        return BackgroundWindowCaptureReport(
+            hwnd=int(hwnd),
+            output_path=str(output_path),
+            ok=True,
+            mode="fake-background-capture",
+            width=800,
+            height=600,
+            foreground_hwnd_before=1001,
+            foreground_hwnd_after=1001,
+        )
 
 
 if __name__ == "__main__":

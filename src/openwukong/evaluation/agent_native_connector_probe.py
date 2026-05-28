@@ -177,6 +177,8 @@ def run_agent_native_connector_probe(
     resolver: WindowsAppResolver | None = None,
     process_provider: Callable[[], Iterable[NativeProcessSnapshot]] | None = None,
     http_probe: NativeConnectorHTTPProbe | None = None,
+    screenshot_dir: str | Path = "",
+    window_capture_provider: object | None = None,
     max_windows: int = 80,
     max_elements: int = 1200,
     request_timeout: float = 0.2,
@@ -188,6 +190,8 @@ def run_agent_native_connector_probe(
         task_name=task_name,
         observer=observer,
         resolver=resolver,
+        screenshot_dir=screenshot_dir,
+        window_capture_provider=window_capture_provider,
         max_windows=max_windows,
         max_elements=max_elements,
     )
@@ -269,6 +273,7 @@ def main(
     observer: object | None = None,
     process_provider: Callable[[], Iterable[NativeProcessSnapshot]] | None = None,
     http_probe: NativeConnectorHTTPProbe | None = None,
+    window_capture_provider: object | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(
         description="Run a read-only native connector probe for an agent app."
@@ -278,6 +283,7 @@ def main(
     parser.add_argument("--task-name", default="")
     parser.add_argument("--output", default="")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--screenshot-dir", default="")
     parser.add_argument("--max-windows", type=int, default=80)
     parser.add_argument("--max-elements", type=int, default=1200)
     parser.add_argument("--request-timeout", type=float, default=0.2)
@@ -292,6 +298,8 @@ def main(
         resolver=resolver,
         process_provider=process_provider,
         http_probe=http_probe,
+        screenshot_dir=args.screenshot_dir,
+        window_capture_provider=window_capture_provider,
         max_windows=args.max_windows,
         max_elements=args.max_elements,
         request_timeout=args.request_timeout,

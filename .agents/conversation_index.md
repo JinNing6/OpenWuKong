@@ -4596,3 +4596,53 @@ When a new conversation starts in this repo:
       message submission
     - keep proving foreground stability on every real screenshot run instead
       of assuming screenshot success implies no-focus behavior
+- 2026-05-28 wired no-focus screenshot diagnostics through native and
+  conversation probes:
+  - implementation:
+    - `run_agent_native_connector_probe(...)` now accepts `screenshot_dir` and
+      `window_capture_provider` and passes them through to the app UIA probe
+    - `agent_native_connector_probe` CLI now supports `--screenshot-dir`
+    - `run_agent_conversation(...)` now accepts
+      `app_surface_screenshot_dir` and passes it to the app-surface probe only
+      when an app/desktop surface is bridge/foreground gated
+    - `agent_conversation_runner` CLI now supports
+      `--app-surface-screenshot-dir`
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.agent_conversation_runner --agent "claude desktop" ... --execute --allow-agent-task --confirm-effect agent_task_submission.submit_task --confirm-effect agent_start.start_agent --app-surface-screenshot-dir logs\runtime\agent-conversation-screenshot-r15-shots ...`
+    - result:
+      `decision=agent_conversation_requires_app_bridge_or_foreground`,
+      `agent_command_attempts=0`, `control_attempts=0`
+    - attached app-surface probe result:
+      `agent_native_connector_not_exposed`,
+      `background_screenshot_count=1`,
+      `background_screenshot_success_count=1`,
+      `background_screenshot_focus_stable=true`
+    - screenshot artifact:
+      `logs\runtime\agent-conversation-screenshot-r15-shots\01-claude.exe-77064-138024.png`
+    - JSON report:
+      `logs\runtime\agent-conversation-screenshot-r15.json`
+  - TDD coverage added:
+    - native connector probe pass-through for screenshot provider and CLI
+      `--screenshot-dir`
+    - direct conversation runner pass-through for
+      `app_surface_screenshot_dir`
+    - CLI pass-through for `--app-surface-screenshot-dir`
+  - verification:
+    - `python -m unittest discover tests`: `401 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - high-level app-surface diagnostics now carry accessibility evidence,
+      native endpoint evidence, and optional no-focus visual evidence in the
+      same report
+    - this does not bypass the execution gate; Claude Desktop still requires a
+      native bridge or approved foreground path for actual app message
+      submission
+  - next high-value steps:
+    - define the native bridge command contract for app-side message
+      submission
+    - add a dry-run bridge adapter that can validate contract shape without
+      touching real apps
+    - only after bridge readiness is proven, add a gated real app-message
+      sender path

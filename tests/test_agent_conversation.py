@@ -249,6 +249,56 @@ class AgentConversationTests(unittest.TestCase):
         self.assertEqual(data["app_surface_probe"]["control_attempts"], 0)
         self.assertEqual(draft["app_surface_probe"]["decision"], "agent_app_window_not_found")
 
+    def test_app_surface_probe_receives_screenshot_dir_when_requested(self):
+        resolver = _resolver_with_claude_desktop()
+        executor = _FakeCommandExecutor()
+        probe_calls = []
+
+        def _fake_probe_runner(**kwargs):
+            probe_calls.append(dict(kwargs))
+            return _FakeAppSurfaceProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=False,
+                decision="agent_native_connector_not_exposed",
+                control_allowed=False,
+                control_attempts=0,
+                app_uia_probe={
+                    "background_screenshot_count": 1,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            screenshot_dir = root / "screenshots"
+            report = run_agent_conversation(
+                agent="claude desktop",
+                project_name="openwukong",
+                task_name="desktop-message",
+                message="Send this through the app surface.",
+                workspace_root=str(root),
+                output_root=str(root / "out"),
+                execute=True,
+                allow_agent_task=True,
+                confirmed_effect_ids=(
+                    "agent_task_submission.submit_task",
+                    "agent_start.start_agent",
+                ),
+                resolver=resolver,
+                command_executor=executor,
+                app_surface_probe_runner=_fake_probe_runner,
+                app_surface_screenshot_dir=str(screenshot_dir),
+            )
+            data = report.to_dict()
+
+        self.assertEqual(len(probe_calls), 1)
+        self.assertEqual(probe_calls[0]["screenshot_dir"], str(screenshot_dir))
+        self.assertEqual(
+            data["app_surface_probe"]["app_uia_probe"]["background_screenshot_count"],
+            1,
+        )
+
     def test_main_writes_json_report(self):
         resolver = _resolver_with_codex_cli()
 
@@ -342,6 +392,69 @@ class AgentConversationTests(unittest.TestCase):
         self.assertEqual(payload["app_surface_probe"]["decision"], "agent_native_connector_not_exposed")
         self.assertEqual(len(probe_calls), 1)
         self.assertEqual(probe_calls[0]["agent"], "claude desktop")
+
+    def test_main_passes_app_surface_screenshot_dir_to_probe_runner(self):
+        resolver = _resolver_with_claude_desktop()
+        probe_calls = []
+
+        def _fake_probe_runner(**kwargs):
+            probe_calls.append(dict(kwargs))
+            return {
+                "mode": "agent-native-connector-probe",
+                "safety_mode": "read_only",
+                "ok": False,
+                "decision": "agent_native_connector_not_exposed",
+                "control_allowed": False,
+                "control_attempts": 0,
+                "app_uia_probe": {
+                    "background_screenshot_count": 1,
+                    "background_screenshot_focus_stable": True,
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "agent-conversation.json"
+            screenshot_dir = root / "screenshots"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--agent",
+                        "claude desktop",
+                        "--project-name",
+                        "openwukong",
+                        "--task-name",
+                        "desktop-message",
+                        "--message",
+                        "Draft a message.",
+                        "--workspace-root",
+                        str(root),
+                        "--output-root",
+                        str(root / "out"),
+                        "--execute",
+                        "--allow-agent-task",
+                        "--confirm-effect",
+                        "agent_task_submission.submit_task",
+                        "--confirm-effect",
+                        "agent_start.start_agent",
+                        "--app-surface-screenshot-dir",
+                        str(screenshot_dir),
+                        "--output",
+                        str(output),
+                        "--json",
+                    ],
+                    resolver_factory=lambda args: resolver,
+                    app_surface_probe_runner=_fake_probe_runner,
+                )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(probe_calls), 1)
+        self.assertEqual(probe_calls[0]["screenshot_dir"], str(screenshot_dir))
+        self.assertEqual(
+            payload["app_surface_probe"]["app_uia_probe"]["background_screenshot_count"],
+            1,
+        )
 
 
 def _resolver_with_codex_cli():

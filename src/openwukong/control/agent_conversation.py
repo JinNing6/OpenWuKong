@@ -170,6 +170,7 @@ def run_agent_conversation(
     resolver: WindowsAppResolver | None = None,
     command_executor: object | None = None,
     app_surface_probe_runner: AppSurfaceProbeRunner | None = None,
+    app_surface_screenshot_dir: str = "",
     timeout_sec: float = 120.0,
     audit_log_path: str = "",
 ) -> AgentConversationRunReport:
@@ -215,6 +216,7 @@ def run_agent_conversation(
         project_name=str(project_name or "").strip(),
         task_name=str(task_name or "").strip(),
         resolver=resolver,
+        screenshot_dir=str(app_surface_screenshot_dir or "").strip(),
         enabled=bool(foreground_request),
     )
     draft_path = _write_conversation_draft(
@@ -391,6 +393,7 @@ def _run_app_surface_probe(
     project_name: str,
     task_name: str,
     resolver: WindowsAppResolver | None,
+    screenshot_dir: str = "",
     enabled: bool,
 ) -> dict:
     if not enabled or not callable(runner):
@@ -401,6 +404,7 @@ def _run_app_surface_probe(
             project_name=project_name,
             task_name=task_name,
             resolver=resolver,
+            screenshot_dir=screenshot_dir,
         )
         return _report_to_dict(result)
     except Exception as exc:

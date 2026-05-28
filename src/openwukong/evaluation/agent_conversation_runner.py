@@ -63,6 +63,11 @@ def main(
     )
     parser.add_argument("--timeout-sec", type=float, default=120.0, help="Agent command timeout.")
     parser.add_argument("--audit-log", default="", help="Optional command audit log path.")
+    parser.add_argument(
+        "--app-surface-screenshot-dir",
+        default="",
+        help="Optional no-focus screenshot directory for app/desktop surface diagnostics.",
+    )
     parser.add_argument("--strict", action="store_true", help="Return nonzero unless the report is ok.")
     args = parser.parse_args(argv)
 
@@ -89,6 +94,7 @@ def main(
         resolver=resolver,
         command_executor=command_executor,
         app_surface_probe_runner=probe_runner,
+        app_surface_screenshot_dir=args.app_surface_screenshot_dir,
         timeout_sec=args.timeout_sec,
         audit_log_path=args.audit_log,
     )
