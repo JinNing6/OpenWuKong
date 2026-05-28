@@ -4,12 +4,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from openwukong.evaluation.primary_scenario_smoke import (
-    main,
-    run_primary_scenario_smoke,
-    summarize_report,
-)
+from openwukong.evaluation import primary_scenario_smoke
+from openwukong.evaluation.primary_scenario_smoke import main, run_primary_scenario_smoke, summarize_report
 from openwukong.evaluation.simulation import load_simulation_fixture
 
 
@@ -508,6 +506,81 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
                 scenarios["codex.project.submit_task_draft"]["owned_browser_helper_id"],
                 "",
             )
+
+    def test_owned_browser_helper_creates_expected_target_after_new_tab_launch(self):
+        execution_data = {
+            "mode": "session-readiness-execution",
+            "launch_attempts": 1,
+            "results": [
+                {
+                    "status": "started",
+                    "readiness_url": "http://127.0.0.1:9341",
+                }
+            ],
+        }
+        expected_url = "about:blank#openwukong-primary-smoke"
+        probe_calls: list[str] = []
+        opened_targets: list[tuple[str, str]] = []
+
+        def _fake_readiness_probe(debugger_url: str) -> dict:
+            probe_calls.append(debugger_url)
+            if opened_targets:
+                targets = [
+                    {
+                        "type": "page",
+                        "title": "OpenWukong Primary Smoke",
+                        "url": expected_url,
+                    }
+                ]
+            else:
+                targets = [
+                    {
+                        "type": "page",
+                        "title": "New Tab",
+                        "url": "chrome://newtab/",
+                    }
+                ]
+            return {
+                "mode": "browser-helper-readiness-probe",
+                "ok": True,
+                "debugger_url": debugger_url,
+                "target_count": len(targets),
+                "targets": targets,
+                "error": "",
+            }
+
+        def _fake_open_target(debugger_url: str, target_url: str) -> dict:
+            opened_targets.append((debugger_url, target_url))
+            return {
+                "ok": True,
+                "method": "PUT",
+                "url": f"{debugger_url}/json/new?about%3Ablank%23openwukong-primary-smoke",
+                "status": 200,
+                "target": {"url": target_url},
+                "error": "",
+            }
+
+        with patch.object(
+            primary_scenario_smoke,
+            "_open_owned_browser_helper_target",
+            side_effect=_fake_open_target,
+        ):
+            result = primary_scenario_smoke._run_owned_browser_helper_readiness_probe(
+                execution_data=execution_data,
+                readiness_probe=_fake_readiness_probe,
+                expected_url=expected_url,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["target_match_ok"])
+        self.assertEqual(result["matched_targets"][0]["url"], expected_url)
+        self.assertTrue(result["target_open_attempted"])
+        self.assertEqual(result["target_open_result"]["method"], "PUT")
+        self.assertEqual(opened_targets, [("http://127.0.0.1:9341", expected_url)])
+        self.assertEqual(
+            probe_calls,
+            ["http://127.0.0.1:9341", "http://127.0.0.1:9341"],
+        )
 
     def test_smoke_cli_outputs_json_and_preserves_no_interference_counters(self):
         fixture_path = Path("tests/fixtures/evaluation/l1_primary_user_scenarios.json")

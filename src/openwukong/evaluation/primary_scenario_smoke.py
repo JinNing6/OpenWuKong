@@ -20,6 +20,8 @@ import struct
 import tempfile
 import threading
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -628,7 +630,78 @@ def _run_owned_browser_helper_readiness_probe(
             "targets": [],
             "error": "invalid_probe_result",
         }
-    return _attach_browser_helper_target_match(data, expected_url=expected_url)
+    matched_data = _attach_browser_helper_target_match(data, expected_url=expected_url)
+    if bool(matched_data.get("target_match_ok", False)) or not str(expected_url or "").strip():
+        return matched_data
+
+    open_result = _open_owned_browser_helper_target(
+        readiness_url,
+        str(expected_url or ""),
+    )
+    try:
+        retry_data = active_probe(readiness_url)
+    except Exception as exc:
+        retry_data = {
+            "mode": "browser-helper-readiness-probe",
+            "ok": False,
+            "debugger_url": readiness_url,
+            "attempts": int(matched_data.get("attempts", 0) or 0) + 1,
+            "target_count": 0,
+            "targets": [],
+            "error": str(exc) or exc.__class__.__name__,
+        }
+    if not isinstance(retry_data, dict):
+        retry_data = {
+            "mode": "browser-helper-readiness-probe",
+            "ok": False,
+            "debugger_url": readiness_url,
+            "attempts": int(matched_data.get("attempts", 0) or 0) + 1,
+            "target_count": 0,
+            "targets": [],
+            "error": "invalid_probe_result",
+        }
+    retry_matched = _attach_browser_helper_target_match(
+        retry_data,
+        expected_url=expected_url,
+    )
+    retry_matched["target_open_attempted"] = True
+    retry_matched["target_open_result"] = open_result
+    if not bool(retry_matched.get("target_match_ok", False)):
+        retry_matched["initial_readiness_probe"] = matched_data
+    return retry_matched
+
+
+def _open_owned_browser_helper_target(debugger_url: str, target_url: str) -> dict:
+    base_url = str(debugger_url or "").rstrip("/")
+    target = str(target_url or "").strip()
+    if not base_url or not target:
+        return {
+            "ok": False,
+            "method": "PUT",
+            "url": "",
+            "error": "missing_debugger_or_target_url",
+        }
+    request_url = f"{base_url}/json/new?{urllib.parse.quote(target, safe='')}"
+    request = urllib.request.Request(request_url, method="PUT")
+    try:
+        with urllib.request.urlopen(request, timeout=1.5) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            payload = json.loads(body) if body.strip() else {}
+            return {
+                "ok": 200 <= int(response.status) < 300,
+                "method": "PUT",
+                "url": request_url,
+                "status": int(response.status),
+                "target": payload if isinstance(payload, dict) else {},
+                "error": "",
+            }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "method": "PUT",
+            "url": request_url,
+            "error": str(exc) or exc.__class__.__name__,
+        }
 
 
 def _run_owned_browser_helper_action(

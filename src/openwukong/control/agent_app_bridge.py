@@ -506,7 +506,7 @@ def _bridge_send_expression(message: str) -> str:
         "const buttonSelectors = ['button', '[role=\"button\"]', 'input[type=\"submit\"]'];"
         "const buttons = Array.from(document.querySelectorAll(buttonSelectors.join(','))).filter((el) => visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true');"
         "const labelFor = (el) => String(el.getAttribute('aria-label') || el.getAttribute('title') || el.value || el.innerText || el.textContent || '').trim().toLowerCase();"
-        "const sendButton = buttons.find((el) => /send|submit|发送|提交|运行|开始/.test(labelFor(el))) || null;"
+        "const sendButton = buttons.find((el) => /send|submit|\\u53d1\\u9001|\\u63d0\\u4ea4|\\u8fd0\\u884c|\\u5f00\\u59cb/.test(labelFor(el))) || null;"
         "if (!sendButton) {"
         "return {composerFound: true, composerCandidateCount: composers.length, messageSet, submitAttempted: false, submitVerified: false, readbackText: document.body ? document.body.innerText.slice(0, 6000) : ''};"
         "}"

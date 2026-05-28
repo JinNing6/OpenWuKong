@@ -4738,3 +4738,64 @@ When a new conversation starts in this repo:
     - add a live owned Electron/Chromium fixture test that exercises the real
       websocket path end to end without touching user apps
     - continue excluding Cursor/VS Code until the user reopens that scope
+- 2026-05-28 accelerated into real no-loss testing and hardened owned browser
+  target readiness:
+  - implementation:
+    - added `openwukong.evaluation.agent_app_bridge_fixture_smoke`, an owned
+      local DevTools HTTP/WebSocket fixture that exercises the real
+      `AgentAppBridgeCdpAdapter` websocket path without touching user apps
+    - changed the bridge send selector regex to use ASCII-safe Unicode escapes
+      for Chinese send/submit/run/start labels
+    - fixed owned browser helper readiness so a launch that lands on
+      `chrome://newtab/` no longer fails or gets misaccepted; the helper now
+      creates the exact expected target through the local DevTools HTTP
+      endpoint `PUT /json/new?{encoded_url}` and then re-reads `/json/list`
+      for strict target matching
+  - safe real validation:
+    - owned CDP fixture smoke verified real websocket `Runtime.evaluate`,
+      marker readback, `bridge_send_attempts=1`, `native_call_attempts=1`,
+      and `window_input_attempts=0`
+    - Codex App and Claude Desktop real no-focus probes were run with
+      `--allow-app-bridge-send`; both correctly stayed gated because no ready
+      native endpoint was exposed, while no-focus screenshots succeeded and
+      no send/window input occurred
+    - first primary real no-loss run found a real owned-browser failure:
+      Chrome launched to `chrome://newtab/` instead of the requested
+      `about:blank#openwukong-primary-real-r2`
+    - after the readiness fix, primary real no-loss run
+      `logs\runtime\primary-real-no-loss-r3` passed `5/5`:
+      WeChat read-only locator, owned browser DevTools read, owned temp file
+      search, hidden Word COM document creation, and Codex bridge capability
+      gating
+    - r3 counters:
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `real_user_filesystem_scan_attempts=0`,
+      `user_file_modification_attempts=0`
+    - exact owned Chrome profile rescan after r3 returned no matching
+      Chrome/crashpad process
+  - TDD coverage added:
+    - owned app-bridge fixture CLI/report tests
+    - owned browser helper regression for the real `chrome://newtab/` launch
+      mismatch followed by deterministic `/json/new` target creation
+  - verification:
+    - `python -m unittest tests.test_primary_scenario_smoke tests.test_primary_real_no_loss tests.test_agent_app_bridge_fixture_smoke tests.test_agent_app_bridge`: OK
+    - `python -m unittest discover tests`: `413 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - reusable pattern:
+    - updated global skill `desktop-background-control-testing` so future
+      owned-browser tests must strict-match `/json/list` targets and use
+      `PUT /json/new?{encoded_url}` when Chrome opens a default tab
+  - current conclusion:
+    - the core no-loss primary suite is now real-tested and stable for the
+      main safe surfaces
+    - precise cross-app control is not "all apps solved"; apps like WeChat,
+      Codex App, and Claude Desktop still require deterministic native bridge
+      exposure before background write/send can be considered safe
+  - next high-value steps:
+    - implement or discover a deterministic native bridge for Codex App and
+      Claude Desktop app surfaces
+    - keep WeChat write/send behind a native bridge or explicit foreground
+      takeover gate; the current real evidence is read-only locator only
+    - add background visual verification artifacts to the primary suite where
+      they improve acceptance without stealing focus
