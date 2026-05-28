@@ -4440,3 +4440,61 @@ When a new conversation starts in this repo:
     - add Cursor/VS Code IDE bridge live capture as a first-class real no-loss
       case
     - add Excel/PowerPoint COM parity only after the Word path stays stable
+- 2026-05-28 wired app-surface UIA/native diagnostics into targeted agent
+  conversation runs:
+  - implementation:
+    - `run_agent_conversation(...)` now accepts an app-surface probe runner
+      and records `app_surface_probe` in both the returned report and the
+      saved conversation draft
+    - `agent_conversation_runner` now defaults to the read-only
+      `agent_native_connector_probe` for app/desktop surfaces that require a
+      native bridge or foreground gate
+    - the probe is only invoked when a requested app/desktop agent surface has
+      no command contract and would otherwise return
+      `agent_conversation_requires_app_bridge_or_foreground`
+    - no CLI fallback is used for explicit app/desktop requests
+  - safe real validation:
+    - `codex app` app-surface execute request produced:
+      `decision=agent_conversation_requires_app_bridge_or_foreground`,
+      `agent_command_attempts=0`, `control_attempts=0`,
+      `app_surface_probe.decision=agent_native_connector_not_exposed`
+    - Codex App probe evidence:
+      project `openwukong` was visible through UIA, requested task
+      `background app probe diagnostics` was not visible, no semantic composer
+      and no native endpoint were exposed
+    - `claude desktop` app-surface execute request produced:
+      `decision=agent_conversation_requires_app_bridge_or_foreground`,
+      `agent_command_attempts=0`, `control_attempts=0`,
+      `app_surface_probe.decision=agent_native_connector_not_exposed`
+    - Claude Desktop probe evidence:
+      a semantic composer was visible, but the target project/task was not
+      visible and no native endpoint was exposed, so no background send was
+      allowed
+    - artifacts:
+      `logs\runtime\agent-conversation-probe\codex-app-conversation.json`
+      and
+      `logs\runtime\agent-conversation-probe\claude-desktop-conversation.json`
+  - TDD coverage added:
+    - direct conversation reports include injected app-surface probe diagnostics
+      when bridge-required
+    - CLI runner writes app-surface probe diagnostics into JSON output for
+      app/desktop execute requests
+  - verification:
+    - `python -m unittest tests.test_agent_conversation tests.test_agent_app_uia_probe tests.test_agent_native_connector_probe`: OK
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+    - `python -m unittest discover tests`: `393 tests OK`
+  - current conclusion:
+    - Codex/Claude app-surface requests are now richer and safer: they
+      automatically report target visibility, composer readiness, and native
+      endpoint exposure before any possible foreground/native bridge action
+    - direct background app send is still not proven for these app surfaces;
+      current evidence keeps them gated until a native bridge or exposed
+      deterministic endpoint exists
+  - next high-value steps:
+    - add Cursor/VS Code IDE bridge live capture as a first-class real no-loss
+      case
+    - define the native bridge command contract that can consume
+      `agent_app_uia_ready` or `agent_native_connector_ready`
+    - add a no-focus screenshot/visual verification artifact only after the
+      background route is deterministic

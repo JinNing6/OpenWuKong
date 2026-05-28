@@ -17,6 +17,7 @@ def main(
     *,
     resolver_factory: object | None = None,
     command_executor: object | None = None,
+    app_surface_probe_runner: object | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(
         description="Draft or execute a guarded targeted agent conversation message."
@@ -66,6 +67,11 @@ def main(
     args = parser.parse_args(argv)
 
     resolver = resolver_factory(args) if callable(resolver_factory) else None
+    probe_runner = (
+        app_surface_probe_runner
+        if callable(app_surface_probe_runner)
+        else _default_app_surface_probe_runner
+    )
     report = run_agent_conversation(
         agent=args.agent,
         message=args.message,
@@ -82,6 +88,7 @@ def main(
         confirmed_effect_ids=tuple(args.confirm_effect or ()),
         resolver=resolver,
         command_executor=command_executor,
+        app_surface_probe_runner=probe_runner,
         timeout_sec=args.timeout_sec,
         audit_log_path=args.audit_log,
     )
@@ -122,6 +129,14 @@ def _write_stdout(text: str) -> None:
         flush = getattr(buffer, "flush", None)
         if callable(flush):
             flush()
+
+
+def _default_app_surface_probe_runner(**kwargs):
+    from openwukong.evaluation.agent_native_connector_probe import (
+        run_agent_native_connector_probe,
+    )
+
+    return run_agent_native_connector_probe(**kwargs)
 
 
 if __name__ == "__main__":

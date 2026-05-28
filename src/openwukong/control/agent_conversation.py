@@ -8,6 +8,7 @@ import json
 import time
 import uuid
 from pathlib import Path
+from typing import Callable
 
 from openwukong.control.agent_task import AgentTaskRunReport, run_agent_task
 from openwukong.control.app_resolution import WindowsAppResolver
@@ -15,6 +16,9 @@ from openwukong.control.foreground_takeover import ForegroundTakeoverRequest
 
 
 DEFAULT_ACCEPTANCE_MARKER = "OPENWUKONG_ACCEPTANCE: PASS"
+
+
+AppSurfaceProbeRunner = Callable[..., object]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -64,6 +68,7 @@ class AgentConversationRunReport:
     acceptance_report: AgentConversationAcceptanceReport
     draft_artifact_path: str = ""
     foreground_takeover_request: ForegroundTakeoverRequest | None = None
+    app_surface_probe: dict = dataclasses.field(default_factory=dict)
     elapsed_ms: float = 0.0
 
     @property
@@ -140,6 +145,7 @@ class AgentConversationRunReport:
                 if self.foreground_takeover_request
                 else {}
             ),
+            "app_surface_probe": dict(self.app_surface_probe),
             "acceptance_report": self.acceptance_report.to_dict(),
             "agent_task_report": self.agent_task_report.to_dict(),
             "elapsed_ms": round(self.elapsed_ms, 3),
@@ -163,6 +169,7 @@ def run_agent_conversation(
     confirmed_effect_ids: tuple[str, ...] = (),
     resolver: WindowsAppResolver | None = None,
     command_executor: object | None = None,
+    app_surface_probe_runner: AppSurfaceProbeRunner | None = None,
     timeout_sec: float = 120.0,
     audit_log_path: str = "",
 ) -> AgentConversationRunReport:
@@ -202,6 +209,14 @@ def run_agent_conversation(
         if execute and _requires_app_bridge(task_report)
         else None
     )
+    app_surface_probe = _run_app_surface_probe(
+        runner=app_surface_probe_runner,
+        agent=str(agent or "").strip(),
+        project_name=str(project_name or "").strip(),
+        task_name=str(task_name or "").strip(),
+        resolver=resolver,
+        enabled=bool(foreground_request),
+    )
     draft_path = _write_conversation_draft(
         task_report=task_report,
         agent=str(agent or "").strip(),
@@ -214,6 +229,7 @@ def run_agent_conversation(
         forbidden_markers=normalized_forbidden,
         acceptance_report=acceptance,
         foreground_takeover_request=foreground_request,
+        app_surface_probe=app_surface_probe,
     )
     return AgentConversationRunReport(
         agent=str(agent or "").strip(),
@@ -228,6 +244,7 @@ def run_agent_conversation(
         acceptance_report=acceptance,
         draft_artifact_path=draft_path,
         foreground_takeover_request=foreground_request,
+        app_surface_probe=app_surface_probe,
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
 
@@ -304,6 +321,7 @@ def _write_conversation_draft(
     forbidden_markers: tuple[str, ...],
     acceptance_report: AgentConversationAcceptanceReport,
     foreground_takeover_request: ForegroundTakeoverRequest | None,
+    app_surface_probe: dict,
 ) -> str:
     root = Path(task_report.output_root)
     root.mkdir(parents=True, exist_ok=True)
@@ -327,6 +345,7 @@ def _write_conversation_draft(
         "foreground_takeover_request": (
             foreground_takeover_request.to_dict() if foreground_takeover_request else {}
         ),
+        "app_surface_probe": dict(app_surface_probe),
         "acceptance_report": acceptance_report.to_dict(),
         "agent_task_report": task_report.to_dict(),
     }
@@ -363,6 +382,55 @@ def _requires_app_bridge(task_report: AgentTaskRunReport) -> bool:
         not selected.background_capable
         and task_report.command_plan.error == "transport_has_no_command_contract"
     )
+
+
+def _run_app_surface_probe(
+    *,
+    runner: AppSurfaceProbeRunner | None,
+    agent: str,
+    project_name: str,
+    task_name: str,
+    resolver: WindowsAppResolver | None,
+    enabled: bool,
+) -> dict:
+    if not enabled or not callable(runner):
+        return {}
+    try:
+        result = runner(
+            agent=agent,
+            project_name=project_name,
+            task_name=task_name,
+            resolver=resolver,
+        )
+        return _report_to_dict(result)
+    except Exception as exc:
+        return {
+            "mode": "agent-app-surface-probe",
+            "safety_mode": "read_only",
+            "ok": False,
+            "decision": "agent_app_surface_probe_failed",
+            "control_allowed": False,
+            "control_attempts": 0,
+            "error": str(exc) or exc.__class__.__name__,
+        }
+
+
+def _report_to_dict(report: object) -> dict:
+    if isinstance(report, dict):
+        return dict(report)
+    to_dict = getattr(report, "to_dict", None)
+    if callable(to_dict):
+        data = to_dict()
+        if isinstance(data, dict):
+            return dict(data)
+    return {
+        "mode": "agent-app-surface-probe",
+        "safety_mode": "read_only",
+        "ok": False,
+        "decision": "agent_app_surface_probe_invalid_report",
+        "control_allowed": False,
+        "control_attempts": 0,
+    }
 
 
 def _execution_evidence_text(report: dict) -> str:

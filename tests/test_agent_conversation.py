@@ -42,6 +42,14 @@ class _FakeCommandExecutor:
         return self.result
 
 
+class _FakeAppSurfaceProbeReport:
+    def __init__(self, **payload):
+        self.payload = dict(payload)
+
+    def to_dict(self):
+        return dict(self.payload)
+
+
 class AgentConversationTests(unittest.TestCase):
     def test_default_run_writes_targeted_conversation_draft_without_execution(self):
         resolver = _resolver_with_codex_cli()
@@ -183,6 +191,64 @@ class AgentConversationTests(unittest.TestCase):
             "desktop-shell-native-bridge-or-foreground",
         )
 
+    def test_app_surface_execute_runs_read_only_probe_diagnostics_when_bridge_required(self):
+        resolver = _resolver_with_claude_desktop()
+        executor = _FakeCommandExecutor()
+        probe_calls = []
+
+        def _fake_probe_runner(**kwargs):
+            probe_calls.append(dict(kwargs))
+            return _FakeAppSurfaceProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=False,
+                decision="agent_app_window_not_found",
+                agent=kwargs["agent"],
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_allowed=False,
+                control_attempts=0,
+                endpoint_count=0,
+                ready_endpoint_count=0,
+                app_uia_probe={"decision": "agent_app_window_not_found"},
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = run_agent_conversation(
+                agent="claude desktop",
+                project_name="openwukong",
+                task_name="desktop-message",
+                message="Send this through the app surface.",
+                workspace_root=str(root),
+                output_root=str(root / "out"),
+                execute=True,
+                allow_agent_task=True,
+                confirmed_effect_ids=(
+                    "agent_task_submission.submit_task",
+                    "agent_start.start_agent",
+                ),
+                resolver=resolver,
+                command_executor=executor,
+                app_surface_probe_runner=_fake_probe_runner,
+            )
+            data = report.to_dict()
+            draft = json.loads(Path(data["draft_artifact_path"]).read_text(encoding="utf-8"))
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "agent_conversation_requires_app_bridge_or_foreground")
+        self.assertEqual(data["agent_command_attempts"], 0)
+        self.assertEqual(len(executor.requests), 0)
+        self.assertEqual(len(probe_calls), 1)
+        self.assertEqual(probe_calls[0]["agent"], "claude desktop")
+        self.assertEqual(probe_calls[0]["project_name"], "openwukong")
+        self.assertEqual(probe_calls[0]["task_name"], "desktop-message")
+        self.assertIs(probe_calls[0]["resolver"], resolver)
+        self.assertEqual(data["app_surface_probe"]["mode"], "agent-native-connector-probe")
+        self.assertEqual(data["app_surface_probe"]["decision"], "agent_app_window_not_found")
+        self.assertEqual(data["app_surface_probe"]["control_attempts"], 0)
+        self.assertEqual(draft["app_surface_probe"]["decision"], "agent_app_window_not_found")
+
     def test_main_writes_json_report(self):
         resolver = _resolver_with_codex_cli()
 
@@ -218,6 +284,64 @@ class AgentConversationTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "agent-conversation-runner")
         self.assertEqual(payload["decision"], "conversation_draft_written")
         self.assertEqual(payload["agent_command_attempts"], 0)
+
+    def test_main_attaches_app_surface_probe_for_app_execute_request(self):
+        resolver = _resolver_with_claude_desktop()
+        probe_calls = []
+
+        def _fake_probe_runner(**kwargs):
+            probe_calls.append(dict(kwargs))
+            return {
+                "mode": "agent-native-connector-probe",
+                "safety_mode": "read_only",
+                "ok": False,
+                "decision": "agent_native_connector_not_exposed",
+                "control_allowed": False,
+                "control_attempts": 0,
+                "endpoint_count": 0,
+                "ready_endpoint_count": 0,
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "agent-conversation.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--agent",
+                        "claude desktop",
+                        "--project-name",
+                        "openwukong",
+                        "--task-name",
+                        "desktop-message",
+                        "--message",
+                        "Draft a message.",
+                        "--workspace-root",
+                        str(root),
+                        "--output-root",
+                        str(root / "out"),
+                        "--execute",
+                        "--allow-agent-task",
+                        "--confirm-effect",
+                        "agent_task_submission.submit_task",
+                        "--confirm-effect",
+                        "agent_start.start_agent",
+                        "--output",
+                        str(output),
+                        "--json",
+                    ],
+                    resolver_factory=lambda args: resolver,
+                    app_surface_probe_runner=_fake_probe_runner,
+                )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["decision"], "agent_conversation_requires_app_bridge_or_foreground")
+        self.assertEqual(payload["agent_command_attempts"], 0)
+        self.assertEqual(payload["app_surface_probe"]["mode"], "agent-native-connector-probe")
+        self.assertEqual(payload["app_surface_probe"]["decision"], "agent_native_connector_not_exposed")
+        self.assertEqual(len(probe_calls), 1)
+        self.assertEqual(probe_calls[0]["agent"], "claude desktop")
 
 
 def _resolver_with_codex_cli():
