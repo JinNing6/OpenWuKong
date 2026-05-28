@@ -19,6 +19,7 @@ from openwukong.evaluation.agent_app_uia_probe import (
     run_agent_app_uia_probe,
     main,
 )
+from openwukong.evaluation.window_capture import BackgroundWindowCaptureReport
 
 
 class AgentAppUiaProbeTests(unittest.TestCase):
@@ -163,6 +164,54 @@ class AgentAppUiaProbeTests(unittest.TestCase):
         self.assertTrue(data["project_match"]["matched"])
         self.assertFalse(data["project_match"]["visible"])
 
+    def test_captures_matched_app_window_without_control_attempts_when_requested(self):
+        observer = StaticAccessibilityObserver(
+            [
+                AccessibilityWindowSnapshot(
+                    pid=84,
+                    process_name="Codex.exe",
+                    window_title="Codex",
+                    hwnd=7001,
+                    elements=(
+                        AccessibilityElementSnapshot(
+                            control_type="Text",
+                            name="openwukong",
+                            rect=(10, 10, 300, 40),
+                            patterns=("Text",),
+                        ),
+                        AccessibilityElementSnapshot(
+                            control_type="Edit",
+                            name="Ask Codex",
+                            rect=(300, 800, 1000, 880),
+                            is_enabled=True,
+                            patterns=("Value",),
+                        ),
+                    ),
+                )
+            ]
+        )
+        capture = FakeBackgroundCaptureProvider()
+
+        with tempfile.TemporaryDirectory() as td:
+            screenshot_dir = Path(td)
+            report = run_agent_app_uia_probe(
+                agent="codex app",
+                project_name="openwukong",
+                observer=observer,
+                resolver=_resolver_with_codex_desktop(),
+                screenshot_dir=screenshot_dir,
+                window_capture_provider=capture,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["background_screenshot_count"], 1)
+        self.assertTrue(data["background_screenshot_focus_stable"])
+        self.assertEqual(capture.events, [7001])
+        self.assertEqual(data["background_screenshots"][0]["hwnd"], 7001)
+        self.assertTrue(data["background_screenshots"][0]["ok"])
+        self.assertFalse(data["background_screenshots"][0]["foreground_changed"])
+
     def test_main_can_replay_accessibility_json(self):
         payload = {
             "windows": [
@@ -218,6 +267,60 @@ class AgentAppUiaProbeTests(unittest.TestCase):
         self.assertEqual(data["decision"], "agent_app_uia_ready")
         self.assertEqual(data["matched_window_count"], 1)
 
+    def test_main_writes_background_screenshot_artifact_when_requested(self):
+        payload = {
+            "windows": [
+                {
+                    "pid": 42,
+                    "process_name": "Codex.exe",
+                    "window_title": "Codex",
+                    "class_name": "Chrome_WidgetWin_1",
+                    "hwnd": 123,
+                    "elements": [
+                        {
+                            "control_type": "Text",
+                            "name": "openwukong",
+                            "rect": [0, 0, 100, 40],
+                            "patterns": ["Text"],
+                            "is_enabled": True,
+                        }
+                    ],
+                }
+            ]
+        }
+        capture = FakeBackgroundCaptureProvider()
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            input_path = root / "accessibility.json"
+            output_path = root / "probe.json"
+            screenshot_dir = root / "screenshots"
+            input_path.write_text(json.dumps(payload), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--agent",
+                        "codex app",
+                        "--project-name",
+                        "openwukong",
+                        "--input",
+                        str(input_path),
+                        "--output",
+                        str(output_path),
+                        "--screenshot-dir",
+                        str(screenshot_dir),
+                        "--json",
+                    ],
+                    resolver_factory=lambda args: _resolver_with_codex_desktop(),
+                    window_capture_provider=capture,
+                )
+            data = json.loads(output_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(capture.events, [123])
+        self.assertEqual(data["background_screenshot_count"], 1)
+        self.assertEqual(data["background_screenshots"][0]["mode"], "fake-background-capture")
+
 
 def _resolver_with_codex_desktop():
     return WindowsAppResolver(
@@ -236,6 +339,26 @@ def _resolver_with_codex_desktop():
             ),
         )
     )
+
+
+class FakeBackgroundCaptureProvider:
+    def __init__(self):
+        self.events = []
+
+    def capture_window(self, hwnd: int, output_path: Path) -> BackgroundWindowCaptureReport:
+        self.events.append(int(hwnd))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"fake screenshot")
+        return BackgroundWindowCaptureReport(
+            hwnd=int(hwnd),
+            output_path=str(output_path),
+            ok=True,
+            mode="fake-background-capture",
+            width=800,
+            height=600,
+            foreground_hwnd_before=9001,
+            foreground_hwnd_after=9001,
+        )
 
 
 if __name__ == "__main__":

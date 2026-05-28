@@ -24,6 +24,10 @@ from openwukong.evaluation.accessibility_probe import (
     PywinautoAccessibilityObserver,
     WindowsCapabilityProbe,
 )
+from openwukong.evaluation.window_capture import (
+    BackgroundWindowCaptureReport,
+    PrintWindowBackgroundCaptureProvider,
+)
 
 
 _SEMANTIC_COMPOSER_PATTERNS = {"Value", "TextEdit"}
@@ -166,6 +170,7 @@ class AgentAppUiaProbeReport:
     project_match: AgentAppTextMatchReport
     task_match: AgentAppTextMatchReport
     composer_candidates: tuple[AgentAppElementEvidence, ...]
+    background_screenshots: tuple[BackgroundWindowCaptureReport, ...] = ()
     foreground_takeover_request: ForegroundTakeoverRequest | None = None
     accessibility_window_count: int = 0
     accessibility_total_elements: int = 0
@@ -198,6 +203,18 @@ class AgentAppUiaProbeReport:
     @property
     def semantic_composer_count(self) -> int:
         return sum(1 for item in self.composer_candidates if item.semantic_composer)
+
+    @property
+    def background_screenshot_count(self) -> int:
+        return len(self.background_screenshots)
+
+    @property
+    def background_screenshot_success_count(self) -> int:
+        return sum(1 for item in self.background_screenshots if item.ok)
+
+    @property
+    def background_screenshot_focus_stable(self) -> bool:
+        return not any(item.foreground_changed for item in self.background_screenshots)
 
     @property
     def target_matched(self) -> bool:
@@ -250,6 +267,10 @@ class AgentAppUiaProbeReport:
             "composer_candidate_count": self.composer_candidate_count,
             "semantic_composer_count": self.semantic_composer_count,
             "composer_candidates": [item.to_dict() for item in self.composer_candidates],
+            "background_screenshot_count": self.background_screenshot_count,
+            "background_screenshot_success_count": self.background_screenshot_success_count,
+            "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
+            "background_screenshots": [item.to_dict() for item in self.background_screenshots],
             "foreground_takeover_request": (
                 self.foreground_takeover_request.to_dict()
                 if self.foreground_takeover_request
@@ -273,6 +294,8 @@ def run_agent_app_uia_probe(
     observer: object | None = None,
     resolver: WindowsAppResolver | None = None,
     accessibility_report: AccessibilityCapabilityReport | None = None,
+    screenshot_dir: str | Path = "",
+    window_capture_provider: object | None = None,
     max_windows: int = 80,
     max_elements: int = 1200,
 ) -> AgentAppUiaProbeReport:
@@ -292,6 +315,11 @@ def run_agent_app_uia_probe(
     project_match = _match_text(matched_windows, str(project_name or "").strip())
     task_match = _match_text(matched_windows, str(task_name or "").strip())
     composer_candidates = _find_composer_candidates(matched_windows)
+    background_screenshots = _capture_background_screenshots(
+        matched_windows,
+        screenshot_dir=screenshot_dir,
+        window_capture_provider=window_capture_provider,
+    )
     foreground_request = None
     if surface.ok and matched_windows and project_match.matched and task_match.matched and not any(
         item.semantic_composer for item in composer_candidates
@@ -306,6 +334,7 @@ def run_agent_app_uia_probe(
         project_match=project_match,
         task_match=task_match,
         composer_candidates=composer_candidates,
+        background_screenshots=background_screenshots,
         foreground_takeover_request=foreground_request,
         accessibility_window_count=report.window_count,
         accessibility_total_elements=report.total_elements,
@@ -325,6 +354,7 @@ def format_agent_app_uia_probe_report(report: AgentAppUiaProbeReport) -> str:
         f"Decision: {report.decision}  OK: {str(report.ok).lower()}  Control attempts: {report.control_attempts}",
         f"Agent: {report.agent}  Project: {report.project_name or '-'}  Task: {report.task_name or '-'}",
         f"Matched windows: {report.matched_window_count}  Composer candidates: {report.composer_candidate_count}  Semantic composers: {report.semantic_composer_count}",
+        f"Background screenshots: {report.background_screenshot_success_count}/{report.background_screenshot_count}",
         f"Project match: {report.project_match.decision}  Task match: {report.task_match.decision}",
     ]
     for window in report.matched_windows:
@@ -340,6 +370,7 @@ def main(
     *,
     resolver_factory: object | None = None,
     observer: object | None = None,
+    window_capture_provider: object | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(description="Run a read-only agent app UIA probe.")
     parser.add_argument("--agent", required=True, help="Agent app surface, for example 'codex app'.")
@@ -348,6 +379,7 @@ def main(
     parser.add_argument("--input", default="", help="Replay an accessibility_probe JSON file.")
     parser.add_argument("--output", default="", help="Write the probe report JSON to a file.")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text.")
+    parser.add_argument("--screenshot-dir", default="", help="Optionally write no-focus background screenshots for matched windows.")
     parser.add_argument("--max-windows", type=int, default=80)
     parser.add_argument("--max-elements", type=int, default=1200)
     args = parser.parse_args(argv)
@@ -361,6 +393,8 @@ def main(
         observer=observer,
         resolver=resolver,
         accessibility_report=accessibility_report,
+        screenshot_dir=args.screenshot_dir,
+        window_capture_provider=window_capture_provider,
         max_windows=args.max_windows,
         max_elements=args.max_elements,
     )
@@ -392,6 +426,41 @@ def _matching_agent_windows(
         if process_name in process_names:
             matched.append(window)
     return tuple(matched)
+
+
+def _capture_background_screenshots(
+    windows: tuple[AccessibilityWindowSnapshot, ...],
+    *,
+    screenshot_dir: str | Path = "",
+    window_capture_provider: object | None = None,
+) -> tuple[BackgroundWindowCaptureReport, ...]:
+    if not str(screenshot_dir or "").strip():
+        return ()
+    provider = window_capture_provider or PrintWindowBackgroundCaptureProvider()
+    capture = getattr(provider, "capture_window", None)
+    if not callable(capture):
+        return ()
+    root = Path(screenshot_dir)
+    reports: list[BackgroundWindowCaptureReport] = []
+    for index, window in enumerate(windows, start=1):
+        hwnd = int(window.hwnd or 0)
+        if hwnd <= 0:
+            continue
+        stem = _safe_filename(
+            f"{index:02d}-{window.process_name or 'window'}-{window.pid or 0}-{hwnd}"
+        )
+        output_path = root / f"{stem}.png"
+        try:
+            report = capture(hwnd, output_path)
+        except Exception as exc:
+            report = BackgroundWindowCaptureReport(
+                hwnd=hwnd,
+                output_path=str(output_path),
+                ok=False,
+                error=f"capture_exception:{type(exc).__name__}",
+            )
+        reports.append(report)
+    return tuple(reports)
 
 
 def _match_text(
@@ -648,6 +717,15 @@ def _process_name_for_agent(agent_id: str) -> str:
     if normalized == "claude":
         return "Claude.exe"
     return str(agent_id or "").strip()
+
+
+def _safe_filename(value: str) -> str:
+    text = "".join(
+        ch if ch.isalnum() or ch in {"-", "_", "."} else "-"
+        for ch in str(value or "")
+    )
+    text = "-".join(part for part in text.split("-") if part)
+    return text[:120] or "window"
 
 
 def _write_stdout(text: str) -> None:

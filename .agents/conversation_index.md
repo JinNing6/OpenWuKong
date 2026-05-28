@@ -4547,3 +4547,52 @@ When a new conversation starts in this repo:
       and Claude Desktop remain app-surface gated
     - add no-focus screenshot/visual verification only after the deterministic
       app bridge exists
+- 2026-05-28 added no-focus background screenshot artifacts to agent app UIA
+  probes:
+  - implementation:
+    - added `openwukong.evaluation.window_capture`
+    - introduced `BackgroundWindowCaptureReport` and
+      `PrintWindowBackgroundCaptureProvider`
+    - `agent_app_uia_probe` now supports optional `--screenshot-dir`
+    - when requested, matched app windows with HWNDs are captured to PNG
+      artifacts without clicking, typing, setting foreground, or using window
+      input
+    - reports now include:
+      `background_screenshot_count`,
+      `background_screenshot_success_count`,
+      `background_screenshot_focus_stable`, and per-screenshot
+      foreground-HWND before/after evidence
+  - safe real validation:
+    - Claude Desktop app UIA probe with `--screenshot-dir` captured:
+      `logs\runtime\agent-app-uia\claude-desktop-screenshots-r14\01-claude.exe-77064-138024.png`
+    - report saved:
+      `logs\runtime\agent-app-uia\claude-desktop-uia-screenshot-r14.json`
+    - result:
+      `control_attempts=0`,
+      `background_screenshot_count=1`,
+      `background_screenshot_success_count=1`,
+      `background_screenshot_focus_stable=true`
+    - the captured image showed the real Claude Desktop window and current
+      conversation state; project/task match was still missing, so the probe
+      correctly did not claim task readiness
+  - TDD coverage added:
+    - direct `run_agent_app_uia_probe(...)` screenshot injection keeps
+      `control_attempts=0` and records stable foreground evidence
+    - CLI `--screenshot-dir` writes screenshot metadata into the JSON report
+  - verification:
+    - `python -m unittest discover tests`: `397 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - app-surface observation now has a concrete visual artifact path that can
+      verify what was seen without stealing focus
+    - this improves verification for Claude/Codex app surfaces, but does not
+      change the execution gate: direct background send still requires a
+      native bridge or deterministic endpoint
+  - next high-value steps:
+    - pass screenshot options through higher-level native/conversation probes
+      when a caller needs visual evidence
+    - design and implement the native bridge command contract for app-side
+      message submission
+    - keep proving foreground stability on every real screenshot run instead
+      of assuming screenshot success implies no-focus behavior
