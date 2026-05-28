@@ -20,6 +20,10 @@ from openwukong.control.session_readiness_plan import (
     SessionReadinessLauncher,
     SessionReadinessTerminator,
 )
+from openwukong.control.wechat_uia_action import (
+    WeChatUiaSemanticActionDryRunAdapter,
+    build_wechat_uia_semantic_action_request,
+)
 from openwukong.evaluation.accessibility_probe import (
     PywinautoAccessibilityObserver,
     WindowsCapabilityProbe,
@@ -143,6 +147,40 @@ class PrimaryRealNoLossReport:
         return sum(case.window_input_attempts for case in self.cases)
 
     @property
+    def uia_semantic_action_ready_cases(self) -> int:
+        return sum(
+            1
+            for case in self.cases
+            if bool(case.details.get("uia_semantic_action_ready", False))
+        )
+
+    @property
+    def uia_value_set_attempts(self) -> int:
+        return sum(
+            int(
+                case.details.get("uia_semantic_action_dry_run", {}).get(
+                    "uia_value_set_attempts",
+                    0,
+                )
+                or 0
+            )
+            for case in self.cases
+        )
+
+    @property
+    def uia_invoke_attempts(self) -> int:
+        return sum(
+            int(
+                case.details.get("uia_semantic_action_dry_run", {}).get(
+                    "uia_invoke_attempts",
+                    0,
+                )
+                or 0
+            )
+            for case in self.cases
+        )
+
+    @property
     def real_user_filesystem_scan_attempts(self) -> int:
         return sum(case.real_user_filesystem_scan_attempts for case in self.cases)
 
@@ -191,6 +229,9 @@ class PrimaryRealNoLossReport:
             "control_attempts": self.control_attempts,
             "external_communication_attempts": self.external_communication_attempts,
             "window_input_attempts": self.window_input_attempts,
+            "uia_semantic_action_ready_cases": self.uia_semantic_action_ready_cases,
+            "uia_value_set_attempts": self.uia_value_set_attempts,
+            "uia_invoke_attempts": self.uia_invoke_attempts,
             "real_user_filesystem_scan_attempts": self.real_user_filesystem_scan_attempts,
             "user_file_modification_attempts": self.user_file_modification_attempts,
             "owned_app_launch_attempts": self.owned_app_launch_attempts,
@@ -352,6 +393,9 @@ def summarize_report(report: PrimaryRealNoLossReport) -> dict:
         "control_attempts": report.control_attempts,
         "external_communication_attempts": report.external_communication_attempts,
         "window_input_attempts": report.window_input_attempts,
+        "uia_semantic_action_ready_cases": report.uia_semantic_action_ready_cases,
+        "uia_value_set_attempts": report.uia_value_set_attempts,
+        "uia_invoke_attempts": report.uia_invoke_attempts,
         "real_user_filesystem_scan_attempts": report.real_user_filesystem_scan_attempts,
         "user_file_modification_attempts": report.user_file_modification_attempts,
         "owned_app_launch_attempts": report.owned_app_launch_attempts,
@@ -497,6 +541,14 @@ def _wechat_case(
         screenshot_dir=screenshot_root,
         window_capture_provider=window_capture_provider,
     )
+    background_focus_stable = not any(
+        item.foreground_changed for item in background_screenshots
+    )
+    semantic_action_dry_run = _wechat_uia_semantic_action_dry_run(
+        row,
+        matches,
+        background_screenshot_focus_stable=background_focus_stable,
+    )
     details = {
         "matching_window_count": len(matches),
         "windows": [
@@ -508,12 +560,12 @@ def _wechat_case(
         "background_screenshot_success_count": sum(
             1 for item in background_screenshots if item.ok
         ),
-        "background_screenshot_focus_stable": not any(
-            item.foreground_changed for item in background_screenshots
-        ),
+        "background_screenshot_focus_stable": background_focus_stable,
         "background_screenshots": [
             item.to_dict() for item in background_screenshots
         ],
+        "uia_semantic_action_ready": bool(semantic_action_dry_run.get("ok", False)),
+        "uia_semantic_action_dry_run": semantic_action_dry_run,
         "total_scanned_windows": report.window_count,
         "total_scanned_elements": report.total_elements,
     }
@@ -528,6 +580,35 @@ def _wechat_case(
         send_attempts=0,
         window_input_attempts=0,
     )
+
+
+def _wechat_uia_semantic_action_dry_run(
+    row: dict,
+    matches: list[object],
+    *,
+    background_screenshot_focus_stable: bool,
+) -> dict:
+    plan = dict(row.get("plan", {}) or {})
+    intent = dict(plan.get("draft_action", {}).get("intent", {}) or {})
+    target_name = str(
+        intent.get("contact", "")
+        or intent.get("target_name", "")
+        or intent.get("recipient", "")
+        or ""
+    ).strip()
+    message = str(intent.get("message", "") or "").strip()
+    request = build_wechat_uia_semantic_action_request(
+        target_name=target_name,
+        message=message,
+        windows=tuple(matches),
+        background_screenshot_focus_stable=background_screenshot_focus_stable,
+        selected_transport={
+            "transport_id": "wechat-uia-semantic-dry-run",
+            "transport_channel": "uia",
+            "safety_mode": "dry_run",
+        },
+    )
+    return WeChatUiaSemanticActionDryRunAdapter().prepare(request).to_dict()
 
 
 def _file_case(row: dict, output_root: Path) -> PrimaryRealNoLossCase:
@@ -679,7 +760,7 @@ def _write_case_artifact(output_root: Path, case: PrimaryRealNoLossCase) -> Prim
     artifact_path = artifact_dir / f"{_safe_filename(case.case_id)}.json"
     data = case.to_dict()
     artifact_path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
+        json.dumps(data, ensure_ascii=True, indent=2),
         encoding="utf-8",
     )
     return dataclasses.replace(case, artifact_path=str(artifact_path))

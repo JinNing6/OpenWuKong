@@ -308,6 +308,9 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             self.assertEqual(data["control_attempts"], 0)
             self.assertEqual(data["external_communication_attempts"], 0)
             self.assertEqual(data["window_input_attempts"], 0)
+            self.assertEqual(data["uia_semantic_action_ready_cases"], 1)
+            self.assertEqual(data["uia_value_set_attempts"], 0)
+            self.assertEqual(data["uia_invoke_attempts"], 0)
             self.assertEqual(data["real_user_filesystem_scan_attempts"], 0)
             self.assertEqual(data["user_file_modification_attempts"], 0)
             self.assertEqual(data["owned_app_launch_attempts"], 1)
@@ -338,6 +341,16 @@ class PrimaryRealNoLossTests(unittest.TestCase):
                 cases["wechat.chat.draft_reply"]["details"]["locator"]["windows"][0]["win32_child_window_count"],
                 1,
             )
+            dry_run = cases["wechat.chat.draft_reply"]["details"]["uia_semantic_action_dry_run"]
+            self.assertTrue(cases["wechat.chat.draft_reply"]["details"]["uia_semantic_action_ready"])
+            self.assertEqual(dry_run["decision"], "wechat_uia_semantic_action_dry_run_ready")
+            self.assertEqual(dry_run["send_attempts"], 0)
+            self.assertEqual(dry_run["window_input_attempts"], 0)
+            self.assertEqual(dry_run["uia_value_set_attempts"], 0)
+            self.assertEqual(dry_run["uia_invoke_attempts"], 0)
+            self.assertTrue(dry_run["request"]["target_ready"])
+            self.assertTrue(dry_run["request"]["uia_value_pattern_ready"])
+            self.assertTrue(dry_run["request"]["uia_invoke_pattern_ready"])
 
             self.assertEqual(cases["browser.research.collect_sources"]["status"], "verified")
             self.assertEqual(
@@ -412,13 +425,18 @@ class PrimaryRealNoLossTests(unittest.TestCase):
                 artifact_path = Path(case["artifact_path"]).resolve()
                 self.assertTrue(str(artifact_path).startswith(str(output_root)))
                 self.assertTrue(artifact_path.is_file())
-                artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+                artifact_text = artifact_path.read_text(encoding="utf-8")
+                self.assertTrue(all(ord(char) < 128 for char in artifact_text))
+                artifact = json.loads(artifact_text)
                 self.assertEqual(artifact["safety_mode"], "real_no_loss")
 
             summary = summarize_report(report)
             self.assertEqual(summary["mode"], "primary-scenario-real-no-loss-summary")
             self.assertEqual(summary["passed_cases"], 5)
             self.assertEqual(summary["real_verified_cases"], 5)
+            self.assertEqual(summary["uia_semantic_action_ready_cases"], 1)
+            self.assertEqual(summary["uia_value_set_attempts"], 0)
+            self.assertEqual(summary["uia_invoke_attempts"], 0)
             self.assertNotIn("details", summary["scenarios"][0])
 
     def test_runner_can_attach_no_focus_background_screenshots_to_wechat_case(self):

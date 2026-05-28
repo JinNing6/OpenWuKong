@@ -4995,3 +4995,56 @@ When a new conversation starts in this repo:
       native/CDP bridge or a UIA-exposed ValuePattern composer; Claude/Cursor
       need the intended project surface to be visible before semantic action
       can be considered
+- 2026-05-28 added WeChat UIA semantic action dry-run readiness:
+  - implementation:
+    - added `openwukong.control.wechat_uia_action`, a dry-run contract for
+      WeChat conversation targets based on target visibility, UIA ValuePattern
+      composer readiness, UIA InvokePattern submit readiness, and no-focus
+      background screenshot stability
+    - integrated the WeChat dry-run into `primary_real_no_loss` details and
+      summary counters:
+      `uia_semantic_action_ready_cases`, `uia_value_set_attempts`,
+      `uia_invoke_attempts`
+    - primary real no-loss case artifacts are now ASCII-escaped JSON so
+      Windows PowerShell `ConvertFrom-Json` can parse them reliably even when
+      fixture text contains Chinese/mojibake strings
+  - official-doc basis:
+    - Microsoft UI Automation control patterns define semantic provider
+      capabilities independent of visual appearance
+    - Microsoft `ValuePattern.SetValue` and `InvokePattern.Invoke` are the
+      semantic write/invoke primitives, but this layer is dry-run only
+    - Python `json.dumps` defaults `ensure_ascii=True`, which is safer for
+      Windows-side JSON audit tooling
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.primary_real_no_loss tests\fixtures\evaluation\l1_primary_user_scenarios.json --output-root logs\runtime\primary-real-no-loss-r7-wechat-uia --background-screenshot-dir logs\runtime\primary-real-no-loss-r7-wechat-uia\background-screenshots --summary-json`
+    - result:
+      `passed_cases=5/5`, `failed_cases=0`, `real_verified_cases=3`,
+      `background_screenshot_count=1`,
+      `background_screenshot_success_count=1`,
+      `background_screenshot_focus_stable=true`
+    - safety counters remained zero:
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `uia_value_set_attempts=0`,
+      `uia_invoke_attempts=0`, `real_user_filesystem_scan_attempts=0`,
+      `user_file_modification_attempts=0`
+    - live WeChat diagnosis:
+      WeChat was observable and captured in the background, but current UIA
+      exposure was only one structural Pane; no target contact, ValuePattern
+      composer, or InvokePattern submit control was exposed, so decision was
+      `wechat_uia_semantic_action_target_not_ready`
+    - artifact parse verification:
+      PowerShell `ConvertFrom-Json` successfully parsed
+      `logs\runtime\primary-real-no-loss-r7-wechat-uia\real_no_loss\wechat_chat_draft_reply.json`
+  - verification:
+    - `python -m unittest discover tests`: `428 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - prior real WeChat File Transfer Assistant sending remains valid as an
+      explicit foreground opt-in path
+    - the no-focus background path is now correctly evidence-gated: current
+      live WeChat build does not expose enough UIA semantics for precise
+      background sending, so a WeChat native bridge/hook or controlled
+      foreground-prep plus confirmation remains required before background
+      write actions can be enabled
