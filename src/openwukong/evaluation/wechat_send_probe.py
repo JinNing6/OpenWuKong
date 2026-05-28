@@ -15,6 +15,11 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from openwukong.control.foreground_takeover import (
+    ForegroundTakeoverRequest,
+    validate_foreground_takeover_request,
+)
+
 
 _FILE_HELPER_TARGET = "文件传输助手"
 _MAX_MESSAGE_LENGTH = 500
@@ -40,8 +45,13 @@ class WeChatSendProbeReport:
     post_send_screenshot_hwnd: int = 0
     post_send_screenshot_bound: bool = False
     post_send_screenshot_mode: str = ""
+    post_send_verified: bool = False
+    post_send_verification: dict = dataclasses.field(default_factory=dict)
     artifact_path: str = ""
     transport: str = "foreground-keyboard-clipboard"
+    foreground_takeover_validated: bool = False
+    foreground_takeover_validation: dict = dataclasses.field(default_factory=dict)
+    foreground_takeover_request: dict = dataclasses.field(default_factory=dict)
     phases: tuple[dict, ...] = ()
     error: str = ""
     elapsed_ms: float = 0.0
@@ -76,8 +86,13 @@ class WeChatSendProbeReport:
             "post_send_screenshot_hwnd": self.post_send_screenshot_hwnd,
             "post_send_screenshot_bound": self.post_send_screenshot_bound,
             "post_send_screenshot_mode": self.post_send_screenshot_mode,
+            "post_send_verified": self.post_send_verified,
+            "post_send_verification": dict(self.post_send_verification),
             "artifact_path": self.artifact_path,
             "transport": self.transport,
+            "foreground_takeover_validated": self.foreground_takeover_validated,
+            "foreground_takeover_validation": dict(self.foreground_takeover_validation),
+            "foreground_takeover_request": dict(self.foreground_takeover_request),
             "phases": [dict(phase) for phase in self.phases],
             "error": self.error,
             "elapsed_ms": round(self.elapsed_ms, 3),
@@ -264,9 +279,11 @@ def run_wechat_file_helper_send_probe(
     message: str,
     target_name: str = _FILE_HELPER_TARGET,
     allow_send: bool = False,
+    allow_external_target: bool = False,
     confirm_target_after_open: bool = False,
     automation: object | None = None,
     output_dir: str | Path = "",
+    foreground_takeover_request: ForegroundTakeoverRequest | dict | None = None,
 ) -> WeChatSendProbeReport:
     started = time.perf_counter()
     target = str(target_name or "").strip()
@@ -279,10 +296,10 @@ def run_wechat_file_helper_send_probe(
             message=text,
             allow_send=False,
         )
-    if target != _FILE_HELPER_TARGET:
+    if target != _FILE_HELPER_TARGET and not allow_external_target:
         return _report(
             started,
-            status="blocked_target_not_allowed",
+            status="blocked_external_target_requires_explicit_permission",
             target_name=target,
             message=text,
             allow_send=True,
@@ -302,6 +319,29 @@ def run_wechat_file_helper_send_probe(
             target_name=target,
             message=text,
             allow_send=True,
+        )
+
+    takeover_validation = validate_foreground_takeover_request(
+        foreground_takeover_request,
+        action="send_message",
+        target_process_names=("weixin.exe", "wechat.exe"),
+        selected_transport="foreground-keyboard-clipboard",
+    )
+    takeover_fields = _takeover_report_fields(takeover_validation)
+    if not takeover_validation.valid:
+        missing = takeover_validation.decision == "missing_foreground_takeover_request"
+        return _report(
+            started,
+            status=(
+                "blocked_foreground_takeover_request_required"
+                if missing
+                else "blocked_foreground_takeover_request_invalid"
+            ),
+            target_name=target,
+            message=text,
+            allow_send=True,
+            error=takeover_validation.decision,
+            **takeover_fields,
         )
 
     active = automation or Win32WeChatKeyboardAutomation()
@@ -366,6 +406,7 @@ def run_wechat_file_helper_send_probe(
                 previous_foreground_hwnd=previous_hwnd,
                 pre_send_screenshot_path=screenshot,
                 phases=tuple(phases),
+                **takeover_fields,
             )
 
         active.paste_text(text)
@@ -380,6 +421,13 @@ def run_wechat_file_helper_send_probe(
             post_send_screenshot_path,
         )
         post_send_bound = bool(post_send_screenshot)
+        post_send_verification = _verify_post_send_message(
+            active,
+            target,
+            text,
+            post_send_screenshot,
+        )
+        post_send_verified = bool(post_send_verification.get("verified"))
         phases.append(
             {
                 "phase": "send_message",
@@ -387,6 +435,14 @@ def run_wechat_file_helper_send_probe(
                 "send_attempts": 1,
                 "post_send_screenshot_path": post_send_screenshot,
                 "post_send_screenshot_bound": post_send_bound,
+            }
+        )
+        phases.append(
+            {
+                "phase": "post_action_verify",
+                "status": "ok" if post_send_verified else "unverified",
+                "verified": post_send_verified,
+                "method": post_send_verification.get("method", ""),
             }
         )
         active.restore_clipboard()
@@ -415,7 +471,10 @@ def run_wechat_file_helper_send_probe(
             post_send_screenshot_hwnd=window_hwnd if post_send_bound else 0,
             post_send_screenshot_bound=post_send_bound,
             post_send_screenshot_mode="bound-window" if post_send_bound else "",
+            post_send_verified=post_send_verified,
+            post_send_verification=post_send_verification,
             phases=tuple(phases),
+            **takeover_fields,
         )
     except Exception as exc:
         try:
@@ -447,6 +506,7 @@ def run_wechat_file_helper_send_probe(
             post_send_screenshot_path=post_send_screenshot,
             phases=tuple(phases),
             error=str(exc),
+            **takeover_fields,
         )
 
 
@@ -466,6 +526,44 @@ def _capture_bound_screenshot(active: object, hwnd: int, output_path: Path) -> s
         return ""
 
 
+def _verify_post_send_message(
+    active: object,
+    target_name: str,
+    message: str,
+    screenshot_path: str,
+) -> dict:
+    verifier = getattr(active, "verify_post_send_message", None)
+    if not callable(verifier):
+        return {
+            "verified": False,
+            "method": "not_available",
+            "target_name": target_name,
+            "message_preview": _clip(message),
+            "screenshot_path": screenshot_path,
+        }
+    try:
+        result = verifier(target_name, message, screenshot_path)
+    except Exception as exc:
+        return {
+            "verified": False,
+            "method": "verification_error",
+            "target_name": target_name,
+            "message_preview": _clip(message),
+            "screenshot_path": screenshot_path,
+            "error": str(exc),
+        }
+    if isinstance(result, dict):
+        data = dict(result)
+    else:
+        data = {"verified": bool(result)}
+    data.setdefault("method", "custom-verifier")
+    data.setdefault("target_name", target_name)
+    data.setdefault("message_preview", _clip(message))
+    data.setdefault("screenshot_path", screenshot_path)
+    data["verified"] = bool(data.get("verified"))
+    return data
+
+
 def _report(started: float, **kwargs) -> WeChatSendProbeReport:
     return WeChatSendProbeReport(
         elapsed_ms=(time.perf_counter() - started) * 1000,
@@ -481,6 +579,20 @@ def _persist_report(started: float, artifact_path: Path, **kwargs) -> WeChatSend
         encoding="utf-8",
     )
     return report
+
+
+def _clip(value: str, limit: int = 500) -> str:
+    text = str(value or "")
+    return text if len(text) <= limit else text[:limit]
+
+
+def _takeover_report_fields(validation) -> dict:
+    data = validation.to_dict()
+    return {
+        "foreground_takeover_validated": bool(validation.valid),
+        "foreground_takeover_validation": data,
+        "foreground_takeover_request": dict(data.get("request") or {}),
+    }
 
 
 def _capture_hwnd_with_print_window(hwnd: int, output_path: Path) -> bool:
@@ -569,7 +681,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--message", required=True)
     parser.add_argument("--target-name", default=_FILE_HELPER_TARGET)
     parser.add_argument("--allow-send", action="store_true")
+    parser.add_argument("--allow-external-target", action="store_true")
     parser.add_argument("--confirm-target-after-open", action="store_true")
+    parser.add_argument("--foreground-takeover-request", default="")
     parser.add_argument("--output-dir", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
@@ -577,8 +691,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         message=args.message,
         target_name=args.target_name,
         allow_send=args.allow_send,
+        allow_external_target=args.allow_external_target,
         confirm_target_after_open=args.confirm_target_after_open,
         output_dir=args.output_dir,
+        foreground_takeover_request=_load_foreground_takeover_request(args.foreground_takeover_request),
     )
     data = report.to_dict()
     if args.json:
@@ -586,6 +702,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         print(f"{data['status']} target={data['target_name']} send_attempts={data['send_attempts']}")
     return 0 if report.status in {"sent", "blocked_target_not_verified"} else 1
+
+
+def _load_foreground_takeover_request(path: str) -> dict | None:
+    if not str(path or "").strip():
+        return None
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and isinstance(payload.get("foreground_takeover_request"), dict):
+        return dict(payload["foreground_takeover_request"])
+    if isinstance(payload, dict):
+        return payload
+    return None
 
 
 if __name__ == "__main__":

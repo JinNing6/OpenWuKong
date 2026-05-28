@@ -23,7 +23,7 @@ class L1PrimaryUserScenariosTests(unittest.TestCase):
             for result in data["results"]
         }
 
-        self.assertEqual(report.total_cases, 4)
+        self.assertEqual(report.total_cases, 5)
         self.assertEqual(report.failed_cases, 0)
         self.assertEqual(
             set(plans),
@@ -31,6 +31,7 @@ class L1PrimaryUserScenariosTests(unittest.TestCase):
                 "wechat_chat_draft_reply",
                 "browser_research_collect_sources",
                 "files_search_find_candidate",
+                "word_document_create_background",
                 "codex_project_submit_task_draft",
             },
         )
@@ -92,6 +93,36 @@ class L1PrimaryUserScenariosTests(unittest.TestCase):
         )
 
         self.assertEqual(
+            plans["word_document_create_background"]["route_id"],
+            "office-word-com",
+        )
+        self.assertEqual(
+            plans["word_document_create_background"]["connector_id"],
+            "office-word",
+        )
+        self.assertEqual(
+            plans["word_document_create_background"]["proposed_action"],
+            "create_owned_word_document",
+        )
+        self.assertFalse(plans["word_document_create_background"]["requires_confirmation"])
+        self.assertIn(
+            "office_com_create_document",
+            plans["word_document_create_background"]["allowed_primitives"],
+        )
+        self.assertIn(
+            "modify_user_document",
+            plans["word_document_create_background"]["blocked_primitives"],
+        )
+        self.assertEqual(
+            plans["word_document_create_background"]["side_effect_policy"]["allowed_categories"],
+            ["recorded_read", "local_draft", "office_document"],
+        )
+        self.assertEqual(
+            plans["word_document_create_background"]["side_effect_policy"]["blocked_categories"],
+            ["office_document"],
+        )
+
+        self.assertEqual(
             plans["codex_project_submit_task_draft"]["route_id"],
             "codex-task-draft",
         )
@@ -124,7 +155,7 @@ class L1PrimaryUserScenariosTests(unittest.TestCase):
         data = json.loads(payload)
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(data["passed_cases"], 4)
+        self.assertEqual(data["passed_cases"], 5)
         self.assertEqual(
             data["results"][0]["primary_scenario_plan"]["safety_mode"],
             "simulation_only",
@@ -141,12 +172,12 @@ class L1PrimaryUserScenariosTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(data["mode"], "l1-simulation-summary")
         self.assertEqual(data["suite"], "l1-primary-user-scenarios")
-        self.assertEqual(data["passed_cases"], 4)
+        self.assertEqual(data["passed_cases"], 5)
         self.assertEqual(data["failed_cases"], 0)
         self.assertEqual(data["safety_mode"], "simulation_only")
         self.assertFalse(data["control_allowed"])
         self.assertEqual(data["control_attempts"], 0)
-        self.assertEqual(data["scenario_count"], 4)
+        self.assertEqual(data["scenario_count"], 5)
         self.assertNotIn("results", data)
         scenarios = {item["scenario_id"]: item for item in data["scenarios"]}
         self.assertEqual(
@@ -160,6 +191,14 @@ class L1PrimaryUserScenariosTests(unittest.TestCase):
         self.assertEqual(
             scenarios["browser.research.collect_sources"]["blocked_effect_categories"],
             ["browser_navigation", "browser_form_submit"],
+        )
+        self.assertEqual(
+            scenarios["word.document.create_background"]["proposed_action"],
+            "create_owned_word_document",
+        )
+        self.assertEqual(
+            scenarios["word.document.create_background"]["blocked_effect_categories"],
+            ["office_document"],
         )
         self.assertEqual(
             scenarios["codex.project.submit_task_draft"]["confirmation_required_effect_count"],

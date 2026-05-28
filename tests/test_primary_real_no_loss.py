@@ -9,6 +9,7 @@ from openwukong.evaluation.accessibility_probe import (
     StaticAccessibilityObserver,
 )
 from openwukong.evaluation.primary_real_no_loss import (
+    _resolve_installed_browser_executable,
     run_primary_real_no_loss,
     summarize_report,
 )
@@ -16,6 +17,11 @@ from openwukong.evaluation.simulation import load_simulation_fixture
 from openwukong.evaluation.wechat_locator import (
     StaticWin32WindowObserver,
     Win32ChildWindowSnapshot,
+)
+from openwukong.control.app_resolution import (
+    AppResolutionCandidate,
+    StaticAppCandidateProvider,
+    WindowsAppResolver,
 )
 
 
@@ -51,6 +57,44 @@ def _element(control_type: str, *, name: str = "", patterns=()):
 
 
 class PrimaryRealNoLossTests(unittest.TestCase):
+    def test_browser_executable_resolution_prefers_installed_exe_over_path_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            chrome = Path(tmp) / "chrome.exe"
+            chrome.write_text("fake chrome", encoding="utf-8")
+            resolver = WindowsAppResolver(
+                candidate_providers=(
+                    StaticAppCandidateProvider(
+                        [
+                            AppResolutionCandidate(
+                                source="start-menu",
+                                display_name="Google Chrome",
+                                path="C:/Start Menu/Google Chrome.lnk",
+                            ),
+                            AppResolutionCandidate(
+                                source="app-paths-registry",
+                                display_name="Google Chrome",
+                                executable_name="chrome.exe",
+                                path=str(chrome),
+                            ),
+                        ]
+                    ),
+                )
+            )
+
+            resolved = _resolve_installed_browser_executable(
+                "chrome.exe",
+                resolver=resolver,
+            )
+
+        self.assertEqual(resolved, str(chrome.resolve()))
+
+    def test_browser_executable_resolution_falls_back_to_requested_name(self):
+        resolver = WindowsAppResolver(candidate_providers=())
+
+        resolved = _resolve_installed_browser_executable("chrome.exe", resolver=resolver)
+
+        self.assertEqual(resolved, "chrome.exe")
+
     def test_runner_converts_primary_scenarios_to_real_no_loss_probes(self):
         fixture = load_simulation_fixture(
             Path("tests/fixtures/evaluation/l1_primary_user_scenarios.json")
@@ -73,6 +117,8 @@ class PrimaryRealNoLossTests(unittest.TestCase):
         readiness_calls: list[str] = []
         action_calls: list[dict] = []
         bridge_calls: list[str] = []
+        word_calls: list[dict] = []
+        browser_resolver_calls: list[str] = []
 
         def _fake_readiness_probe(debugger_url: str) -> dict:
             readiness_calls.append(debugger_url)
@@ -147,18 +193,46 @@ class PrimaryRealNoLossTests(unittest.TestCase):
                 "error": "",
             }
 
+        def _fake_word_background_probe(**kwargs) -> dict:
+            word_calls.append(dict(kwargs))
+            Path(kwargs["document_path"]).write_bytes(b"fake-docx")
+            return {
+                "mode": "office-word-background-probe",
+                "safety_mode": "background_office_com_no_loss",
+                "ok": True,
+                "decision": "word_background_probe_verified",
+                "document_path": kwargs["document_path"],
+                "marker": kwargs["marker"],
+                "readback_text": f"Marker: {kwargs['marker']}",
+                "save_verified": True,
+                "readback_verified": True,
+                "word_started": True,
+                "visible_requested": False,
+                "control_allowed": True,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "office_com_attempts": 1,
+                "error": "",
+            }
+
+        def _fake_browser_executable_resolver(requested: str) -> str:
+            browser_resolver_calls.append(requested)
+            return "C:/Program Files/Google/Chrome/Application/chrome.exe"
+
         with tempfile.TemporaryDirectory() as tmp:
+            launcher = _FakeReadinessLauncher()
             report = run_primary_real_no_loss(
                 fixture,
                 output_root=tmp,
                 allow_owned_browser_helper_launch=True,
-                owned_browser_helper_launcher=_FakeReadinessLauncher(),
+                owned_browser_helper_launcher=launcher,
                 owned_browser_helper_terminator=_FakeReadinessTerminator(),
                 owned_browser_helper_readiness_probe=_fake_readiness_probe,
                 owned_browser_helper_action_runner=_fake_browser_action_runner,
                 owned_browser_debug_port=9451,
                 owned_browser_executable="chrome.exe",
                 owned_browser_url="about:blank#openwukong-primary-smoke",
+                browser_executable_resolver=_fake_browser_executable_resolver,
                 accessibility_observer=observer,
                 wechat_win32_observer=StaticWin32WindowObserver(
                     {
@@ -178,6 +252,7 @@ class PrimaryRealNoLossTests(unittest.TestCase):
                 ),
                 ide_bridge_urls=("http://127.0.0.1:8787",),
                 ide_bridge_probe=_fake_ide_bridge_probe,
+                word_background_probe_runner=_fake_word_background_probe,
             )
             data = report.to_dict()
             output_root = Path(tmp).resolve()
@@ -191,8 +266,8 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             self.assertEqual(data["real_user_filesystem_scan_attempts"], 0)
             self.assertEqual(data["user_file_modification_attempts"], 0)
             self.assertEqual(data["owned_app_launch_attempts"], 1)
-            self.assertEqual(data["passed_cases"], 4)
-            self.assertEqual(data["real_verified_cases"], 4)
+            self.assertEqual(data["passed_cases"], 5)
+            self.assertEqual(data["real_verified_cases"], 5)
 
             cases = {case["scenario_id"]: case for case in data["cases"]}
             self.assertEqual(cases["wechat.chat.draft_reply"]["status"], "verified")
@@ -234,6 +309,11 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             )
             self.assertEqual(action_calls[0]["debugger_url"], "http://127.0.0.1:9451")
             self.assertEqual(readiness_calls, ["http://127.0.0.1:9451"])
+            self.assertEqual(browser_resolver_calls, ["chrome.exe"])
+            self.assertEqual(
+                launcher.calls[0]["argv"][0],
+                "C:/Program Files/Google/Chrome/Application/chrome.exe",
+            )
 
             self.assertEqual(cases["files.search.find_candidate"]["status"], "verified")
             self.assertEqual(
@@ -253,6 +333,27 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             for path in candidate_paths:
                 self.assertTrue(str(Path(path).resolve()).startswith(str(output_root)))
 
+            self.assertEqual(cases["word.document.create_background"]["status"], "verified")
+            self.assertEqual(
+                cases["word.document.create_background"]["real_probe_kind"],
+                "office-word-com-owned-document-background",
+            )
+            self.assertEqual(cases["word.document.create_background"]["window_input_attempts"], 0)
+            self.assertEqual(
+                cases["word.document.create_background"]["user_file_modification_attempts"],
+                0,
+            )
+            word_details = cases["word.document.create_background"]["details"]
+            self.assertEqual(word_details["decision"], "word_background_probe_verified")
+            self.assertEqual(word_details["office_com_attempts"], 1)
+            self.assertEqual(word_details["control_attempts"], 0)
+            self.assertEqual(word_details["window_input_attempts"], 0)
+            self.assertTrue(Path(word_details["document_path"]).resolve().is_file())
+            self.assertTrue(
+                str(Path(word_details["document_path"]).resolve()).startswith(str(output_root))
+            )
+            self.assertEqual(word_calls[0]["marker"], "OPENWUKONG_WORD_PRIMARY_SCENARIO")
+
             self.assertEqual(cases["codex.project.submit_task_draft"]["status"], "verified")
             self.assertEqual(
                 cases["codex.project.submit_task_draft"]["real_probe_kind"],
@@ -271,8 +372,8 @@ class PrimaryRealNoLossTests(unittest.TestCase):
 
             summary = summarize_report(report)
             self.assertEqual(summary["mode"], "primary-scenario-real-no-loss-summary")
-            self.assertEqual(summary["passed_cases"], 4)
-            self.assertEqual(summary["real_verified_cases"], 4)
+            self.assertEqual(summary["passed_cases"], 5)
+            self.assertEqual(summary["real_verified_cases"], 5)
             self.assertNotIn("details", summary["scenarios"][0])
 
 

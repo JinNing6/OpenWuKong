@@ -1,6 +1,6 @@
 # Conversation Index
 
-Last updated: 2026-05-27
+Last updated: 2026-05-28
 
 ## North Star
 
@@ -3342,3 +3342,1101 @@ When a new conversation starts in this repo:
       `status=sent`, `send_attempts=1`, `target_verified=true`
     - post-send artifact used bound WeChat HWND screenshot capture:
       `post_send_screenshot_bound=true`, `post_send_screenshot_mode=bound-window`
+- 2026-05-27 started the Background-Safe Control Layer:
+  - direction:
+    - shifted from proving foreground control works to making the system decide
+      whether an action can run without stealing focus
+    - added a pure plan-only transport capability matrix before adding more live
+      app actions
+  - added `openwukong.control.transport_capability`
+    - classifies route plan + intent into:
+      `background-native`, `background-read-only`, `foreground-required`, or
+      `blocked`
+    - records:
+      selected transport, transport channel, focus-safety, confirmation need,
+      risk flags, verification requirements, and fallback transports
+    - currently maps:
+      browser DevTools, IDE extension, Terminal native session, Git CLI, Office
+      object model, UIA semantic, UIA structural read-only, missing native bridge
+      foreground fallback, and no-route blocks
+  - integrated the matrix into `ControlFabric` dispatch reports:
+    - report now embeds `transport_capability`
+    - top-level report exposes:
+      `transport_capability_level`, `selected_transport`,
+      `can_execute_without_focus`, and
+      `transport_requires_user_confirmation`
+  - TDD coverage added:
+    - RED verified first for missing `openwukong.control.transport_capability`
+    - tests cover:
+      background-native browser DevTools, foreground-required WeChat send without
+      native bridge, background-read-only structural UIA, blocked overlay, and
+      ControlFabric report embedding
+  - current verification:
+    - focused transport capability tests:
+      `5 tests` passed
+    - related route/fabric regression suite:
+      `25 tests` passed
+    - targeted compileall over `src/openwukong/control` passed
+  - next high-value steps:
+    - add a CLI/report endpoint for the transport capability matrix
+    - enforce foreground-required actions through a user-visible confirmation gate
+    - add OCR/accessibility post-action verification for foreground transports
+- 2026-05-27 added the transport capability matrix CLI/report endpoint:
+  - direction:
+    - made the Background-Safe Control Layer runnable as a standalone read-only
+      profile before enforcing it in live execution paths
+  - added `openwukong.evaluation.transport_capability_matrix`
+    - CLI:
+      `python -m openwukong.evaluation.transport_capability_matrix`
+    - accepts action/text/max window options
+    - emits JSON with:
+      `background_native`, `background_read_only`, `foreground_required`,
+      `blocked`, `can_execute_without_focus`, and
+      `requires_user_confirmation`
+    - writes optional JSON artifacts through `--output`
+    - remains `plan_only` with `control_allowed=false` and
+      `control_attempts=0`
+  - live read-only validation:
+    - command:
+      `python -m openwukong.evaluation.transport_capability_matrix --max-windows 3 --max-elements 20 --action read_text --json`
+    - result:
+      scanned `3` windows, classified `2` as `background-native` read paths and
+      `1` as `blocked`
+    - no control attempts were made
+  - TDD coverage added:
+    - RED verified first for missing
+      `openwukong.evaluation.transport_capability_matrix`
+    - tests cover JSON output, WeChat send foreground-required classification,
+      and `--output` artifact writing
+  - current verification:
+    - transport profile tests:
+      `3 tests` passed
+    - related transport/control profile regression suite:
+      `22 tests` passed
+    - `compileall -q src tests` passed
+  - next high-value steps:
+    - enforce this matrix before any real execution call
+    - route `foreground-required` actions into an explicit foreground takeover
+      request rather than letting callers invoke them silently
+    - add post-action OCR/accessibility verification for foreground transports
+- 2026-05-27 enforced the transport capability matrix before real execution:
+  - direction:
+    - moved the matrix from reporting-only into the `ControlFabric.execute`
+      safety path
+    - any explicit real execution now evaluates transport capability before
+      connector/action-runner dispatch
+  - updated `openwukong.control.fabric`
+    - `ControlExecutionReport` now includes:
+      `transport_gate_decision` and `transport_gate_error`
+    - foreground-required transports are blocked with:
+      `transport_gate_decision=blocked_foreground_takeover_required`
+      and `error=foreground_takeover_confirmation_required`
+    - no-route/blocked transports are blocked with:
+      `transport_gate_decision=blocked_transport_capability`
+      and `error=transport_capability_blocked`
+    - background-native connector execution remains allowed after the gate
+  - TDD coverage added:
+    - RED verified first in `tests/test_control_fabric_execution.py`
+    - tests cover:
+      foreground-required WeChat send blocking, blocked overlay transport
+      blocking, and browser DevTools background-native execution still passing
+  - live read-only CLI validation:
+    - command:
+      `python -m openwukong.evaluation.control_fabric_execute --process-name Weixin.exe --window-title 微信 --action send_message --text probe --allow-control --json`
+    - result:
+      `ok=false`, `control_attempts=0`,
+      `transport_gate_decision=blocked_foreground_takeover_required`,
+      `error=foreground_takeover_confirmation_required`
+    - no app connector, action runner, keyboard, or clipboard control was called
+  - current verification:
+    - control fabric execution tests:
+      `17 tests` passed
+    - related transport/control regression suite:
+      `40 tests` passed
+    - `compileall -q src tests` passed
+  - next high-value steps:
+    - create an explicit foreground takeover request object/report instead of
+      only returning an error
+    - wire WeChat send probe to consume that request object before any foreground
+      keyboard/clipboard action
+    - add OCR/accessibility verification after foreground takeover completes
+- 2026-05-27 added explicit foreground takeover request contracts:
+  - direction:
+    - upgraded foreground-required control from a plain blocking error into an
+      auditable request object that downstream probes must validate before any
+      keyboard, clipboard, mouse, or foreground-focus primitive can run
+    - kept the background-safe control boundary intact: foreground takeover is
+      still blocked at `ControlFabric.execute` and only emitted as a request for
+      a narrower, app-specific probe to consume
+  - added `openwukong.control.foreground_takeover`
+    - `ForegroundTakeoverRequest` records:
+      action, app family, target process/window, selected route, selected
+      transport, risk flags, verification requirements, request status, and a
+      stable request id
+    - `validate_foreground_takeover_request` rejects missing requests, action
+      mismatch, transport mismatch, target mismatch, and invalid request status
+    - validation reports are read-only and always keep:
+      `control_allowed=false` and `control_attempts=0`
+  - updated `openwukong.control.fabric`
+    - `ControlExecutionReport` now embeds `foreground_takeover_request` when a
+      foreground-required transport is blocked
+    - WeChat-style foreground fallback now returns a concrete request with:
+      `selected_transport=foreground-keyboard-clipboard` and verification
+      requirements for pre-action target verification, post-action bound-window
+      verification, and state restoration
+  - updated `openwukong.evaluation.wechat_send_probe`
+    - real File Transfer Assistant send now requires a valid foreground takeover
+      request before it attempts to find a window, focus WeChat, write clipboard,
+      or send keyboard input
+    - missing request is blocked as
+      `blocked_foreground_takeover_request_required`
+    - invalid request is blocked as
+      `blocked_foreground_takeover_request_invalid`
+    - CLI accepts `--foreground-takeover-request` and can read either a direct
+      request JSON or a full execution report containing
+      `foreground_takeover_request`
+    - successful send reports now include a `post_action_verify` phase plus
+      `post_send_verified` and `post_send_verification` fields, ready for OCR or
+      accessibility readback implementations
+  - TDD coverage added:
+    - RED verified first for missing
+      `openwukong.control.foreground_takeover`
+    - RED verified first for WeChat sending without takeover request still
+      reaching the send path
+    - RED verified first for missing post-send verification fields
+    - tests cover:
+      ControlFabric request emission, request validation, WeChat missing-request
+      blocking, valid-request send path, explicit target confirmation override,
+      and optional post-send accessibility verification
+  - current verification:
+    - foreground takeover + WeChat send probe tests:
+      `9 tests` passed
+    - related control/transport regression suite:
+      `25 tests` passed
+  - next high-value steps:
+    - replace the optional post-send verifier stub with a real OCR/accessibility
+      readback implementation for the bound WeChat HWND
+    - add a CLI flow that emits a takeover request, pauses for operator approval,
+      then consumes the approved request in the WeChat probe
+    - generalize foreground takeover request consumption for other foreground
+      fallback probes so the safety contract is uniform across apps
+- 2026-05-27 added a unified desktop task runner for app launch, browser search,
+  and WeChat send:
+  - direction:
+    - moved from separate probes toward a single gated user-task entrypoint
+    - kept the safety model explicit:
+      launch requires `allow_launch`; browser search uses DevTools when
+      available and otherwise requires launch/open permission; WeChat send
+      requires explicit send permission, foreground takeover approval, and an
+      additional external-communication permission for non-File-Transfer targets
+  - added `openwukong.evaluation.desktop_task_runner`
+    - `run_desktop_task(...)` supports:
+      `open_app`, `browser_search`, and `wechat_send`
+    - report mode:
+      `desktop-task-runner`
+    - shared counters:
+      `launch_attempts`, `browser_navigation_attempts`, `send_attempts`,
+      `control_allowed`, selected transport, and nested subreports
+    - app launch path:
+      resolves software from Windows Start Menu entries and launches without
+      shell-string command composition
+    - browser search path:
+      builds encoded Bing search URLs
+      uses `browser-devtools-or-extension` when a debugger URL is provided
+      falls back to system browser URL open only after `allow_launch`
+    - WeChat send path:
+      obtains a foreground takeover request from `ControlFabric`
+      returns `foreground_takeover_request_pending` until approved
+      consumes the request through the WeChat send probe after approval
+      supports the existing second-stage `confirm_target_after_open` operator
+      confirmation for real foreground sends
+  - updated `openwukong.evaluation.wechat_send_probe`
+    - non-File-Transfer targets are no longer treated as the same generic
+      invalid target
+    - they now require `allow_external_target`
+    - default blocked status:
+      `blocked_external_target_requires_explicit_permission`
+    - this gives a controlled route for "send message to a person" while keeping
+      accidental external communication blocked by default
+  - TDD coverage added:
+    - RED verified first for missing `desktop_task_runner`
+    - RED verified first for WeChat external-target permission behavior
+    - tests cover:
+      open-app launch permission, Start Menu launcher dispatch, browser DevTools
+      search, system-browser search fallback gate, foreground takeover request
+      pending state, approved WeChat send, second-stage target confirmation, and
+      external-target send blocking
+  - safe CLI smoke validation:
+    - `open_app --app-name wechat --json` returned
+      `blocked_launch_requires_explicit_permission` with `launch_attempts=0`
+    - `browser_search --query openwukong --json` returned
+      `blocked_browser_requires_debugger_or_launch_permission` with
+      `browser_navigation_attempts=0`
+    - `wechat_send --target-name 文件传输助手 --message hello --allow-send --json`
+      returned `foreground_takeover_request_pending` with `send_attempts=0`
+      and a concrete `foreground_takeover_request`
+  - current verification:
+    - desktop task runner tests:
+      `9 tests` passed
+    - WeChat send probe tests:
+      `9 tests` passed
+    - related desktop task / WeChat / foreground / browser / control fabric
+      regression suite:
+      `46 tests` passed
+  - next high-value steps:
+    - add an approval-file workflow that writes a takeover request JSON and then
+      consumes an approved request for real WeChat sends
+    - add real bound-window OCR/accessibility verification for WeChat post-send
+      success instead of only optional injected verifier support
+    - add a browser research/extraction task on top of opened search results
+      using DevTools DOM extraction
+- 2026-05-27 ran real background-safe desktop task validation and fixed issues
+  found during live testing:
+  - real test policy update:
+    - prefer background/owned connector tests before foreground tests
+    - browser real tests should use DevTools/CDP on an owned headless or already
+      debuggable browser when possible
+    - WeChat cannot currently send in the background; the safe background test is
+      read-only locator evidence plus foreground takeover request generation
+    - foreground WeChat sending remains available only when explicitly approved
+  - real findings:
+    - `open_app --app-name wechat --allow-launch` initially resolved the Start
+      Menu shortcut for Enterprise WeChat
+    - after excluding Enterprise WeChat, read-only resolution found WeChat Input
+      Method, exposing that personal WeChat launch must use exact aliases rather
+      than substring matching
+    - no existing browser DevTools endpoint was available on ports
+      `9222/9223/9238/9333`
+    - owned/headless Chrome DevTools background navigation worked without using
+      the user's foreground browser
+    - a first owned Chrome cleanup attempt stopped only the parent process; child
+      Chromium processes kept the profile locked, so cleanup must kill by exact
+      owned `--user-data-dir`
+    - CDP navigation can return `errorText`; this must be treated as failure, not
+      a successful browser action
+  - fixes:
+    - tightened `WindowsAppLauncher.resolve("wechat")` so it will not launch
+      Enterprise WeChat or WeChat Input Method as personal WeChat
+    - added exact personal-WeChat alias matching; if no exact shortcut exists,
+      report `app_not_found` instead of launching a nearby product
+    - updated Browser DevTools action handling so `Page.navigate` `errorText`
+      produces `ok=false`, `control_allowed=false`, and an auditable
+      `navigation_failed:*` error while preserving the CDP result
+  - real validation:
+    - read-only personal WeChat launch resolution now returns
+      `app_not_found` on this machine instead of opening Enterprise WeChat or
+      WeChat Input Method
+    - background owned/headless Chrome positive navigation succeeded:
+      post-action title was `OpenWukong_BG`, transport was
+      `chrome-devtools-protocol`, and cleanup removed the owned profile
+    - background owned/headless browser search succeeded through CDP:
+      query `OpenWukong_background_search_20260527`, title read back
+      `OpenWukong_background_search_20260527 - 搜索`
+    - WeChat background send validation returned
+      `foreground_takeover_request_pending`, `send_attempts=0`, and a concrete
+      `foreground_takeover_request`
+    - primary real no-loss summary passed `4/4` cases with:
+      `external_communication_attempts=0`, `window_input_attempts=0`,
+      `real_user_filesystem_scan_attempts=0`,
+      `user_file_modification_attempts=0`, and `owned_app_launch_attempts=0`
+  - reusable skill created:
+    - `desktop-background-control-testing`
+    - location:
+      `C:\Users\Zhangjinqian\.codex\skills\desktop-background-control-testing`
+    - captures:
+      background-first testing, exact app resolution, CDP `errorText` handling,
+      owned browser process cleanup, and foreground takeover gating
+    - validation:
+      `quick_validate.py` returned `Skill is valid!`
+  - current unit coverage:
+    - desktop task runner tests now include:
+      Enterprise WeChat exclusion, WeChat Input Method exclusion, and exact
+      personal WeChat preference
+    - browser DevTools action tests now include:
+      navigation error handling for CDP `errorText`
+  - next high-value steps:
+    - add explicit app path configuration for personal WeChat, since this machine
+      lacks an exact personal WeChat Start Menu shortcut
+    - add owned/headless browser helper support directly to
+      `desktop_task_runner` so background browser testing does not require an
+      external script wrapper
+    - implement real OCR/accessibility post-send verification before expanding
+      foreground WeChat sends beyond File Transfer Assistant
+- 2026-05-27 replaced fixed app-path thinking with a dynamic App Identity
+  Resolver:
+  - direction:
+    - user clarified that a shipped product cannot rely on fixed local paths
+    - corrected the plan from "explicit app path registry" to a dynamic app
+      identity/resolver layer with local cache support, not a hardcoded path
+      table
+  - updated `openwukong.evaluation.desktop_task_runner`
+    - added app identity primitives:
+      `AppIdentity`, `AppIdentityRegistry`, `AppResolutionCandidate`,
+      `AppResolutionReport`, and `WindowsAppResolver`
+    - resolver layers now include:
+      running process detection, optional local cache JSON, Start Menu entries,
+      Windows App Paths registry, and PATH executable lookup
+    - built-in identities include exact/exclusion rules for:
+      personal WeChat, Cursor, Chrome, and Edge
+    - personal WeChat is identity-matched by exact aliases/processes:
+      `微信`, `wechat`, `weixin`, `Weixin.exe`, `WeChat.exe`
+    - personal WeChat explicitly excludes:
+      Enterprise WeChat, WeCom/WXWork, Work WeChat, and WeChat Input Method
+    - same executable path across multiple running processes is deduped into one
+      running app candidate; different equally ranked paths remain ambiguous and
+      blocked
+    - `open_app` now returns `app_already_running` when the target app is already
+      running, with `launch_attempts=0` and no foreground/focus action
+  - real validation:
+    - `open_app --app-name wechat --allow-launch --json` now resolves the live
+      running personal WeChat process from:
+      `E:\software\Weixin\Weixin.exe`
+    - report status:
+      `app_already_running`
+    - no launch was attempted:
+      `launch_attempts=0`
+    - CLI exit code now treats `app_already_running` as success
+  - TDD coverage added:
+    - RED verified first for missing resolver primitives
+    - RED verified first for multiple live WeChat child processes with the same
+      executable path being misclassified as ambiguity
+    - tests cover:
+      Enterprise WeChat exclusion, WeChat Input Method exclusion, exact personal
+      WeChat preference, running-process preference, same-path running-process
+      dedupe, ambiguous same-priority different paths, local cache candidate
+      use, and success exit code for `app_already_running`
+  - reusable skill updated:
+    - `desktop-background-control-testing`
+    - added the rule that same executable path across multiple running processes
+      should be deduped, while same-rank different paths should remain ambiguous
+    - `quick_validate.py` returned `Skill is valid!`
+  - next high-value steps:
+    - move the resolver out of `desktop_task_runner` into a reusable
+      `control/app_resolution` module once another caller needs it
+    - add signed-binary or product-metadata verification for cached paths before
+      launch
+    - add a local cache write path after a high-confidence resolution succeeds
+- 2026-05-28 promoted app resolution into the reusable control layer:
+  - direction:
+    - continued the dynamic identity/resolver route instead of fixed app paths
+    - made application discovery a shared control-layer capability, not a
+      private implementation detail of `desktop_task_runner`
+  - added `openwukong.control.app_resolution`
+    - owns:
+      `AppIdentity`, `AppIdentityRegistry`, `AppResolutionCandidate`,
+      `AppResolutionReport`, candidate providers, and `WindowsAppResolver`
+    - keeps resolver sources centralized:
+      running processes, optional local cache, Start Menu, Windows App Paths,
+      and PATH executable lookup
+    - preserves strict personal-WeChat identity matching and exclusions for
+      Enterprise WeChat, WeCom/WXWork, Work WeChat, and WeChat Input Method
+  - updated public control exports:
+    - `from openwukong.control import WindowsAppResolver` now works
+    - `desktop_task_runner` now consumes the shared control-layer resolver and
+      no longer defines its own private resolver classes
+  - safe real validation:
+    - ran direct read-only resolution through `WindowsAppResolver().resolve("wechat")`
+    - result:
+      `ok=true`, `source=running-process`, `already_running=true`
+    - resolved personal WeChat path:
+      `E:\software\Weixin\Weixin.exe`
+    - no launch, focus, keyboard, clipboard, mouse, or app operation was made
+  - TDD coverage added:
+    - RED verified first for missing `openwukong.control.app_resolution`
+    - RED verified first for missing package-level `openwukong.control`
+      resolver export
+    - tests cover:
+      control-layer resolver import, running-process preference, and package
+      export stability
+  - current verification:
+    - app resolution + desktop task runner tests:
+      `19 tests` passed
+  - next high-value steps:
+    - add signed-binary or product-metadata verification for cached paths before
+      launch
+    - add a local cache write path after a high-confidence resolution succeeds
+    - route Browser/Cursor/Codex task entrypoints through the shared
+      `control.app_resolution` module instead of local ad-hoc discovery
+- 2026-05-28 added verified app-resolution cache write/read safety:
+  - direction:
+    - made dynamic app discovery reusable across sessions without trusting stale
+      local paths
+    - kept cache behavior explicit and evidence-based:
+      high-confidence discoveries can be cached, but cached paths must be
+      revalidated before they are used
+  - updated `openwukong.control.app_resolution`
+    - added `AppPathVerification` and `AppPathVerifier`
+    - added optional `PowerShellAuthenticodeSignatureReader` using read-only
+      `Get-AuthenticodeSignature -LiteralPath`
+    - `WindowsAppResolver(cache_write_enabled=True)` now writes cache entries
+      only after a high-confidence resolution succeeds and the selected path
+      passes file metadata verification
+    - cache entries store:
+      path, display name, executable name, source, cached time, file size,
+      modification time, and optional Authenticode signature metadata
+    - `LocalCacheAppCandidateProvider` now revalidates cached file metadata
+      before returning a local-cache candidate
+    - stale cached paths with mismatched file metadata are ignored and normal
+      discovery continues
+  - safe real validation:
+    - resolved live personal WeChat through the shared resolver with a temporary
+      cache file and `cache_write_enabled=True`
+    - result:
+      `ok=true`, `source=running-process`, `already_running=true`
+    - cached path:
+      `E:\software\Weixin\Weixin.exe`
+    - cached size:
+      `3130416`
+    - no launch, focus, keyboard, clipboard, mouse, or app operation was made
+    - temporary cache file was deleted after validation
+  - TDD coverage added:
+    - RED verified first for missing `AppPathVerifier`
+    - tests cover:
+      high-confidence resolution cache write, stale metadata cache rejection,
+      and Authenticode signature metadata capture through an injected reader
+  - reusable skill updated:
+    - `desktop-background-control-testing`
+    - added app-resolution cache safety rules:
+      write only after high-confidence discovery, store file/signature metadata,
+      revalidate before launch, and ignore stale cache entries
+    - `quick_validate.py` returned `Skill is valid!`
+  - current verification:
+    - app resolution + desktop task runner tests:
+      `22 tests` passed
+  - next high-value steps:
+    - route Browser/Cursor/Codex task entrypoints through the shared
+      `control.app_resolution` module instead of local ad-hoc discovery
+    - add publisher allowlist policy on top of Authenticode metadata for
+      launch-sensitive apps
+    - add a resolver CLI/report endpoint for user-facing diagnostics
+- 2026-05-28 added a read-only app resolution diagnostics endpoint:
+  - direction:
+    - turned the shared application resolver into a user-facing diagnostics
+      surface that higher-level task runners and UI panels can consume
+    - kept the endpoint strictly read-only by default:
+      no launch, focus, keyboard, clipboard, mouse, or foreground control
+  - added `openwukong.evaluation.app_resolution_report`
+    - CLI:
+      `python -m openwukong.evaluation.app_resolution_report --app-name wechat --json`
+    - supports repeated `--app-name`
+    - supports optional `--cache-path`, `--write-cache`, `--verify-signature`,
+      `--output`, `--json`, and `--strict`
+    - report mode:
+      `app-resolution-report`
+    - safety fields:
+      `safety_mode=read_only`, `control_allowed=false`,
+      `control_attempts=0`
+    - summary fields:
+      app count, resolved count, not-found count, ambiguous count,
+      already-running count, cache-write flag, and signature-verification flag
+    - per-app entries include:
+      selected source/path, already-running state, candidate count, selected
+      candidate, and the full underlying `AppResolutionReport`
+  - fixed a precision issue found by the new endpoint:
+    - live `chrome` diagnostics initially included `Tabbit Browser` as a
+      candidate because generic alias `browser` was used as a fuzzy candidate
+      substring
+    - tightened `candidate_matches_identity` so aliases resolve user input but
+      do not fuzzy-match candidate display names
+    - `browser` remains a user request alias for Chrome, but no longer pulls in
+      unrelated browser-branded shortcuts
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.app_resolution_report --app-name wechat --app-name chrome --app-name cursor --json`
+    - result:
+      `app_count=3`, `resolved=3`, `not_found=0`, `ambiguous=0`,
+      `already_running=2`, `control_attempts=0`
+    - resolved:
+      personal WeChat from `E:\software\Weixin\Weixin.exe`,
+      Chrome from the Google Chrome Start Menu shortcut plus App Paths registry
+      evidence, and Cursor from the running process plus Start Menu evidence
+    - after the precision fix, Chrome candidates no longer include
+      `Tabbit Browser`
+  - TDD coverage added:
+    - RED verified first for missing
+      `openwukong.evaluation.app_resolution_report`
+    - RED verified first for generic `browser` alias mixing unrelated browser
+      shortcuts into Chrome candidates
+    - tests cover:
+      read-only report contract, ambiguous summary, JSON output writing, and
+      generic browser shortcut exclusion
+  - reusable skill updated:
+    - `desktop-background-control-testing`
+    - added rule that generic words such as `browser` should be request aliases
+      only, never candidate-name substring matches
+    - `quick_validate.py` returned `Skill is valid!`
+  - next high-value steps:
+    - route `desktop_task_runner` app opening through the new diagnostics/cache
+      flags so open tasks can persist high-confidence discoveries
+    - add publisher allowlist policy on top of Authenticode metadata for
+      launch-sensitive apps
+    - add Cursor/Codex task entrypoints that bind through `control.app_resolution`
+      before using IDE bridge/native connectors
+- 2026-05-28 started Codex/Claude agent-surface integration:
+  - status clarification:
+    - browser background CDP control and WeChat File Transfer real-send have
+      passed key real validations, but the primary scenarios are not all
+      productized yet
+    - file search and live Codex/Claude task submission remain gated work
+    - Codex/Claude are now connected at the safe discovery/binding layer, not
+      at uncontrolled real task execution
+  - expanded shared app resolution:
+    - added default identities for `codex` and `claude`
+    - Codex aliases now include `openai codex`, `codex cli`,
+      `codex app`, and `codex ide`
+    - Claude aliases now include `claude code`, `anthropic claude`,
+      `claude cli`, and `claude desktop`
+    - fixed multi-process Codex ambiguity by preferring the primary
+      `Codex.exe` desktop shell over helper/extension/worker `codex.exe`
+      processes for app identity resolution
+  - added `openwukong.control.agent_surface`
+    - maps resolved agent products to transport surfaces without executing
+      anything
+    - Codex surfaces:
+      standalone Codex CLI as `codex-cli-managed-terminal`,
+      Codex desktop shell as `codex-desktop-shell`,
+      helper/extension workers as evidence-only `codex-extension-worker`
+    - Claude surfaces:
+      Claude Code CLI as `claude-code-cli-managed-terminal`
+    - all real task submission remains blocked behind side-effect effects:
+      `agent_task_submission.submit_task` and `agent_start.start_agent`
+  - added `openwukong.evaluation.agent_surface_report`
+    - CLI:
+      `python -m openwukong.evaluation.agent_surface_report --agent codex --agent claude --json`
+    - report mode:
+      `agent-surface-report`
+    - safety fields:
+      `safety_mode=read_only`, `control_allowed=false`,
+      `control_attempts=0`
+    - output includes selected transport, all transport candidates,
+      app-resolution evidence, and side-effect gate state
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.agent_surface_report --agent codex --agent 'openai codex' --agent claude --agent 'claude code' --json`
+    - result:
+      `agent_count=4`, `resolved=4`, `not_found=0`,
+      `transport_not_ready=0`, `background_capable=4`,
+      `confirmation_required=4`, `control_attempts=0`
+    - Codex selected transport:
+      `codex-cli-managed-terminal` from
+      `C:\Users\Zhangjinqian\AppData\Local\OpenAI\Codex\bin\958d608b5e0546a5\codex.exe`
+    - Codex app resolution still selects the desktop shell
+      `C:\Program Files\WindowsApps\OpenAI.Codex_26.519.11010.0_x64__2p2nqsd0c76g0\app\Codex.exe`
+      while keeping resource/extension helper processes as evidence only
+    - Claude selected transport:
+      `claude-code-cli-managed-terminal` from
+      `C:\Users\Zhangjinqian\.local\bin\Claude.exe`
+    - no launch, focus, keyboard, clipboard, mouse, shell command execution,
+      Codex task submission, or Claude task submission occurred
+  - TDD coverage added:
+    - RED verified for missing `agent_surface_report`
+    - RED verified for missing `openwukong.control` package export
+    - tests cover:
+      Codex CLI-vs-desktop-vs-helper transport classification,
+      Claude Code CLI classification, read-only JSON output, and package export
+  - reusable skill updated:
+    - `desktop-background-control-testing`
+    - added a multi-surface agent-product rule:
+      split product discovery from task-submission transport selection; prefer
+      configured native/IDE bridge or standalone CLI for background task
+      submission; keep desktop shells as foreground/bridge-required surfaces;
+      treat helper/extension worker processes as evidence only
+    - no `quick_validate.py` exists in this skill directory in the current
+      environment, so validation is covered by targeted project tests
+  - current verification:
+    - targeted agent/app resolution tests:
+      `19 tests` passed
+  - next high-value steps:
+    - add a guarded agent-task draft/execute contract that uses
+      `AgentSurfaceBindingReport` and requires explicit confirmation before
+      real Codex/Claude task submission
+    - wire Codex bridge/CLI and Claude CLI into `ControlFabric` with the same
+      side-effect gate used by primary scenarios
+    - add real no-loss smoke tests for Codex/Claude with dry-run/no-op prompts
+      before enabling any destructive or long-running agent action
+- 2026-05-28 added guarded Codex/Claude agent task contracts:
+  - direction:
+    - moved from agent surface discovery to a staged task contract:
+      draft-only by default, dry-run command planning, and confirmed execution
+      only after explicit agent side-effect confirmation
+    - this keeps Codex/Claude integration on the same background-safe control
+      path as browser/terminal/WeChat instead of bypassing gates through CLI
+      shortcuts
+  - added `openwukong.control.agent_task`
+    - `run_agent_task(...)` produces an `agent-task-runner` report
+    - default behavior writes a local `agent-task-draft` artifact and never
+      executes Codex/Claude
+    - command contracts:
+      - Claude Code:
+        `claude -p --permission-mode plan --max-turns 1 --output-format json --no-session-persistence <task>`
+      - Codex:
+        `codex exec <task>` through the resolved standalone Codex CLI surface
+    - real execution requires:
+      `execute=true`, `allow_agent_task=true`, confirmed
+      `agent_task_submission.submit_task`, and confirmed
+      `agent_start.start_agent`
+    - dry-run builds the command plan after confirmation but keeps
+      `agent_command_attempts=0`
+  - added `openwukong.evaluation.agent_task_runner`
+    - CLI:
+      `python -m openwukong.evaluation.agent_task_runner --agent claude --task "..."`
+    - supports:
+      `--workspace-root`, `--output-root`, `--execute`, `--dry-run`,
+      `--allow-agent-task`, repeated `--confirm-effect`, `--timeout-sec`,
+      `--audit-log`, `--output`, `--json`, and `--strict`
+    - report fields include:
+      selected transport, command plan, side-effect gate, draft artifact path,
+      execution status, execution report, and command attempt count
+  - safe real validation:
+    - Claude draft-only command:
+      `python -m openwukong.evaluation.agent_task_runner --agent claude --task 'No-op draft only...' --workspace-root . --output-root logs\runtime\agent-tasks --json`
+    - result:
+      `decision=draft_written`, `safety_mode=draft_only`,
+      `execution_requested=false`, `execution_attempted=false`,
+      `agent_command_attempts=0`
+    - Codex dry-run command with both agent effects confirmed:
+      `python -m openwukong.evaluation.agent_task_runner --agent codex --task 'No-op dry run only...' --workspace-root . --output-root logs\runtime\agent-tasks --execute --dry-run --allow-agent-task --confirm-effect agent_task_submission.submit_task --confirm-effect agent_start.start_agent --json`
+    - result:
+      `decision=dry_run_ready`, `safety_mode=dry_run`,
+      `side_effect_gate.allowed=true`, `execution_attempted=false`,
+      `agent_command_attempts=0`
+    - Claude unconfirmed execute request:
+      `python -m openwukong.evaluation.agent_task_runner --agent claude --task 'No-op execute request should be blocked.' --workspace-root . --output-root logs\runtime\agent-tasks --execute --json`
+    - result:
+      `decision=agent_task_confirmation_required`,
+      `execution_attempted=false`, `agent_command_attempts=0`
+    - no real Codex/Claude task was submitted or started in these validations
+  - TDD coverage added:
+    - RED verified first for missing `run_agent_task`
+    - tests cover:
+      default Claude draft-only behavior, unconfirmed Codex execute blocking,
+      confirmed dry-run with zero command attempts, confirmed execution through
+      an injected command executor, and CLI JSON artifact output
+  - reusable skill updated:
+    - `desktop-background-control-testing`
+    - added staged agent task contract rules:
+      draft-only by default, dry-run command planning, confirmed execute only
+      after both agent side-effect confirmations, and dry-run/unconfirmed execute
+      must keep command attempts at zero
+  - next high-value steps:
+    - connect `agent_task_runner` into `ControlFabric` so higher-level tasks can
+      invoke the same guarded contract without calling the CLI directly
+    - add a real no-op confirmed execution test only after explicitly choosing
+      the execution surface and accepting token/network side effects
+    - add result readback/parsing for Codex/Claude execution reports before
+      enabling long-running project tasks
+- 2026-05-28 ran real Codex/Claude live no-loss agent tests:
+  - user explicitly authorized real testing
+  - test isolation:
+    - all live agent tests ran in temporary empty workspaces under `%TEMP%`
+    - no foreground focus, keyboard, clipboard, mouse, browser, WeChat, or
+      current project app interaction was used
+    - after each live test, the temporary workspace was recursively inspected
+      and remained empty
+  - Claude live test:
+    - command path:
+      `agent_task_runner --agent claude --execute --allow-agent-task ...`
+    - actual command plan invoked:
+      `Claude.exe -p --permission-mode plan --max-turns 1 --output-format json --no-session-persistence <no-op prompt>`
+    - result:
+      `decision=execution_failed`, `execution_attempted=true`,
+      `agent_command_attempts=1`, `execution_error=exit_code=1`
+    - stdout reported:
+      `Not logged in - Please run /login`
+    - `claude auth status --text` confirmed:
+      `Not logged in. Run claude auth login to authenticate.`
+    - no model work was performed by Claude and the temp workspace stayed empty
+  - Codex CLI safety fix before live execution:
+    - local `codex exec --help` showed that `--ask-for-approval` is a top-level
+      Codex flag, not an `exec` subcommand flag
+    - RED test added to enforce safe flag ordering
+    - updated `build_agent_command_plan` so Codex uses:
+      `codex --sandbox read-only --ask-for-approval never -C <temp-workspace> exec --skip-git-repo-check --ephemeral --ignore-rules --json <no-op prompt>`
+    - targeted agent task tests passed after the fix
+  - Codex live test:
+    - command path:
+      `agent_task_runner --agent codex --execute --allow-agent-task ...`
+    - result:
+      `decision=executed`, `ok=true`, `execution_attempted=true`,
+      `agent_command_attempts=1`, `execution_ok=true`
+    - stdout JSONL included:
+      `thread.started`, `turn.started`, and an agent message:
+      `OPENWUKONG_AGENT_LIVE_SMOKE_OK`
+    - reported usage:
+      `input_tokens=19073`, `cached_input_tokens=10112`,
+      `output_tokens=189`, `reasoning_output_tokens=173`
+    - temp workspace inspection showed no files written
+  - live issue discovered:
+    - Codex stderr reported several global skill load errors caused by missing
+      YAML frontmatter in existing skill files:
+      `altmind-native-ime-ranking-regression`,
+      `altmind-semantic-memory-learning-compatibility`, and
+      `debug-async-ui`
+    - this did not block the no-op task, but it should be fixed separately
+      because it pollutes real Codex agent startup
+  - reusable skill updated:
+    - `desktop-background-control-testing`
+    - added the safe live Codex CLI smoke command shape and completion check
+      for empty/expected temp workspace contents
+  - current conclusion:
+    - Codex real background no-loss task execution is proven
+    - Claude CLI surface is installed and callable, but not authenticated on
+      this machine, so live Claude execution is blocked by auth rather than by
+      our control layer
+  - next high-value steps:
+    - fix malformed global skill frontmatter so Codex live runs start cleanly
+    - add structured parsing of Codex JSONL and Claude JSON execution outputs
+      into `AgentTaskRunReport`
+    - after Claude login, rerun the same no-loss `claude -p` live smoke
+- 2026-05-28 added explicit agent app/desktop surface support:
+  - user clarified that Claude integration must cover the application side,
+    not only the CLI
+  - implementation:
+    - added `WindowsStartAppsCandidateProvider` so packaged Windows apps can be
+      discovered via `Get-StartApps` and AppUserModelID without launching them
+    - added Claude/Codex app and desktop aliases while keeping product identity
+      separate from transport selection
+    - made agent surface binding request-aware:
+      `claude app`, `claude desktop`, `codex app`, and `codex desktop` now
+      require an app/desktop shell surface and are not silently satisfied by CLI
+    - added Claude Desktop shell transport:
+      `claude-desktop-shell`, `desktop-shell-native-bridge-or-foreground`,
+      `background_capable=false`, `execution_allowed=false`
+    - generic `claude` and `codex` still report all discovered surfaces and
+      prefer the background-capable CLI for confirmed agent task execution
+  - root-cause fix:
+    - real diagnostics initially lost `Get-StartApps` data because Python text
+      mode decoded PowerShell stdout with the local GBK codec and hit a Unicode
+      decode error
+    - fixed by forcing PowerShell UTF-8 output and decoding stdout bytes
+      explicitly
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.agent_surface_report --agent "claude desktop" --agent "claude" --agent "codex app" --agent "codex" --json`
+    - result:
+      `agent_count=4`, `resolved=4`, `not_found=0`,
+      `transport_not_ready=0`, `background_capable=2`,
+      `confirmation_required=4`, `control_attempts=0`
+    - `claude desktop` selected:
+      `claude-desktop-shell`, source `start-apps`,
+      target `Claude_pzs8sxrjxfjjc!Claude`, background disabled
+    - generic `claude` selected:
+      `claude-code-cli-managed-terminal`, with Claude Desktop shell also
+      reported as a non-background app surface
+    - `codex app` selected:
+      `codex-desktop-shell`, source `running-process`,
+      target current Codex Desktop executable, background disabled
+    - generic `codex` selected:
+      `codex-cli-managed-terminal`, with Codex Desktop shell and helper workers
+      reported separately
+    - no app launch, focus takeover, keyboard, clipboard, mouse, or agent task
+      submission occurred
+  - TDD coverage added:
+    - app/desktop requests are not satisfied by CLI-only candidates
+    - Claude generic request reports both CLI and desktop surfaces while
+      preferring the background CLI
+    - StartApps provider parses packaged app entries and UTF-8 stdout bytes
+  - reusable skill updated:
+    - `desktop-background-control-testing`
+    - added explicit app/desktop-vs-CLI surface rules and Windows StartApps
+      UTF-8 handling notes
+  - next high-value steps:
+    - add a native/UIA bridge probe for Claude Desktop and Codex Desktop that
+      only reads app state first, then gates any foreground task submission
+    - keep CLI as the only proven background Codex execution route until a
+      desktop native bridge is available
+    - after Claude login, validate CLI no-loss execution separately from
+      desktop app surface testing
+- 2026-05-28 added targeted AI conversation message and acceptance contract:
+  - direction:
+    - moved above raw `agent_task_runner` into a conversation-aware envelope:
+      agent, project name, task/session name, message body, acceptance
+      criteria, required markers, and forbidden markers
+    - this is the common layer for future Codex App, Claude App, Cursor chat,
+      Claude CLI, and Codex CLI task/message delivery
+  - added `openwukong.control.agent_conversation`
+    - `run_agent_conversation(...)`
+    - `compose_agent_conversation_message(...)`
+    - `evaluate_agent_conversation_acceptance(...)`
+    - wraps the existing staged `agent_task_runner` instead of bypassing the
+      side-effect gates
+    - draft-only remains the default behavior
+    - confirmed execute still requires:
+      `agent_task_submission.submit_task`, `agent_start.start_agent`, and
+      `allow_agent_task=true`
+    - app/desktop surfaces with no command contract now return:
+      `agent_conversation_requires_app_bridge_or_foreground`
+      plus a `foreground_takeover_request` describing the app bridge/foreground
+      requirements
+  - added `openwukong.evaluation.agent_conversation_runner`
+    - CLI supports:
+      `--agent`, `--project-name`, `--task-name`, `--message`,
+      repeated `--acceptance-criterion`, repeated `--acceptance-marker`,
+      repeated `--forbid-marker`, `--execute`, `--dry-run`,
+      `--allow-agent-task`, repeated `--confirm-effect`, `--output`, `--json`
+    - report includes:
+      composed message, selected transport, foreground request if needed,
+      nested agent-task report, command attempts, and acceptance report
+  - safe real validation:
+    - draft-only Codex targeted message:
+      `agent_conversation_runner --agent codex --project-name openwukong --task-name agent-conversation-contract ... --json`
+      returned `decision=conversation_draft_written`,
+      `agent_command_attempts=0`
+    - Claude Desktop app-surface execute request:
+      `agent_conversation_runner --agent "claude desktop" ... --execute ...`
+      returned
+      `decision=agent_conversation_requires_app_bridge_or_foreground`,
+      `selected_transport=claude-desktop-shell`,
+      `agent_command_attempts=0`, and a foreground/native bridge request
+    - real Codex CLI no-loss conversation execution in an empty `%TEMP%`
+      workspace:
+      returned `decision=conversation_executed_and_accepted`, `ok=true`,
+      `agent_command_attempts=1`
+      with required markers:
+      `OPENWUKONG_ACCEPTANCE: PASS` and `CONVERSATION_READBACK_OK`
+    - recursive inspection of the temporary workspace after the live run:
+      `ItemCount=0`
+  - live issue still present:
+    - Codex stderr still reports global skill frontmatter/YAML errors and
+      Windows sandbox spawn setup warnings
+    - this is separate startup hygiene and should be fixed before relying on
+      long-running real Codex tasks
+  - TDD coverage added:
+    - conversation draft writes project/task/message/acceptance envelope
+    - confirmed dry-run builds Codex command with the targeted message
+    - fake confirmed execute accepts result markers
+    - app surface execution request emits foreground/native bridge request
+    - CLI JSON report writes the conversation report
+  - reusable skill updated:
+    - `desktop-background-control-testing`
+    - added targeted agent chat envelope and acceptance-marker validation rules
+  - next high-value steps:
+    - add read-only Codex/Claude Desktop UIA probe to identify project/task
+      labels, chat transcript, and composer candidates without focus takeover
+    - add a foreground/native bridge consumer for app surfaces only after the
+      read-only probe can prove target project/task identity
+    - fix malformed global Codex skill frontmatter so real Codex runs start
+      without noisy startup errors
+- 2026-05-28 added and live-tested read-only agent app UIA probe:
+  - implementation:
+    - added `openwukong.evaluation.agent_app_uia_probe`
+    - supports live UIA scanning and replay from saved `accessibility_probe`
+      JSON files
+    - binds the requested agent app surface first, then filters matching app
+      windows by agent process/pid
+    - reports target project/task evidence, visible/accessibility-tree match
+      state, composer candidates, semantic composer count, selected transport,
+      and foreground/native-bridge request when needed
+    - all app UIA probe paths are read-only:
+      `control_allowed=false`, `control_attempts=0`
+  - robustness fix:
+    - replay loader now reads JSON bytes and supports UTF-8 BOM and UTF-16 BOM
+      so PowerShell-redirection logs can be replayed reliably
+  - safe real validation:
+    - full UIA snapshot saved:
+      `logs\runtime\agent-app-uia\live-uia-probe-elements.json`
+    - Codex App replay report saved:
+      `logs\runtime\agent-app-uia\codex-app-uia-replay.json`
+    - Codex App live report saved:
+      `logs\runtime\agent-app-uia\codex-app-uia-live.json`
+    - live Codex App result:
+      `decision=agent_app_uia_target_visible_input_not_found`,
+      `matched_window_count=1`, `control_attempts=0`
+    - live Codex App evidence:
+      `project_match=matched_visible` for `openwukong`
+      and `task_match=matched_visible` for `支持不同 IDE 监工输入`
+    - live Codex App limitation:
+      `composer_candidate_count=0`, `semantic_composer_count=0`, so the app
+      surface is observable but not yet safe for direct background message
+      submission through UIA
+    - Claude App live report saved:
+      `logs\runtime\agent-app-uia\claude-app-uia-live.json`
+    - live Claude App result:
+      app surface resolved through StartApps/AUMID, but
+      `decision=agent_app_window_not_found` because no Claude app window was
+      running
+  - TDD coverage added:
+    - target-visible/no-composer app surface emits foreground/native-bridge
+      request without any control attempt
+    - semantic composer case reports `agent_app_uia_ready` while still making
+      zero control attempts
+    - replay CLI handles UTF-16 JSON logs from PowerShell redirection
+  - reusable skill updated:
+    - `desktop-background-control-testing`
+    - added app UIA probe-before-send rule and PowerShell UTF-16 JSON replay
+      handling rule
+  - current conclusion:
+    - Codex App can now be precisely read for project/task context through UIA
+    - Codex App cannot yet be claimed as direct background-send capable because
+      the currently exposed composer is not available as a semantic UIA input
+    - Claude App is discoverable but needs a running window before app UIA
+      capability can be assessed
+  - next high-value steps:
+    - implement a native/DevTools-style connector for Electron-based agent app
+      surfaces instead of relying on UIA text injection
+    - keep Codex CLI as the proven background task execution route while app
+      surfaces remain bridge/foreground gated
+    - optionally run a user-approved foreground-only Codex/Claude app draft test
+      after the read-only probe proves the target and a reversible draft path
+- 2026-05-28 added read-only native connector probe for Electron-style agent apps:
+  - implementation:
+    - added `openwukong.evaluation.agent_native_connector_probe`
+    - combines the existing agent app UIA target probe with process command-line
+      inspection for Electron/Chromium DevTools exposure
+    - detects `--remote-debugging-port=<port>` or
+      `--remote-debugging-port <port>` on matching app processes
+    - probes only local read-only DevTools metadata endpoints:
+      `/json/version` and `/json/list`
+    - reports endpoint count, ready endpoint count, target metadata, process
+      evidence, and nested app UIA evidence
+    - keeps `control_allowed=false` and `control_attempts=0`
+  - correctness fix:
+    - app UIA text-match evidence now distinguishes visible elements from
+      accessible-tree-only/offscreen virtual-list nodes by intersecting element
+      rects with the app `RootWebArea`/`RootView` bounds
+  - safe real validation:
+    - Codex App native probe report saved:
+      `logs\runtime\agent-native\codex-app-native-live.json`
+    - result:
+      `decision=agent_native_connector_not_exposed`,
+      `process_count=627`, `endpoint_count=0`,
+      `ready_endpoint_count=0`, `control_attempts=0`
+    - Claude App native probe report saved:
+      `logs\runtime\agent-native\claude-app-native-live.json`
+    - result:
+      `decision=agent_app_window_not_found`,
+      `endpoint_count=0`, `ready_endpoint_count=0`,
+      `control_attempts=0`
+  - TDD coverage added:
+    - reachable Electron/Chromium remote debugging endpoint reports
+      `agent_native_connector_ready`
+    - target-visible app with no debug port reports
+      `agent_native_connector_not_exposed`
+    - no debug port is reported directly even when the app target is not
+      currently visible in UIA
+    - CLI writes JSON reports
+    - offscreen UIA nodes are not marked visible just because they are present
+      in the accessibility tree
+  - reusable skill updated:
+    - `desktop-background-control-testing`
+    - added Electron app native connector probe-before-DOM-control rule
+  - current conclusion:
+    - current Codex App process is not exposing a DevTools/native DOM control
+      endpoint, so app-side background send still requires a real native bridge
+      or an explicitly approved foreground draft path
+    - the proven non-disruptive background route remains Codex CLI
+    - app-side observation is improving and now correctly separates target
+      presence, visible state, and native endpoint readiness
+  - next high-value steps:
+    - add a first-class local native bridge contract for agent apps instead of
+      relying on an already-exposed Electron debug port
+    - wire agent app UIA/native probe results into the higher-level
+      `agent_conversation_runner` so app-surface requests get richer gating
+      diagnostics automatically
+- 2026-05-28 added and live-tested hidden Word COM background operation:
+  - implementation:
+    - added `openwukong.evaluation.office_word_runner`
+    - uses the Microsoft Word object model instead of UIA or keyboard/mouse
+      input
+    - creates an owned temporary `.docx`, writes a marker, saves with
+      `SaveAs2`, closes, reopens read-only/hidden, verifies marker readback,
+      closes, and quits the owned Word COM instance
+    - sets `Application.Visible=False` and `DisplayAlerts=0`
+    - avoids `AddToRecentFiles`
+    - reports:
+      `control_attempts=0`, `window_input_attempts=0`,
+      and `office_com_attempts=1`
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.office_word_runner --document-path logs\runtime\word\openwukong-word-background-probe.docx --marker OPENWUKONG_WORD_BACKGROUND_OK_20260528 --output logs\runtime\word\word-background-probe.json --json`
+    - result:
+      `decision=word_background_probe_verified`, `ok=true`,
+      `save_verified=true`, `readback_verified=true`,
+      `word_started=true`, `visible_requested=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `office_com_attempts=1`
+    - artifacts:
+      `logs\runtime\word\openwukong-word-background-probe.docx`
+      and `logs\runtime\word\word-background-probe.json`
+    - read-only process check after the run found no visible `WINWORD`
+      process output
+  - TDD coverage added:
+    - fake Word COM verifies hidden mode, save/open/readback/quit flow
+    - unavailable Word COM reports `word_com_not_available` with zero COM
+      attempts
+    - CLI writes JSON report
+  - reusable skill updated:
+    - `desktop-background-control-testing`
+    - added Office object-model-first and Word hidden COM no-loss test rules
+  - current conclusion:
+    - Word is now a proven precise background operation path on this machine
+      through COM, without focus takeover or window input
+    - this fills one more primary scenario toward the goal:
+      Office/Word can be controlled semantically in the background when the
+      local Word COM server is available
+  - next high-value steps:
+    - wire Word COM runner into the primary scenario harness/control fabric
+    - add Excel/PowerPoint COM parity later if Office scenarios expand beyond
+      Word
+    - continue unifying primary scenario reports across WeChat, browser,
+      file search, Word, Cursor, Codex, and Claude
+- 2026-05-28 wired Word into the unified primary no-loss scenario suite and
+  hardened owned browser background cleanup:
+  - implementation:
+    - added `word.document.create_background` to the L1 primary scenario
+      fixture, simulation route plan, smoke adapters, side-effect taxonomy, and
+      real no-loss runner
+    - added browser executable auto-resolution so `chrome.exe`/`msedge.exe`
+      can resolve through installed app evidence instead of relying on PATH
+    - changed owned browser helper launch to headless mode for no-focus real
+      validation
+    - fixed Windows owned Chromium cleanup to use UTF-16LE
+      `powershell -EncodedCommand` for multi-line CIM scans instead of stdin
+      scripts
+    - changed cleanup semantics from "single taskkill return code" to
+      repeated command-line scan, cleanup attempts, and final exact
+      `--user-data-dir` rescan
+  - root-cause fix:
+    - `powershell -Command -` parses stdin one statement at a time, so the
+      multi-line `foreach` process scan could return no PIDs even while owned
+      Chrome/crashpad children were still running
+    - `taskkill /T /F` can also clear the owned Chromium tree while reporting
+      child-process warnings; final owned-profile rescan is the reliable
+      success criterion
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.primary_real_no_loss tests\fixtures\evaluation\l1_primary_user_scenarios.json --output-root logs\runtime\primary-real-no-loss-main-20260528-r8 --allow-owned-browser-helper-launch --owned-browser-debug-port 9471 --summary-json`
+    - result:
+      `passed_cases=5/5`, `failed_cases=0`, `real_verified_cases=4`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `real_user_filesystem_scan_attempts=0`,
+      `user_file_modification_attempts=0`
+    - verified r8 owned browser helper report:
+      `status=started_and_stopped`, stop result `status=stopped`,
+      `error=""`, `warning=""`
+    - final CIM command-line rescan for the r8 owned browser profile returned
+      `[]`, so no owned Chrome helper process remained
+  - TDD coverage added:
+    - Word primary scenario planning, smoke adapter, and real no-loss case
+    - installed browser executable resolution for owned helper launch
+    - encoded PowerShell scan command generation
+    - already-gone Chromium child PID cleanup
+    - taskkill child-warning cleanup with final rescan success
+  - verification:
+    - `python -m unittest discover tests`: `391 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only existing CRLF conversion warnings
+  - current conclusion:
+    - the unified no-loss primary suite now covers WeChat read-only locator,
+      owned browser DevTools read, owned temp file search, hidden Word COM
+      document creation, and Codex IDE bridge availability gating
+    - it is still not correct to claim "all apps fully controllable"; app
+      surfaces without native/semantic background bridge remain gated
+    - Codex app background send remains bridge-required in this suite, while
+      Codex CLI background execution was validated separately
+  - next high-value steps:
+    - wire richer Codex/Claude app UIA/native probe diagnostics into
+      `agent_conversation_runner`
+    - add Cursor/VS Code IDE bridge live capture as a first-class real no-loss
+      case
+    - add Excel/PowerPoint COM parity only after the Word path stays stable

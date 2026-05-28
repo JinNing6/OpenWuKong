@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import dataclasses
 import json
 import os
@@ -291,20 +292,52 @@ class TaskTreeSessionReadinessTerminator:
         tokens = _managed_process_tokens(argv)
         if not tokens or not sys.platform.startswith("win"):
             return
+        last_error = ""
+        last_pids: tuple[int, ...] = ()
+        for pass_index in range(6):
+            last_pids = self._terminate_owned_processes_once(tokens)
+            for process_id in last_pids:
+                try:
+                    self._terminate_owned_process_tree(process_id)
+                except Exception as exc:
+                    last_error = str(exc) or exc.__class__.__name__
+            if pass_index < 5:
+                time.sleep(0.5)
+        if last_pids:
+            remaining_pids = self._terminate_owned_processes_once(tokens)
+            if remaining_pids:
+                suffix = f":{last_error}" if last_error else ""
+                raise RuntimeError(
+                    "owned_processes_still_running:"
+                    + ",".join(str(pid) for pid in remaining_pids)
+                    + suffix
+                )
+
+    def _terminate_owned_processes_once(self, tokens: tuple[str, ...]) -> tuple[int, ...]:
+        tokens_json_b64 = base64.b64encode(
+            json.dumps(list(tokens), ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
         script = (
-            "$tokens = ConvertFrom-Json @'\n"
-            + json.dumps(list(tokens), ensure_ascii=False)
-            + "\n'@\n"
-            "$matches = Get-CimInstance Win32_Process | Where-Object {\n"
-            "  $cmd = $_.CommandLine\n"
-            "  if (-not $cmd) { return $false }\n"
+            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\n"
+            f"$tokensJson = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{tokens_json_b64}'))\n"
+            "$tokens = $tokensJson | ConvertFrom-Json\n"
+            "$self = $PID\n"
+            "$matches = @()\n"
+            "foreach ($proc in Get-CimInstance Win32_Process) {\n"
+            "  if ($proc.ProcessId -eq $self) { continue }\n"
+            "  $cmd = $proc.CommandLine\n"
+            "  if (-not $cmd) { continue }\n"
+            "  $hit = $false\n"
             "  foreach ($token in $tokens) {\n"
-            "    if ($token -and $cmd.Contains([string]$token)) { return $true }\n"
+            "    if ($token -and $cmd.Contains([string]$token)) { $hit = $true; break }\n"
             "  }\n"
-            "  return $false\n"
-            "} | Select-Object -ExpandProperty ProcessId\n"
+            "  if ($hit) {\n"
+            "    $matches += $proc.ProcessId\n"
+            "    }\n"
+            "  }\n"
             "$matches | ForEach-Object { [string]$_ }\n"
         )
+        encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
         completed = subprocess.run(
             [
                 "powershell",
@@ -313,11 +346,11 @@ class TaskTreeSessionReadinessTerminator:
                 "-NonInteractive",
                 "-ExecutionPolicy",
                 "Bypass",
-                "-Command",
-                "-",
+                "-EncodedCommand",
+                encoded_script,
             ],
-            input=script,
             shell=False,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -337,25 +370,29 @@ class TaskTreeSessionReadinessTerminator:
             for line in completed.stdout.splitlines()
             if _safe_int(line.strip()) > 0
         )
-        for process_id in pids:
-            kill = subprocess.run(
-                ["taskkill", "/PID", str(process_id), "/T", "/F"],
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
+        return pids
+
+    def _terminate_owned_process_tree(self, process_id: int) -> None:
+        kill = subprocess.run(
+            ["taskkill", "/PID", str(process_id), "/T", "/F"],
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if kill.returncode != 0:
+            message = (
+                kill.stderr.strip()
+                or kill.stdout.strip()
+                or f"taskkill_exit_{kill.returncode}"
             )
-            if kill.returncode != 0:
-                message = (
-                    kill.stderr.strip()
-                    or kill.stdout.strip()
-                    or f"taskkill_exit_{kill.returncode}"
-                )
-                raise RuntimeError(message)
+            if _is_missing_process_error(message):
+                return
+            raise RuntimeError(message)
 
 
 def build_session_readiness_plan(
@@ -623,7 +660,8 @@ def _browser_action(options: SessionReadinessPlanOptions) -> SessionReadinessAct
         f"--remote-debugging-port={int(options.browser_debug_port)}",
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
-        "--new-window",
+        "--headless",
+        "--disable-crash-reporter",
         options.browser_url or "about:blank",
     )
     command = _join_command([_quote(part) for part in argv])

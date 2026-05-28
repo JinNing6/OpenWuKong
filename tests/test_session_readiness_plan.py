@@ -1,4 +1,5 @@
 import contextlib
+import base64
 import io
 import json
 import tempfile
@@ -47,6 +48,9 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertTrue(Path(user_data_dir).is_absolute())
         self.assertIn("--user-data-dir=", action["command"])
         self.assertIn("--remote-debugging-port=9222", action["argv"])
+        self.assertIn("--headless", action["argv"])
+        self.assertIn("--disable-crash-reporter", action["argv"])
+        self.assertNotIn("--new-window", action["argv"])
 
     def test_ide_plan_uses_extension_host_and_bridge_settings_preview(self):
         options = SessionReadinessPlanOptions(
@@ -471,7 +475,7 @@ class SessionReadinessPlanTests(unittest.TestCase):
             self.assertIn("operation attempted is not supported", data["results"][0]["warning"])
             self.assertEqual(terminator.owned_argv, [argv])
 
-    def test_tasktree_owned_process_scan_uses_input_without_stdin_pipe(self):
+    def test_tasktree_owned_process_scan_uses_encoded_command_without_stdin_script(self):
         class _Completed:
             returncode = 0
             stdout = ""
@@ -486,7 +490,7 @@ class SessionReadinessPlanTests(unittest.TestCase):
         with patch(
             "openwukong.control.session_readiness_plan.subprocess.run",
             side_effect=_fake_run,
-        ):
+        ), patch("openwukong.control.session_readiness_plan.time.sleep") as sleep:
             TaskTreeSessionReadinessTerminator().terminate_owned_processes(
                 (
                     "chrome.exe",
@@ -495,9 +499,107 @@ class SessionReadinessPlanTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(len(calls), 1)
-        self.assertIn("input", calls[0][1])
-        self.assertNotIn("stdin", calls[0][1])
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(sleep.call_count, 5)
+        self.assertNotIn("input", calls[0][1])
+        self.assertIn("stdin", calls[0][1])
+        self.assertIn("-EncodedCommand", calls[0][0])
+        encoded_index = calls[0][0].index("-EncodedCommand") + 1
+        script = base64.b64decode(calls[0][0][encoded_index]).decode("utf-16le")
+        self.assertIn("FromBase64String", script)
+        self.assertIn("$self = $PID", script)
+        self.assertIn("[Console]::OutputEncoding", script)
+        self.assertIn("$proc.ProcessId -eq $self", script)
+        self.assertIn("$hit = $false", script)
+        self.assertNotIn("return", script)
+
+    def test_tasktree_owned_process_cleanup_ignores_already_gone_child_pids(self):
+        class _Completed:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        calls = []
+        scan_count = 0
+
+        def _fake_run(args, **kwargs):
+            nonlocal scan_count
+            calls.append((tuple(args), dict(kwargs)))
+            if args[0] == "powershell":
+                scan_count += 1
+                return _Completed(stdout="111\n222\n" if scan_count == 1 else "")
+            if args[:2] == ["taskkill", "/PID"] and args[2] == "111":
+                return _Completed()
+            if args[:2] == ["taskkill", "/PID"] and args[2] == "222":
+                return _Completed(returncode=128, stderr='ERROR: The process "222" not found.')
+            raise AssertionError(args)
+
+        with patch(
+            "openwukong.control.session_readiness_plan.subprocess.run",
+            side_effect=_fake_run,
+        ), patch("openwukong.control.session_readiness_plan.time.sleep"):
+            TaskTreeSessionReadinessTerminator().terminate_owned_processes(
+                (
+                    "chrome.exe",
+                    "--remote-debugging-port=9234",
+                    "--user-data-dir=E:/tmp/openwukong-profile",
+                )
+            )
+
+        taskkill_pids = [
+            call[0][2]
+            for call in calls
+            if call[0][:2] == ("taskkill", "/PID")
+        ]
+        self.assertEqual(taskkill_pids[:2], ["111", "222"])
+
+    def test_tasktree_owned_process_cleanup_uses_final_rescan_after_taskkill_child_warning(self):
+        class _Completed:
+            def __init__(self, returncode=0, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        calls = []
+        scan_count = 0
+
+        def _fake_run(args, **kwargs):
+            nonlocal scan_count
+            calls.append((tuple(args), dict(kwargs)))
+            if args[0] == "powershell":
+                scan_count += 1
+                return _Completed(stdout="85636\n" if scan_count == 1 else "")
+            if args[:2] == ["taskkill", "/PID"] and args[2] == "85636":
+                return _Completed(
+                    returncode=1,
+                    stderr=(
+                        "ERROR: The process with PID 83012 (child process of PID 85636) "
+                        "could not be terminated.\n"
+                        "Reason: The operation attempted is not supported."
+                    ),
+                )
+            raise AssertionError(args)
+
+        with patch(
+            "openwukong.control.session_readiness_plan.subprocess.run",
+            side_effect=_fake_run,
+        ), patch("openwukong.control.session_readiness_plan.time.sleep"):
+            TaskTreeSessionReadinessTerminator().terminate_owned_processes(
+                (
+                    "chrome.exe",
+                    "--remote-debugging-port=9234",
+                    "--user-data-dir=E:/tmp/openwukong-profile",
+                )
+            )
+
+        taskkill_pids = [
+            call[0][2]
+            for call in calls
+            if call[0][:2] == ("taskkill", "/PID")
+        ]
+        self.assertEqual(taskkill_pids, ["85636"])
+        self.assertGreaterEqual(scan_count, 2)
 
     def test_stop_manifest_rejects_unmanaged_manifest(self):
         class _FakeTerminator:

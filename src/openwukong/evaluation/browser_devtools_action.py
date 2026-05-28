@@ -30,6 +30,12 @@ _PAGE_IDENTITY_EXPRESSION = (
 )
 
 
+class BrowserDevToolsActionError(Exception):
+    def __init__(self, message: str, *, action_result: dict | None = None):
+        super().__init__(message)
+        self.action_result = dict(action_result or {})
+
+
 @dataclasses.dataclass(frozen=True)
 class BrowserDevToolsActionReport:
     debugger_url: str
@@ -130,6 +136,17 @@ def run_browser_devtools_action(
             post_identity = _read_page_identity(active_client, debugger, health.target)
         else:
             post_identity = dict(health.page_identity or {})
+    except BrowserDevToolsActionError as exc:
+        return BrowserDevToolsActionReport(
+            debugger_url=debugger,
+            action=action_name,
+            ok=False,
+            health_report=health,
+            target=health.target,
+            action_result=exc.action_result,
+            error=str(exc) or exc.__class__.__name__,
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
     except Exception as exc:
         return BrowserDevToolsActionReport(
             debugger_url=debugger,
@@ -222,10 +239,17 @@ def _run_action(
             "Page.navigate",
             {"url": target_url},
         )
-        return {
+        action_result = {
             "navigated_url": target_url,
             "cdp_result": dict(result or {}),
         }
+        error_text = str((result or {}).get("errorText", "") or "").strip()
+        if error_text:
+            raise BrowserDevToolsActionError(
+                f"navigation_failed:{error_text}",
+                action_result=action_result,
+            )
+        return action_result
     if action == "read_page":
         return _read_page(client, debugger_url, target)
     if action == "set_input_value":

@@ -1186,6 +1186,7 @@ def _adapter_id_for_scenario(scenario_id: str) -> str:
         "wechat.chat.draft_reply": "wechat-recorded-uia-bundle",
         "browser.research.collect_sources": "browser-static-dom-bundle",
         "files.search.find_candidate": "file-search-temp-index",
+        "word.document.create_background": "word-owned-docx-template",
         "codex.project.submit_task_draft": "codex-draft-queue",
     }.get(str(scenario_id or ""), "primary-scenario-generic-adapter")
 
@@ -1243,6 +1244,19 @@ def _adapter_artifact_payload(
             "candidate_count": len(candidates),
             "candidates": candidates,
             "real_filesystem_scan_allowed": False,
+        }
+    elif scenario_id == "word.document.create_background":
+        payload["word_document"] = {
+            "document_name": str(
+                intent.get("document_name", "") or "openwukong-word-primary-scenario.docx"
+            ),
+            "marker": str(intent.get("marker", "") or "OPENWUKONG_WORD_PRIMARY_SCENARIO"),
+            "document_template": str(recorded_context.get("document_template", "") or "blank"),
+            "save_format": str(recorded_context.get("save_format", "") or "wdFormatXMLDocument"),
+            "background_only": bool(recorded_context.get("background_only", True)),
+            "owned_document_allowed": True,
+            "user_document_allowed": False,
+            "window_input_allowed": False,
         }
     elif scenario_id == "codex.project.submit_task_draft":
         draft_action = dict(plan.get("draft_action", {}) or {})

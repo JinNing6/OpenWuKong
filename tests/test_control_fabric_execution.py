@@ -15,6 +15,10 @@ from openwukong.control.command_planner import CommandPlanIntent
 from openwukong.control.fabric import ControlFabric, ControlIntent
 from openwukong.control.session_ownership import SessionOwnership, SessionOwnershipIndex
 from openwukong.control.side_effects import build_side_effect_policy
+from openwukong.evaluation.accessibility_probe import (
+    AccessibilityElementSnapshot,
+    AccessibilityWindowSnapshot,
+)
 
 
 class _FakeBrowserActionReport:
@@ -86,6 +90,26 @@ class _FakeTerminalConnector(SessionConnector):
         )
 
 
+def _element(control_type: str, *, name: str = "", patterns=()):
+    return AccessibilityElementSnapshot(
+        control_type=control_type,
+        name=name,
+        rect=(0, 0, 100, 20),
+        is_enabled=True,
+        patterns=tuple(patterns),
+    )
+
+
+def _window(process_name: str, title: str, elements=()):
+    return AccessibilityWindowSnapshot(
+        pid=2026,
+        process_name=process_name,
+        window_title=title,
+        class_name="Chrome_WidgetWin_1",
+        elements=tuple(elements),
+    )
+
+
 class ControlFabricExecutionTests(unittest.TestCase):
     def test_execute_requires_explicit_control_permission(self):
         runner = _FakeBrowserActionRunner()
@@ -138,6 +162,11 @@ class ControlFabricExecutionTests(unittest.TestCase):
         self.assertEqual(data["selected_route"], "browser-devtools-or-extension")
         self.assertEqual(data["selected_connector_id"], "browser")
         self.assertEqual(data["action_report"]["mode"], "browser-devtools-action")
+        self.assertEqual(data["transport_gate_decision"], "allow")
+        self.assertEqual(
+            data["dispatch_report"]["transport_capability_level"],
+            "background-native",
+        )
         self.assertEqual(len(runner.calls), 1)
         call = runner.calls[0]
         self.assertEqual(call["debugger_url"], "http://127.0.0.1:9222")
@@ -332,6 +361,60 @@ class ControlFabricExecutionTests(unittest.TestCase):
         self.assertEqual(data["error"], "dispatch_gate_not_ready")
         self.assertEqual(data["dispatch_report"]["decision"], "connector_required")
         self.assertEqual(runner.calls, [])
+
+    def test_execute_blocks_foreground_required_transport_before_action_runner(self):
+        fabric = ControlFabric()
+
+        report = fabric.execute(
+            _window(
+                "Weixin.exe",
+                "微信",
+                [_element("Pane"), _element("TitleBar")],
+            ),
+            ControlIntent(action="send_message", text="probe"),
+            allow_control=True,
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertFalse(data["control_allowed"])
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["decision"], "blocked")
+        self.assertEqual(data["error"], "foreground_takeover_confirmation_required")
+        self.assertEqual(
+            data["transport_gate_decision"],
+            "blocked_foreground_takeover_required",
+        )
+        self.assertEqual(
+            data["dispatch_report"]["transport_capability_level"],
+            "foreground-required",
+        )
+        self.assertTrue(data["dispatch_report"]["transport_capability"]["foreground_required"])
+
+    def test_execute_blocks_no_deterministic_transport_before_generic_dispatch_failure(self):
+        fabric = ControlFabric()
+
+        report = fabric.execute(
+            _window("NVIDIA Overlay.exe", "NVIDIA GeForce Overlay", []),
+            ControlIntent(action="write_text", text="probe"),
+            allow_control=True,
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertFalse(data["control_allowed"])
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["decision"], "blocked")
+        self.assertEqual(data["error"], "transport_capability_blocked")
+        self.assertEqual(data["transport_gate_decision"], "blocked_transport_capability")
+        self.assertEqual(
+            data["dispatch_report"]["transport_capability_level"],
+            "blocked",
+        )
+        self.assertEqual(
+            data["dispatch_report"]["transport_capability"]["blocking_reason"],
+            "no_deterministic_transport",
+        )
 
     def test_execute_command_intent_requires_explicit_control_permission(self):
         with tempfile.TemporaryDirectory() as td:

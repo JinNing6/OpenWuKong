@@ -159,6 +159,59 @@
       }
     },
     {
+      "case_id": "word_document_create_background",
+      "goal": {
+        "window_match": "Word background probe",
+        "task_name": "Word owned document background create",
+        "goal": "Create an owned temporary Word document through the Word object model, save it, and verify readback without foreground input.",
+        "connector_hint": "auto",
+        "workspace_path": "."
+      },
+      "states": [
+        {
+          "timestamp": 1.0,
+          "pid": 2401,
+          "process_name": "WINWORD.EXE",
+          "project_name": "Word background probe",
+          "window_title": "OpenWukong Word Background Probe - Word",
+          "ai_status": "unknown",
+          "ai_element_count": 8
+        }
+      ],
+      "primary_scenario": {
+        "scenario_id": "word.document.create_background",
+        "family": "word",
+        "intent": {
+          "document_name": "openwukong-word-primary-scenario.docx",
+          "marker": "OPENWUKONG_WORD_PRIMARY_SCENARIO"
+        },
+        "recorded_context": {
+          "evidence_ids": [
+            "office.word.com_application",
+            "office.word.owned_document_path",
+            "office.word.readback_marker"
+          ],
+          "document_template": "blank",
+          "save_format": "wdFormatXMLDocument",
+          "background_only": true
+        }
+      },
+      "expect": {
+        "matched_pid": 2401,
+        "connector_id": "uia-ide",
+        "primary_scenario_plan": {
+          "scenario_id": "word.document.create_background",
+          "route_id": "office-word-com",
+          "connector_id": "office-word",
+          "proposed_action": "create_owned_word_document",
+          "requires_confirmation": false,
+          "contains_evidence_id": "office.word.com_application",
+          "contains_allowed_primitive": "office_com_create_document",
+          "contains_blocked_primitive": "modify_user_document"
+        }
+      }
+    },
+    {
       "case_id": "codex_project_submit_task_draft",
       "goal": {
         "window_match": "openwukong",

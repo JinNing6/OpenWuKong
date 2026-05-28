@@ -79,6 +79,27 @@ _EFFECT_DEFINITIONS: dict[str, dict[str, object]] = {
         "requires_confirmation": True,
         "description": "Start a real agent run that can perform follow-on actions.",
     },
+    "office_document.create_owned_temp": {
+        "category": "office_document",
+        "primitive": "create_owned_temp_document",
+        "severity": "low",
+        "requires_confirmation": False,
+        "description": "Create or modify an owned temporary Office document under the test output root.",
+    },
+    "office_document.open_user_document": {
+        "category": "office_document",
+        "primitive": "open_user_document",
+        "severity": "medium",
+        "requires_confirmation": False,
+        "description": "Open a user-owned Office document outside the isolated test output root.",
+    },
+    "office_document.modify_user_document": {
+        "category": "office_document",
+        "primitive": "modify_user_document",
+        "severity": "high",
+        "requires_confirmation": True,
+        "description": "Modify a user-owned Office document.",
+    },
 }
 
 

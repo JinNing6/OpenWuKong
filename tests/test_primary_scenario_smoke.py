@@ -53,7 +53,7 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
             self.assertEqual(data["window_input_attempts"], 0)
             self.assertEqual(data["live_app_launch_attempts"], 0)
             self.assertEqual(data["real_filesystem_scan_attempts"], 0)
-            self.assertEqual(data["passed_cases"], 4)
+            self.assertEqual(data["passed_cases"], 5)
             self.assertEqual(data["failed_cases"], 0)
 
             cases = {case["case_id"]: case for case in data["cases"]}
@@ -63,6 +63,7 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
                     "wechat_chat_draft_reply",
                     "browser_research_collect_sources",
                     "files_search_find_candidate",
+                    "word_document_create_background",
                     "codex_project_submit_task_draft",
                 },
             )
@@ -116,6 +117,10 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
             )
             self.assertEqual(
                 cases["files_search_find_candidate"]["owned_session_dry_run_artifact_path"],
+                "",
+            )
+            self.assertEqual(
+                cases["word_document_create_background"]["owned_session_dry_run_artifact_path"],
                 "",
             )
 
@@ -284,6 +289,10 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
                 "codex-draft-queue",
             )
             self.assertEqual(
+                cases["word_document_create_background"]["adapter_id"],
+                "word-owned-docx-template",
+            )
+            self.assertEqual(
                 [
                     effect["category"]
                     for effect in cases["files_search_find_candidate"]["blocked_effects"]
@@ -306,6 +315,19 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
             )
             self.assertIn("temp_index", file_adapter)
             self.assertEqual(file_adapter["temp_index"]["candidate_count"], 2)
+
+            word_adapter = json.loads(
+                Path(cases["word_document_create_background"]["adapter_artifact_path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertIn("word_document", word_adapter)
+            self.assertEqual(
+                word_adapter["word_document"]["marker"],
+                "OPENWUKONG_WORD_PRIMARY_SCENARIO",
+            )
+            self.assertTrue(word_adapter["word_document"]["owned_document_allowed"])
+            self.assertFalse(word_adapter["word_document"]["user_document_allowed"])
 
             codex_adapter = json.loads(
                 Path(cases["codex_project_submit_task_draft"]["adapter_artifact_path"]).read_text(
@@ -498,7 +520,7 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
             data = json.loads(stdout.getvalue())
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(data["passed_cases"], 4)
+        self.assertEqual(data["passed_cases"], 5)
         self.assertEqual(data["control_attempts"], 0)
         self.assertEqual(data["desktop_scan_attempts"], 0)
         self.assertEqual(data["window_input_attempts"], 0)
@@ -525,7 +547,7 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(data["mode"], "primary-scenario-smoke-summary")
         self.assertEqual(data["suite"], "l1-primary-user-scenarios")
-        self.assertEqual(data["passed_cases"], 4)
+        self.assertEqual(data["passed_cases"], 5)
         self.assertEqual(data["failed_cases"], 0)
         self.assertEqual(data["safety_mode"], "isolated_no_focus")
         self.assertFalse(data["control_allowed"])
@@ -534,7 +556,7 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
         self.assertEqual(data["window_input_attempts"], 0)
         self.assertEqual(data["live_app_launch_attempts"], 0)
         self.assertEqual(data["real_filesystem_scan_attempts"], 0)
-        self.assertEqual(data["artifact_count"], 4)
+        self.assertEqual(data["artifact_count"], 5)
         self.assertEqual(data["owned_session_dry_run_artifact_count"], 2)
         self.assertEqual(data["owned_session_execution_artifact_count"], 2)
         self.assertEqual(data["owned_browser_helper_artifact_count"], 0)
@@ -579,6 +601,14 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             scenarios["wechat.chat.draft_reply"]["owned_session_dry_run_id"],
+            "",
+        )
+        self.assertEqual(
+            scenarios["word.document.create_background"]["adapter_id"],
+            "word-owned-docx-template",
+        )
+        self.assertEqual(
+            scenarios["word.document.create_background"]["owned_session_dry_run_id"],
             "",
         )
         self.assertEqual(

@@ -14,6 +14,8 @@
 
     "ollama_base_url": "http://localhost:11434",
     "ollama_model": "qwen2.5:latest",
+    "llm_health_check_on_start": true,
+    "llm_required": false,
     "max_steps": 15,
     "temperature": 0.3,
     "verbose": true

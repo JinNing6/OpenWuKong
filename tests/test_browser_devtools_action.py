@@ -102,6 +102,54 @@ class BrowserDevToolsActionTests(unittest.TestCase):
         self.assertEqual(fake.command_calls[0][2], "Page.navigate")
         self.assertEqual(fake.command_calls[0][3]["url"], "https://www.bing.com/search?q=openwukong")
 
+    def test_navigate_url_action_fails_when_cdp_reports_navigation_error(self):
+        target = BrowserDevToolsTarget(
+            target_id="page-1",
+            type="page",
+            title="about:blank",
+            url="about:blank",
+            web_socket_debugger_url="ws://127.0.0.1/devtools/page/page-1",
+        )
+        fake = _FakeDevToolsClient(
+            [target],
+            evaluate_results=[
+                {
+                    "type": "object",
+                    "value": {
+                        "title": "",
+                        "href": "about:blank",
+                        "readyState": "complete",
+                    },
+                },
+            ],
+            command_results=[
+                {
+                    "frameId": "frame-1",
+                    "loaderId": "loader-1",
+                    "errorText": "net::ERR_CONNECTION_CLOSED",
+                }
+            ],
+        )
+
+        report = run_browser_devtools_action(
+            debugger_url="http://127.0.0.1:9223",
+            window_title="about:blank - Google Chrome",
+            resource_url="about:blank",
+            action="navigate_url",
+            url="https://www.bing.com/search?q=openwukong",
+            devtools_client=fake,
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertFalse(data["control_allowed"])
+        self.assertEqual(data["control_attempts"], 1)
+        self.assertEqual(data["error"], "navigation_failed:net::ERR_CONNECTION_CLOSED")
+        self.assertEqual(
+            data["action_result"]["cdp_result"]["errorText"],
+            "net::ERR_CONNECTION_CLOSED",
+        )
+
     def test_set_input_value_action_sets_value_and_dispatches_events(self):
         target = BrowserDevToolsTarget(
             target_id="page-1",

@@ -77,6 +77,28 @@ _PRIMARY_SCENARIO_SPECS = {
         ),
         "risks": (),
     },
+    "word.document.create_background": {
+        "route_id": "office-word-com",
+        "connector_id": "office-word",
+        "proposed_action": "create_owned_word_document",
+        "requires_confirmation": False,
+        "allowed_primitives": (
+            "office_com_create_document",
+            "office_com_save_document",
+            "office_com_readback_verify",
+        ),
+        "blocked_primitives": ("open_user_document", "modify_user_document", "window_input"),
+        "allowed_effects": (
+            "recorded_context.read",
+            "local_draft.write",
+            "office_document.create_owned_temp",
+        ),
+        "blocked_effects": (
+            "office_document.open_user_document",
+            "office_document.modify_user_document",
+        ),
+        "risks": (),
+    },
     "codex.project.submit_task_draft": {
         "route_id": "codex-task-draft",
         "connector_id": "codex",

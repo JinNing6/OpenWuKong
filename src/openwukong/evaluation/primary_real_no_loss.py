@@ -25,6 +25,7 @@ from openwukong.evaluation.accessibility_probe import (
     WindowsCapabilityProbe,
 )
 from openwukong.evaluation.ide_bridge_capture import capture_ide_bridge_capabilities
+from openwukong.evaluation.office_word_runner import run_office_word_background_probe
 from openwukong.evaluation.primary_scenario_smoke import (
     OwnedBrowserHelperActionRunner,
     OwnedBrowserHelperReadinessProbe,
@@ -38,6 +39,8 @@ from openwukong.evaluation.wechat_locator import build_wechat_locator_report
 
 
 IDEBridgeProbe = Callable[[str], dict]
+WordBackgroundProbeRunner = Callable[..., object]
+BrowserExecutableResolver = Callable[[str], str]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -198,10 +201,12 @@ def run_primary_real_no_loss(
     owned_browser_debug_port: int = 9238,
     owned_browser_executable: str = "chrome.exe",
     owned_browser_url: str = "",
+    browser_executable_resolver: BrowserExecutableResolver | None = None,
     accessibility_observer: object | None = None,
     wechat_win32_observer: object | None = None,
     ide_bridge_urls: tuple[str, ...] = ("http://127.0.0.1:8787",),
     ide_bridge_probe: IDEBridgeProbe | None = None,
+    word_background_probe_runner: WordBackgroundProbeRunner | None = None,
 ) -> PrimaryRealNoLossReport:
     started = time.perf_counter()
     root = _resolve_output_root(output_root)
@@ -222,7 +227,10 @@ def run_primary_real_no_loss(
         owned_browser_helper_readiness_probe=owned_browser_helper_readiness_probe,
         owned_browser_helper_action_runner=owned_browser_helper_action_runner,
         owned_browser_debug_port=owned_browser_debug_port,
-        owned_browser_executable=owned_browser_executable,
+        owned_browser_executable=_resolve_requested_browser_executable(
+            owned_browser_executable,
+            browser_executable_resolver,
+        ),
         owned_browser_url=owned_browser_url,
     )
 
@@ -235,6 +243,8 @@ def run_primary_real_no_loss(
             case = _wechat_case(row, root, accessibility_observer, wechat_win32_observer)
         elif scenario_id == "files.search.find_candidate":
             case = _file_case(row, root)
+        elif scenario_id == "word.document.create_background":
+            case = _word_case(row, root, word_background_probe_runner)
         elif scenario_id == "codex.project.submit_task_draft":
             case = _codex_case(row, root, ide_bridge_urls, ide_bridge_probe)
         else:
@@ -247,6 +257,62 @@ def run_primary_real_no_loss(
         cases=tuple(cases),
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
+
+
+def _resolve_requested_browser_executable(
+    requested: str,
+    resolver: BrowserExecutableResolver | None,
+) -> str:
+    text = str(requested or "").strip() or "chrome.exe"
+    if callable(resolver):
+        resolved = str(resolver(text) or "").strip()
+        return resolved or text
+    return text
+
+
+def _resolve_installed_browser_executable(
+    requested: str,
+    *,
+    resolver: object | None = None,
+) -> str:
+    text = str(requested or "").strip() or "chrome.exe"
+    path = Path(text)
+    if path.is_file():
+        return str(path.resolve())
+    if path.is_absolute() and not path.exists():
+        return text
+    requested_name = path.name.lower()
+    if requested_name not in {"chrome.exe", "msedge.exe", "browser"}:
+        return text
+
+    active_resolver = resolver
+    if active_resolver is None:
+        from openwukong.control.app_resolution import WindowsAppResolver
+
+        active_resolver = WindowsAppResolver()
+
+    app_names = ("edge",) if requested_name == "msedge.exe" else ("chrome", "edge")
+    for app_name in app_names:
+        try:
+            report = active_resolver.resolve(app_name)
+        except Exception:
+            continue
+        executable = _first_existing_executable_from_resolution(report)
+        if executable:
+            return executable
+    return text
+
+
+def _first_existing_executable_from_resolution(resolution: object) -> str:
+    selected = getattr(resolution, "selected_candidate", None)
+    candidates = getattr(resolution, "candidates", ()) or ()
+    for candidate in (selected, *tuple(candidates)):
+        if candidate is None:
+            continue
+        path = Path(str(getattr(candidate, "path", "") or ""))
+        if path.is_file() and path.suffix.lower() == ".exe":
+            return str(path.resolve())
+    return ""
 
 
 def summarize_report(report: PrimaryRealNoLossReport) -> dict:
@@ -494,6 +560,53 @@ def _codex_case(
     )
 
 
+def _word_case(
+    row: dict,
+    output_root: Path,
+    word_background_probe_runner: WordBackgroundProbeRunner | None,
+) -> PrimaryRealNoLossCase:
+    case_id = str(row["case_id"])
+    plan = dict(row["plan"])
+    intent = dict(plan.get("draft_action", {}).get("intent", {}) or {})
+    marker = str(intent.get("marker", "") or "OPENWUKONG_WORD_PRIMARY_SCENARIO")
+    document_name = str(
+        intent.get("document_name", "") or "openwukong-word-primary-scenario.docx"
+    )
+    document_path = output_root / "word" / _safe_filename(case_id) / _safe_filename(document_name)
+    document_path.parent.mkdir(parents=True, exist_ok=True)
+    runner = word_background_probe_runner or run_office_word_background_probe
+    raw_report = runner(document_path=str(document_path), marker=marker)
+    report_data = _report_to_dict(raw_report)
+    ok = bool(report_data.get("ok", False))
+    errors: tuple[str, ...] = ()
+    error_text = str(report_data.get("error", "") or "").strip()
+    if error_text:
+        errors = (error_text,)
+    return PrimaryRealNoLossCase(
+        case_id=case_id,
+        scenario_id="word.document.create_background",
+        status="verified" if ok else str(report_data.get("decision", "") or "failed"),
+        passed=ok,
+        real_verified=ok,
+        real_probe_kind="office-word-com-owned-document-background",
+        details={
+            "document_path": str(report_data.get("document_path", "") or document_path),
+            "marker": str(report_data.get("marker", "") or marker),
+            "decision": str(report_data.get("decision", "") or ""),
+            "save_verified": bool(report_data.get("save_verified", False)),
+            "readback_verified": bool(report_data.get("readback_verified", False)),
+            "word_started": bool(report_data.get("word_started", False)),
+            "visible_requested": bool(report_data.get("visible_requested", False)),
+            "control_attempts": int(report_data.get("control_attempts", 0) or 0),
+            "window_input_attempts": int(report_data.get("window_input_attempts", 0) or 0),
+            "office_com_attempts": int(report_data.get("office_com_attempts", 0) or 0),
+        },
+        window_input_attempts=int(report_data.get("window_input_attempts", 0) or 0),
+        user_file_modification_attempts=0,
+        errors=errors,
+    )
+
+
 def _generic_unavailable_case(row: dict, output_root: Path) -> PrimaryRealNoLossCase:
     del output_root
     plan = dict(row["plan"])
@@ -562,6 +675,17 @@ def _safe_filename(value: str) -> str:
     return text.strip("._") or "unnamed"
 
 
+def _report_to_dict(report: object) -> dict:
+    if isinstance(report, dict):
+        return dict(report)
+    to_dict = getattr(report, "to_dict", None)
+    if callable(to_dict):
+        data = to_dict()
+        if isinstance(data, dict):
+            return dict(data)
+    return {"ok": False, "error": "invalid_word_probe_report"}
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run real no-loss probes for primary user scenarios."
@@ -584,6 +708,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         owned_browser_debug_port=args.owned_browser_debug_port,
         owned_browser_executable=args.owned_browser_executable,
         owned_browser_url=args.owned_browser_url,
+        browser_executable_resolver=_resolve_installed_browser_executable,
         ide_bridge_urls=tuple(args.ide_bridge_url or ("http://127.0.0.1:8787",)),
     )
     if args.summary_json:

@@ -25,11 +25,19 @@ from openwukong.control.command_planner import (
     CommandPlanner,
 )
 from openwukong.control.command_runner import CommandRunner
+from openwukong.control.foreground_takeover import (
+    ForegroundTakeoverRequest,
+    build_foreground_takeover_request,
+)
 from openwukong.control.side_effects import (
     SideEffectGateReport,
     evaluate_side_effect_policy,
 )
 from openwukong.control.session_ownership import SessionOwnership, SessionOwnershipIndex
+from openwukong.control.transport_capability import (
+    TransportCapabilityReport,
+    build_transport_capability,
+)
 
 
 _CONNECTOR_ROUTE_IDS = {
@@ -106,6 +114,7 @@ class ControlDispatchReport:
     session_discovery: dict | None = None
     background_safe: bool = False
     foreground_required: bool = False
+    transport_capability: TransportCapabilityReport | None = None
     side_effect_gate: SideEffectGateReport = dataclasses.field(
         default_factory=lambda: evaluate_side_effect_policy({})
     )
@@ -131,6 +140,11 @@ class ControlDispatchReport:
         return 0
 
     def to_dict(self) -> dict:
+        transport = self.transport_capability or build_transport_capability(
+            self.route_plan,
+            self.intent,
+            selected_route=self.selected_route,
+        )
         return {
             "mode": self.mode,
             "safety_mode": self.safety_mode,
@@ -149,6 +163,11 @@ class ControlDispatchReport:
             },
             "background_safe": self.background_safe,
             "foreground_required": self.foreground_required,
+            "transport_capability": transport.to_dict(),
+            "transport_capability_level": transport.capability_level,
+            "selected_transport": transport.selected_transport,
+            "can_execute_without_focus": transport.can_execute_without_focus,
+            "transport_requires_user_confirmation": transport.requires_user_confirmation,
             "side_effect_gate": self.side_effect_gate.to_dict(),
             "blocked": self.blocked,
             "reason": self.reason,
@@ -174,6 +193,9 @@ class ControlExecutionReport:
     ok: bool
     allow_control: bool = False
     ownership_required: bool = False
+    transport_gate_decision: str = "not_evaluated"
+    transport_gate_error: str = ""
+    foreground_takeover_request: ForegroundTakeoverRequest | None = None
     action_report: dict | None = None
     error: str = ""
     elapsed_ms: float = 0.0
@@ -218,6 +240,13 @@ class ControlExecutionReport:
             "decision": self.decision,
             "ownership_required": self.ownership_required,
             "ownership": self.ownership.to_dict(),
+            "transport_gate_decision": self.transport_gate_decision,
+            "transport_gate_error": self.transport_gate_error,
+            "foreground_takeover_request": (
+                self.foreground_takeover_request.to_dict()
+                if self.foreground_takeover_request
+                else {}
+            ),
             "selected_route": self.selected_route,
             "selected_connector_id": self.selected_connector_id,
             "dispatch_report": self.dispatch_report.to_dict(),
@@ -289,6 +318,13 @@ class _ConnectorResolution:
 @dataclasses.dataclass(frozen=True)
 class _ExecutableConnectorResolution:
     connector: Optional[SessionConnector]
+    error: str = ""
+
+
+@dataclasses.dataclass(frozen=True)
+class _TransportExecutionGate:
+    allowed: bool
+    decision: str = "allow"
     error: str = ""
 
 
@@ -367,6 +403,23 @@ class ControlFabric:
                 error="explicit_control_permission_required",
                 elapsed_ms=(time.perf_counter() - started) * 1000,
             )
+        transport_gate = _evaluate_transport_execution_gate(dispatch_report)
+        if not transport_gate.allowed:
+            takeover_request = None
+            if transport_gate.decision == "blocked_foreground_takeover_required":
+                takeover_request = build_foreground_takeover_request(dispatch_report)
+            return ControlExecutionReport(
+                dispatch_report=dispatch_report,
+                decision="blocked",
+                ok=False,
+                allow_control=True,
+                ownership_required=self._require_owned_session_for_execution,
+                transport_gate_decision=transport_gate.decision,
+                transport_gate_error=transport_gate.error,
+                foreground_takeover_request=takeover_request,
+                error=transport_gate.error,
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
         if not _dispatch_allows_connector_action(dispatch_report):
             if not dispatch_report.side_effect_gate.allowed:
                 return ControlExecutionReport(
@@ -375,6 +428,8 @@ class ControlFabric:
                     ok=False,
                     allow_control=True,
                     ownership_required=self._require_owned_session_for_execution,
+                    transport_gate_decision=transport_gate.decision,
+                    transport_gate_error=transport_gate.error,
                     error=dispatch_report.side_effect_gate.reason,
                     elapsed_ms=(time.perf_counter() - started) * 1000,
                 )
@@ -384,6 +439,8 @@ class ControlFabric:
                 ok=False,
                 allow_control=True,
                 ownership_required=self._require_owned_session_for_execution,
+                transport_gate_decision=transport_gate.decision,
+                transport_gate_error=transport_gate.error,
                 error="dispatch_gate_not_ready",
                 elapsed_ms=(time.perf_counter() - started) * 1000,
             )
@@ -394,6 +451,8 @@ class ControlFabric:
                 ok=False,
                 allow_control=True,
                 ownership_required=True,
+                transport_gate_decision=transport_gate.decision,
+                transport_gate_error=transport_gate.error,
                 error="owned_session_required",
                 elapsed_ms=(time.perf_counter() - started) * 1000,
             )
@@ -418,6 +477,8 @@ class ControlFabric:
                     ok=False,
                     allow_control=True,
                     ownership_required=self._require_owned_session_for_execution,
+                    transport_gate_decision=transport_gate.decision,
+                    transport_gate_error=transport_gate.error,
                     error=resolution.error or "connector_execution_not_available",
                     elapsed_ms=(time.perf_counter() - started) * 1000,
                 )
@@ -438,6 +499,8 @@ class ControlFabric:
             ok=ok,
             allow_control=True,
             ownership_required=self._require_owned_session_for_execution,
+            transport_gate_decision=transport_gate.decision,
+            transport_gate_error=transport_gate.error,
             action_report=action_report,
             error=str(action_report.get("error", "") or ""),
             elapsed_ms=(time.perf_counter() - started) * 1000,
@@ -774,6 +837,11 @@ def _report(
     ownership: SessionOwnership | None = None,
     side_effect_gate: SideEffectGateReport | None = None,
 ) -> ControlDispatchReport:
+    transport_capability = build_transport_capability(
+        route_plan,
+        intent,
+        selected_route=selected_route,
+    )
     return ControlDispatchReport(
         target=target,
         intent=intent,
@@ -788,6 +856,7 @@ def _report(
         session_discovery=session_discovery,
         background_safe=background_safe,
         foreground_required=foreground_required,
+        transport_capability=transport_capability,
         side_effect_gate=side_effect_gate or evaluate_side_effect_policy({}),
         blocked=blocked,
         reason=reason,
@@ -903,6 +972,27 @@ def _dispatch_allows_connector_action(report: ControlDispatchReport) -> bool:
         and bool(report.selected_connector_id)
         and report.selected_route in _CONNECTOR_ROUTE_IDS
     )
+
+
+def _evaluate_transport_execution_gate(report: ControlDispatchReport) -> _TransportExecutionGate:
+    transport = report.transport_capability or build_transport_capability(
+        report.route_plan,
+        report.intent,
+        selected_route=report.selected_route,
+    )
+    if transport.blocked or transport.capability_level == "blocked":
+        return _TransportExecutionGate(
+            allowed=False,
+            decision="blocked_transport_capability",
+            error="transport_capability_blocked",
+        )
+    if transport.foreground_required or transport.capability_level == "foreground-required":
+        return _TransportExecutionGate(
+            allowed=False,
+            decision="blocked_foreground_takeover_required",
+            error="foreground_takeover_confirmation_required",
+        )
+    return _TransportExecutionGate(allowed=True)
 
 
 def _connector_message_from_intent(intent: ControlIntent) -> str:
