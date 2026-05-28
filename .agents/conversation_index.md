@@ -4498,3 +4498,52 @@ When a new conversation starts in this repo:
       `agent_app_uia_ready` or `agent_native_connector_ready`
     - add a no-focus screenshot/visual verification artifact only after the
       background route is deterministic
+- 2026-05-28 deferred Cursor/VS Code scope and hardened Claude Desktop
+  app-vs-CLI targeting:
+  - scope update:
+    - user explicitly said VS Code is not needed and Cursor should be ignored
+      for now
+    - current near-term work should focus on Codex/Claude/app-surface control
+      and the shared background/no-focus control layer, not IDE bridge live
+      capture
+  - root-cause fix:
+    - `claude desktop` could become ambiguous when a transient Claude Code CLI
+      process was running because both Desktop and CLI expose `claude.exe`
+      running-process candidates with equal score
+    - app resolution now applies request-surface filtering for Claude:
+      `desktop/app` requests prefer Desktop candidates when present, while
+      `cli/code` requests prefer CLI candidates when present
+    - Claude surface classification is centralized through the same helper so
+      WindowsApps Claude Desktop shells, StartApps entries, and CLI paths are
+      not classified differently by resolver and agent-surface layers
+  - safe real validation:
+    - `agent_surface_report --agent "claude desktop"` resolved the running
+      WindowsApps Claude Desktop shell:
+      `C:\Program Files\WindowsApps\Claude_1.9255.2.0_x64__pzs8sxrjxfjjc\app\claude.exe`
+      with `control_attempts=0`
+    - `agent_native_connector_probe --agent "claude desktop"` stayed read-only,
+      found the Claude Desktop window and semantic composer, but correctly
+      reported `agent_native_connector_not_exposed` because no native/DevTools
+      endpoint is exposed and the requested project/task was not visible
+  - TDD coverage added:
+    - resolver regression for `claude desktop` with simultaneous WindowsApps
+      Desktop `claude.exe` and transient CLI `.local/bin/claude.exe`
+    - surface regression for selecting the WindowsApps Desktop shell instead
+      of CLI for explicit `claude desktop`
+  - verification:
+    - `python -m unittest tests.test_app_resolution tests.test_agent_surface_report tests.test_agent_app_uia_probe tests.test_agent_native_connector_probe tests.test_agent_conversation`: OK
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - explicit Claude Desktop targeting is now precise enough for the next
+      app-surface work and is no longer polluted by temporary Claude CLI
+      process evidence
+    - Claude Desktop still cannot be claimed as direct background-send capable
+      until a native bridge or exposed deterministic endpoint exists
+  - next high-value steps:
+    - design and implement the native bridge command contract for agent app
+      surfaces
+    - keep Codex CLI as the proven background execution route while Codex App
+      and Claude Desktop remain app-surface gated
+    - add no-focus screenshot/visual verification only after the deterministic
+      app bridge exists

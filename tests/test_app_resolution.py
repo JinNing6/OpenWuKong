@@ -328,6 +328,37 @@ class AppResolutionModuleTests(unittest.TestCase):
                 self.assertTrue(report.ok)
                 self.assertEqual(report.identity.app_id, "claude")
 
+    def test_claude_desktop_alias_prefers_desktop_when_cli_process_is_transient(self):
+        provider = StaticAppCandidateProvider(
+            [
+                AppResolutionCandidate(
+                    source="running-process",
+                    display_name="claude.exe",
+                    process_name="claude.exe",
+                    executable_name="claude.exe",
+                    path="C:/Program Files/WindowsApps/Claude_1.9255.2.0_x64__pzs8sxrjxfjjc/app/claude.exe",
+                    pid=11140,
+                ),
+                AppResolutionCandidate(
+                    source="running-process",
+                    display_name="claude.exe",
+                    process_name="claude.exe",
+                    executable_name="claude.exe",
+                    path="C:/Users/me/.local/bin/claude.exe",
+                    pid=75596,
+                ),
+            ]
+        )
+
+        report = WindowsAppResolver(candidate_providers=(provider,)).resolve("claude desktop")
+
+        self.assertTrue(report.ok)
+        self.assertEqual(report.decision, "resolved")
+        self.assertEqual(
+            report.path,
+            "C:/Program Files/WindowsApps/Claude_1.9255.2.0_x64__pzs8sxrjxfjjc/app/claude.exe",
+        )
+
     def test_path_verifier_records_authenticode_signature_metadata(self):
         with tempfile.TemporaryDirectory() as td:
             exe = Path(td) / "Weixin.exe"

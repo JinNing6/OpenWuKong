@@ -15,6 +15,7 @@ from openwukong.control.app_resolution import (
     AppResolutionCandidate,
     AppResolutionReport,
     WindowsAppResolver,
+    claude_candidate_surface_kind,
     lower_text,
 )
 from openwukong.control.side_effects import (
@@ -300,32 +301,11 @@ def _is_codex_desktop_shell(candidate: AppResolutionCandidate) -> bool:
 
 
 def _is_claude_code_cli(candidate: AppResolutionCandidate) -> bool:
-    path_text = _normalized_path(candidate.path)
-    exe = lower_text(_candidate_file_name(candidate))
-    if exe in {"claude.cmd", "claude.bat", "claude"}:
-        return True
-    if exe != "claude.exe":
-        return False
-    if "/.local/bin/" in path_text or "/appdata/roaming/npm/" in path_text:
-        return True
-    return candidate.source == "path" and not _is_claude_desktop_shell(candidate)
+    return claude_candidate_surface_kind(candidate) == "cli"
 
 
 def _is_claude_desktop_shell(candidate: AppResolutionCandidate) -> bool:
-    path_text = _normalized_path(candidate.path)
-    exe = lower_text(_candidate_file_name(candidate))
-    name = _candidate_normalized_name(candidate)
-    if candidate.source == "start-apps" and name in {"claude", "claudedesktop", "anthropicclaude"}:
-        return True
-    if candidate.source == "start-menu" and name in {"claude", "claudedesktop", "anthropicclaude"}:
-        return True
-    if exe == "claude.exe" and (
-        "/programs/claude/" in path_text
-        or "/anthropic/" in path_text
-        or "/anthropicclaude/" in path_text
-    ):
-        return True
-    return False
+    return claude_candidate_surface_kind(candidate) == "desktop"
 
 
 def _request_requires_desktop_surface(agent_name: str) -> bool:

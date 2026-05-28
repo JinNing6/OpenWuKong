@@ -224,6 +224,46 @@ class AgentSurfaceReportTests(unittest.TestCase):
             ["claude-desktop-shell"],
         )
 
+    def test_claude_desktop_alias_selects_running_windowsapps_shell_not_cli(self):
+        resolver = WindowsAppResolver(
+            candidate_providers=(
+                StaticAppCandidateProvider(
+                    [
+                        AppResolutionCandidate(
+                            source="running-process",
+                            display_name="claude.exe",
+                            process_name="claude.exe",
+                            executable_name="claude.exe",
+                            path="C:/Program Files/WindowsApps/Claude_1.9255.2.0_x64__pzs8sxrjxfjjc/app/claude.exe",
+                            pid=11140,
+                        ),
+                        AppResolutionCandidate(
+                            source="running-process",
+                            display_name="claude.exe",
+                            process_name="claude.exe",
+                            executable_name="claude.exe",
+                            path="C:/Users/me/.local/bin/claude.exe",
+                            pid=75596,
+                        ),
+                    ]
+                ),
+            )
+        )
+
+        data = build_agent_surface_report(["claude desktop"], resolver=resolver).to_dict()
+        surface = data["agents"][0]
+
+        self.assertTrue(surface["ok"])
+        self.assertEqual(surface["selected_transport"]["transport_id"], "claude-desktop-shell")
+        self.assertEqual(
+            surface["selected_transport"]["path"],
+            "C:/Program Files/WindowsApps/Claude_1.9255.2.0_x64__pzs8sxrjxfjjc/app/claude.exe",
+        )
+        self.assertEqual(
+            [transport["transport_id"] for transport in surface["transports"]],
+            ["claude-desktop-shell"],
+        )
+
     def test_claude_desktop_alias_is_not_satisfied_by_cli_only(self):
         resolver = WindowsAppResolver(
             candidate_providers=(

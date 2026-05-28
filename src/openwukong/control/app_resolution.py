@@ -607,7 +607,11 @@ class WindowsAppResolver:
             for candidate in candidates
             if candidate_matches_identity(candidate, identity)
         )
-        deduped = dedupe_candidates(matched)
+        deduped = _prefer_requested_agent_surface_candidates(
+            name,
+            identity,
+            dedupe_candidates(matched),
+        )
         if not deduped:
             return AppResolutionReport(
                 app_name=name,
@@ -797,6 +801,64 @@ def candidate_matches_identity(candidate: AppResolutionCandidate, identity: AppI
     return False
 
 
+def requested_agent_surface_kind(app_name: str, identity: AppIdentity) -> str:
+    if identity.app_id not in {"claude"}:
+        return ""
+    normalized = " ".join(str(app_name or "").replace("-", " ").lower().split())
+    tokens = set(normalized.split())
+    if "cli" in tokens:
+        return "cli"
+    if tokens & {"app", "desktop"}:
+        return "desktop"
+    if identity.app_id == "claude" and "code" in tokens:
+        return "cli"
+    return ""
+
+
+def claude_candidate_surface_kind(candidate: AppResolutionCandidate) -> str:
+    path_text = _normalized_candidate_path(candidate.path)
+    exe = lower_text(_candidate_file_name(candidate))
+    name = normalize_app_name(candidate.display_name)
+    if exe in {"claude.cmd", "claude.bat", "claude"}:
+        return "cli"
+    if exe == "claude.exe" and (
+        "/.local/bin/" in path_text
+        or "/appdata/roaming/npm/" in path_text
+    ):
+        return "cli"
+    if candidate.source == "start-apps" and name in {"claude", "claudedesktop", "anthropicclaude"}:
+        return "desktop"
+    if candidate.source == "start-menu" and name in {"claude", "claudedesktop", "anthropicclaude"}:
+        return "desktop"
+    if exe == "claude.exe" and (
+        "/program files/windowsapps/claude_" in path_text
+        or "/programs/claude/" in path_text
+        or "/anthropic/" in path_text
+        or "/anthropicclaude/" in path_text
+    ):
+        return "desktop"
+    if candidate.source == "path" and exe == "claude.exe":
+        return "cli"
+    return ""
+
+
+def _prefer_requested_agent_surface_candidates(
+    app_name: str,
+    identity: AppIdentity,
+    candidates: tuple[AppResolutionCandidate, ...],
+) -> tuple[AppResolutionCandidate, ...]:
+    requested_surface = requested_agent_surface_kind(app_name, identity)
+    if identity.app_id == "claude" and requested_surface:
+        preferred = tuple(
+            candidate
+            for candidate in candidates
+            if claude_candidate_surface_kind(candidate) == requested_surface
+        )
+        if preferred:
+            return preferred
+    return candidates
+
+
 def candidate_score(candidate: AppResolutionCandidate, identity: AppIdentity) -> int:
     if candidate.already_running:
         raw_executable_names = tuple(str(item or "").strip() for item in identity.executable_names if str(item or "").strip())
@@ -964,6 +1026,22 @@ def lower_text(value: str) -> str:
     return str(value or "").strip().lower()
 
 
+def _candidate_file_name(candidate: AppResolutionCandidate) -> str:
+    for value in (
+        candidate.executable_name,
+        Path(candidate.path).name if candidate.path else "",
+        candidate.process_name,
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _normalized_candidate_path(value: str) -> str:
+    return str(value or "").replace("\\", "/").lower()
+
+
 __all__ = [
     "AppIdentity",
     "AppIdentityRegistry",
@@ -981,6 +1059,7 @@ __all__ = [
     "WindowsAppResolver",
     "WindowsRunningProcessCandidateProvider",
     "candidate_excluded",
+    "claude_candidate_surface_kind",
     "candidate_key",
     "candidate_matches_identity",
     "candidate_names",
@@ -991,5 +1070,6 @@ __all__ = [
     "default_start_menu_roots",
     "lower_text",
     "normalize_app_name",
+    "requested_agent_surface_kind",
     "source_priority",
 ]
