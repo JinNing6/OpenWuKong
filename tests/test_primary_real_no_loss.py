@@ -10,10 +10,12 @@ from openwukong.evaluation.accessibility_probe import (
 )
 from openwukong.evaluation.primary_real_no_loss import (
     _resolve_installed_browser_executable,
+    _resolve_background_screenshot_dir,
     run_primary_real_no_loss,
     summarize_report,
 )
 from openwukong.evaluation.simulation import load_simulation_fixture
+from openwukong.evaluation.window_capture import BackgroundWindowCaptureReport
 from openwukong.evaluation.wechat_locator import (
     StaticWin32WindowObserver,
     Win32ChildWindowSnapshot,
@@ -44,6 +46,26 @@ class _FakeReadinessTerminator:
 
     def terminate_owned_processes(self, argv: tuple[str, ...]) -> None:
         self.owned_argv.append(tuple(argv))
+
+
+class _FakeBackgroundCaptureProvider:
+    def __init__(self):
+        self.calls: list[tuple[int, Path]] = []
+
+    def capture_window(self, hwnd: int, output_path: str | Path) -> BackgroundWindowCaptureReport:
+        target = Path(output_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"fake background screenshot")
+        self.calls.append((int(hwnd), target))
+        return BackgroundWindowCaptureReport(
+            hwnd=int(hwnd),
+            output_path=str(target),
+            ok=True,
+            width=320,
+            height=200,
+            foreground_hwnd_before=111,
+            foreground_hwnd_after=111,
+        )
 
 
 def _element(control_type: str, *, name: str = "", patterns=()):
@@ -94,6 +116,29 @@ class PrimaryRealNoLossTests(unittest.TestCase):
         resolved = _resolve_installed_browser_executable("chrome.exe", resolver=resolver)
 
         self.assertEqual(resolved, "chrome.exe")
+
+    def test_background_screenshot_dir_uses_explicit_relative_path_from_cwd(self):
+        output_root = (Path("logs") / "runtime" / "primary-real-no-loss-r4").resolve()
+        screenshot_dir = Path("logs") / "runtime" / "primary-real-no-loss-r4" / "background-screenshots"
+
+        resolved = _resolve_background_screenshot_dir(
+            screenshot_dir,
+            output_root=output_root,
+            case_id="wechat_chat_draft_reply",
+        )
+
+        self.assertEqual(
+            resolved,
+            screenshot_dir.resolve() / "wechat_chat_draft_reply",
+        )
+
+    def test_wechat_primary_case_excludes_enterprise_wechat_from_target_screenshots(self):
+        from openwukong.evaluation.primary_real_no_loss import _is_wechat_window
+
+        self.assertTrue(_is_wechat_window("Weixin.exe", "微信"))
+        self.assertTrue(_is_wechat_window("WeChat.exe", "微信"))
+        self.assertFalse(_is_wechat_window("WXWork.exe", "企业微信"))
+        self.assertFalse(_is_wechat_window("WXWork.exe", "WeCom"))
 
     def test_runner_converts_primary_scenarios_to_real_no_loss_probes(self):
         fixture = load_simulation_fixture(
@@ -375,6 +420,135 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             self.assertEqual(summary["passed_cases"], 5)
             self.assertEqual(summary["real_verified_cases"], 5)
             self.assertNotIn("details", summary["scenarios"][0])
+
+    def test_runner_can_attach_no_focus_background_screenshots_to_wechat_case(self):
+        fixture = load_simulation_fixture(
+            Path("tests/fixtures/evaluation/l1_primary_user_scenarios.json")
+        )
+        observer = StaticAccessibilityObserver(
+            [
+                AccessibilityWindowSnapshot(
+                    pid=7001,
+                    process_name="Weixin.exe",
+                    window_title="微信",
+                    hwnd=7001,
+                    elements=(_element("Pane", name="微信"),),
+                )
+            ]
+        )
+
+        def _fake_readiness_probe(debugger_url: str) -> dict:
+            return {
+                "mode": "browser-helper-readiness-probe",
+                "ok": True,
+                "debugger_url": debugger_url,
+                "target_count": 1,
+                "targets": [
+                    {
+                        "type": "page",
+                        "title": "OpenWukong Primary Smoke",
+                        "url": "about:blank#openwukong-primary-smoke",
+                    }
+                ],
+                "error": "",
+            }
+
+        def _fake_browser_action_runner(**kwargs) -> dict:
+            return {
+                "mode": "browser-devtools-action",
+                "safety_mode": "gated_browser_devtools_action",
+                "ok": True,
+                "health_ok": True,
+                "control_allowed": True,
+                "control_attempts": 0,
+                "action": kwargs["action"],
+                "debugger_url": kwargs["debugger_url"],
+                "target": {
+                    "type": "page",
+                    "title": "OpenWukong Primary Smoke",
+                    "url": kwargs["resource_url"],
+                },
+                "page_identity": {"title": "OpenWukong Primary Smoke"},
+                "action_result": {
+                    "title": "OpenWukong Primary Smoke",
+                    "href": kwargs["resource_url"],
+                    "readyState": "complete",
+                    "textExcerpt": "OpenWukong Primary Smoke",
+                },
+                "post_action_identity": {"title": "OpenWukong Primary Smoke"},
+                "error": "",
+            }
+
+        def _fake_word_background_probe(**kwargs) -> dict:
+            Path(kwargs["document_path"]).write_bytes(b"fake-docx")
+            return {
+                "ok": True,
+                "decision": "word_background_probe_verified",
+                "document_path": kwargs["document_path"],
+                "marker": kwargs["marker"],
+                "save_verified": True,
+                "readback_verified": True,
+                "word_started": True,
+                "visible_requested": False,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "office_com_attempts": 1,
+                "error": "",
+            }
+
+        def _fake_ide_bridge_probe(bridge_url: str) -> dict:
+            return {
+                "mode": "ide-bridge-capability-capture",
+                "safety_mode": "read_only",
+                "control_allowed": False,
+                "control_attempts": 0,
+                "bridge_url": bridge_url,
+                "ok": True,
+                "command_count": 1,
+                "commands": ["openwukong.readState"],
+                "chat_adapters": [],
+                "error": "",
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = _FakeBackgroundCaptureProvider()
+            report = run_primary_real_no_loss(
+                fixture,
+                output_root=root,
+                allow_owned_browser_helper_launch=True,
+                owned_browser_helper_launcher=_FakeReadinessLauncher(),
+                owned_browser_helper_terminator=_FakeReadinessTerminator(),
+                owned_browser_helper_readiness_probe=_fake_readiness_probe,
+                owned_browser_helper_action_runner=_fake_browser_action_runner,
+                owned_browser_debug_port=9451,
+                owned_browser_executable="chrome.exe",
+                owned_browser_url="about:blank#openwukong-primary-smoke",
+                browser_executable_resolver=lambda requested: requested,
+                accessibility_observer=observer,
+                wechat_win32_observer=StaticWin32WindowObserver({7001: ()}),
+                ide_bridge_probe=_fake_ide_bridge_probe,
+                word_background_probe_runner=_fake_word_background_probe,
+                background_screenshot_dir=root / "background-screenshots",
+                window_capture_provider=capture,
+            )
+            data = report.to_dict()
+            cases = {case["scenario_id"]: case for case in data["cases"]}
+            wechat = cases["wechat.chat.draft_reply"]
+            screenshot_path = Path(wechat["details"]["background_screenshots"][0]["output_path"])
+            self.assertTrue(screenshot_path.is_file())
+            summary = summarize_report(report)
+
+            self.assertEqual(data["background_screenshot_count"], 1)
+            self.assertEqual(data["background_screenshot_success_count"], 1)
+            self.assertTrue(data["background_screenshot_focus_stable"])
+            self.assertEqual(capture.calls[0][0], 7001)
+            self.assertEqual(wechat["details"]["background_screenshot_count"], 1)
+            self.assertEqual(wechat["details"]["background_screenshot_success_count"], 1)
+            self.assertTrue(wechat["details"]["background_screenshot_focus_stable"])
+            self.assertFalse(wechat["details"]["background_screenshots"][0]["foreground_changed"])
+            self.assertEqual(summary["background_screenshot_count"], 1)
+            self.assertTrue(summary["background_screenshot_focus_stable"])
 
 
 if __name__ == "__main__":

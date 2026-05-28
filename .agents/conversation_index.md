@@ -4799,3 +4799,59 @@ When a new conversation starts in this repo:
       takeover gate; the current real evidence is read-only locator only
     - add background visual verification artifacts to the primary suite where
       they improve acceptance without stealing focus
+- 2026-05-28 added no-focus visual evidence to the primary real no-loss suite:
+  - implementation:
+    - `primary_real_no_loss` now accepts `background_screenshot_dir` and a
+      window capture provider
+    - the WeChat real no-loss case captures matched windows through
+      `PrintWindowBackgroundCaptureProvider` and records per-image
+      foreground HWND before/after evidence
+    - top-level reports and summary reports now include:
+      `background_screenshot_count`,
+      `background_screenshot_success_count`, and
+      `background_screenshot_focus_stable`
+    - explicit relative screenshot directories are resolved from the current
+      working directory instead of being nested under `output_root`
+    - the primary WeChat target filter now excludes `WXWork.exe`/Enterprise
+      WeChat/WeCom so personal WeChat evidence is not polluted by a similar
+      app
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.primary_real_no_loss tests\fixtures\evaluation\l1_primary_user_scenarios.json --output-root logs\runtime\primary-real-no-loss-r6 --allow-owned-browser-helper-launch --owned-browser-debug-port 9464 --owned-browser-url about:blank#openwukong-primary-real-r6 --background-screenshot-dir logs\runtime\primary-real-no-loss-r6\background-screenshots --json`
+    - result:
+      `passed_cases=5/5`, `failed_cases=0`, `real_verified_cases=4`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `external_communication_attempts=0`,
+      `real_user_filesystem_scan_attempts=0`,
+      `user_file_modification_attempts=0`
+    - visual evidence:
+      `background_screenshot_count=1`,
+      `background_screenshot_success_count=1`,
+      `background_screenshot_focus_stable=true`
+    - screenshot artifact:
+      `logs\runtime\primary-real-no-loss-r6\background-screenshots\wechat_chat_draft_reply\01-Weixin.png`
+    - screenshot metadata showed `foreground_hwnd_before` and
+      `foreground_hwnd_after` were equal, so the capture did not steal focus
+    - exact owned Chrome profile rescan after r6 returned no matching
+      Chrome/crashpad process
+  - TDD coverage added:
+    - primary real no-loss report aggregation for no-focus background
+      screenshots
+    - explicit relative screenshot path resolution
+    - personal WeChat filter excluding Enterprise WeChat/WeCom
+  - verification:
+    - `python -m unittest tests.test_primary_real_no_loss tests.test_agent_app_uia_probe tests.test_agent_native_connector_probe`: OK
+    - `python -m unittest discover tests`: `416 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - primary real no-loss tests now have auditable visual evidence without
+      foreground takeover for personal WeChat observation
+    - this still proves observation, not WeChat background send; write/send
+      remains blocked until a deterministic native bridge exists
+  - next high-value steps:
+    - add equivalent background visual/readback evidence for Codex App and
+      Claude Desktop app-surface probes when they are part of the primary
+      suite
+    - continue implementing or discovering deterministic app-native bridges
+      for Codex/Claude/WeChat before allowing background writes

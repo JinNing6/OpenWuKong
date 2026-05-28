@@ -36,6 +36,10 @@ from openwukong.evaluation.simulation import (
     load_simulation_fixture,
 )
 from openwukong.evaluation.wechat_locator import build_wechat_locator_report
+from openwukong.evaluation.window_capture import (
+    BackgroundWindowCaptureReport,
+    PrintWindowBackgroundCaptureProvider,
+)
 
 
 IDEBridgeProbe = Callable[[str], dict]
@@ -151,6 +155,18 @@ class PrimaryRealNoLossReport:
         return sum(case.owned_app_launch_attempts for case in self.cases)
 
     @property
+    def background_screenshot_count(self) -> int:
+        return sum(_case_background_screenshot_count(case) for case in self.cases)
+
+    @property
+    def background_screenshot_success_count(self) -> int:
+        return sum(_case_background_screenshot_success_count(case) for case in self.cases)
+
+    @property
+    def background_screenshot_focus_stable(self) -> bool:
+        return not any(_case_background_screenshot_focus_changed(case) for case in self.cases)
+
+    @property
     def total_cases(self) -> int:
         return len(self.cases)
 
@@ -178,6 +194,9 @@ class PrimaryRealNoLossReport:
             "real_user_filesystem_scan_attempts": self.real_user_filesystem_scan_attempts,
             "user_file_modification_attempts": self.user_file_modification_attempts,
             "owned_app_launch_attempts": self.owned_app_launch_attempts,
+            "background_screenshot_count": self.background_screenshot_count,
+            "background_screenshot_success_count": self.background_screenshot_success_count,
+            "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
             "output_root": self.output_root,
             "total_cases": self.total_cases,
             "passed_cases": self.passed_cases,
@@ -207,6 +226,8 @@ def run_primary_real_no_loss(
     ide_bridge_urls: tuple[str, ...] = ("http://127.0.0.1:8787",),
     ide_bridge_probe: IDEBridgeProbe | None = None,
     word_background_probe_runner: WordBackgroundProbeRunner | None = None,
+    background_screenshot_dir: str | Path = "",
+    window_capture_provider: object | None = None,
 ) -> PrimaryRealNoLossReport:
     started = time.perf_counter()
     root = _resolve_output_root(output_root)
@@ -240,7 +261,14 @@ def run_primary_real_no_loss(
         if scenario_id == "browser.research.collect_sources":
             case = _browser_case(row, root, browser_smoke_cases)
         elif scenario_id == "wechat.chat.draft_reply":
-            case = _wechat_case(row, root, accessibility_observer, wechat_win32_observer)
+            case = _wechat_case(
+                row,
+                root,
+                accessibility_observer,
+                wechat_win32_observer,
+                background_screenshot_dir,
+                window_capture_provider,
+            )
         elif scenario_id == "files.search.find_candidate":
             case = _file_case(row, root)
         elif scenario_id == "word.document.create_background":
@@ -327,6 +355,9 @@ def summarize_report(report: PrimaryRealNoLossReport) -> dict:
         "real_user_filesystem_scan_attempts": report.real_user_filesystem_scan_attempts,
         "user_file_modification_attempts": report.user_file_modification_attempts,
         "owned_app_launch_attempts": report.owned_app_launch_attempts,
+        "background_screenshot_count": report.background_screenshot_count,
+        "background_screenshot_success_count": report.background_screenshot_success_count,
+        "background_screenshot_focus_stable": report.background_screenshot_focus_stable,
         "total_cases": report.total_cases,
         "passed_cases": report.passed_cases,
         "failed_cases": report.failed_cases,
@@ -439,8 +470,9 @@ def _wechat_case(
     output_root: Path,
     accessibility_observer: object | None,
     wechat_win32_observer: object | None,
+    background_screenshot_dir: str | Path,
+    window_capture_provider: object | None,
 ) -> PrimaryRealNoLossCase:
-    del output_root
     observer = accessibility_observer or PywinautoAccessibilityObserver(
         max_windows=40,
         max_elements_per_window=120,
@@ -452,8 +484,18 @@ def _wechat_case(
         if _is_wechat_window(window.process_name, window.window_title)
     ]
     locator = build_wechat_locator_report(
-        report.windows,
+        matches,
         win32_observer=wechat_win32_observer,
+    )
+    screenshot_root = _resolve_background_screenshot_dir(
+        background_screenshot_dir,
+        output_root=output_root,
+        case_id=str(row["case_id"]),
+    )
+    background_screenshots = _capture_background_screenshots(
+        matches,
+        screenshot_dir=screenshot_root,
+        window_capture_provider=window_capture_provider,
     )
     details = {
         "matching_window_count": len(matches),
@@ -462,6 +504,16 @@ def _wechat_case(
             for window in matches
         ],
         "locator": locator.to_dict(include_children=False),
+        "background_screenshot_count": len(background_screenshots),
+        "background_screenshot_success_count": sum(
+            1 for item in background_screenshots if item.ok
+        ),
+        "background_screenshot_focus_stable": not any(
+            item.foreground_changed for item in background_screenshots
+        ),
+        "background_screenshots": [
+            item.to_dict() for item in background_screenshots
+        ],
         "total_scanned_windows": report.window_count,
         "total_scanned_elements": report.total_elements,
     }
@@ -658,7 +710,90 @@ def _search_owned_files(root: Path, query: str) -> list[Path]:
 def _is_wechat_window(process_name: str, window_title: str) -> bool:
     process = str(process_name or "").lower()
     title = str(window_title or "").lower()
+    if process in {"wxwork.exe"}:
+        return False
+    if any(
+        marker in title
+        for marker in ("企业微信", "浼佷笟寰", "wecom", "wxwork", "enterprise wechat")
+    ):
+        return False
     return process in {"wechat.exe", "weixin.exe"} or "微信" in title or "wechat" in title
+
+
+def _resolve_background_screenshot_dir(
+    screenshot_dir: str | Path,
+    *,
+    output_root: Path,
+    case_id: str,
+) -> Path | None:
+    text = str(screenshot_dir or "").strip()
+    if not text:
+        return None
+    root = Path(text).expanduser()
+    if not root.is_absolute():
+        root = root.resolve()
+    return root.resolve() / _safe_filename(case_id)
+
+
+def _capture_background_screenshots(
+    windows: list[object],
+    *,
+    screenshot_dir: Path | None,
+    window_capture_provider: object | None,
+) -> tuple[BackgroundWindowCaptureReport, ...]:
+    if screenshot_dir is None:
+        return ()
+    provider = window_capture_provider or PrintWindowBackgroundCaptureProvider()
+    capture = getattr(provider, "capture_window", None)
+    if not callable(capture):
+        return ()
+    reports: list[BackgroundWindowCaptureReport] = []
+    for index, window in enumerate(windows, start=1):
+        hwnd = int(getattr(window, "hwnd", 0) or 0)
+        if hwnd <= 0:
+            continue
+        process_name = str(getattr(window, "process_name", "") or "window")
+        pid = int(getattr(window, "pid", 0) or 0)
+        output_path = screenshot_dir / _safe_filename(
+            f"{index:02d}-{process_name}-{pid}-{hwnd}"
+        )
+        output_path = output_path.with_suffix(".png")
+        try:
+            result = capture(hwnd, output_path)
+        except Exception as exc:
+            result = BackgroundWindowCaptureReport(
+                hwnd=hwnd,
+                output_path=str(output_path),
+                ok=False,
+                error=f"capture_exception:{type(exc).__name__}",
+            )
+        if isinstance(result, BackgroundWindowCaptureReport):
+            reports.append(result)
+        else:
+            reports.append(
+                BackgroundWindowCaptureReport(
+                    hwnd=hwnd,
+                    output_path=str(output_path),
+                    ok=False,
+                    error="invalid_capture_report",
+                )
+            )
+    return tuple(reports)
+
+
+def _case_background_screenshot_count(case: PrimaryRealNoLossCase) -> int:
+    return int(case.details.get("background_screenshot_count", 0) or 0)
+
+
+def _case_background_screenshot_success_count(case: PrimaryRealNoLossCase) -> int:
+    return int(case.details.get("background_screenshot_success_count", 0) or 0)
+
+
+def _case_background_screenshot_focus_changed(case: PrimaryRealNoLossCase) -> bool:
+    for item in case.details.get("background_screenshots", []) or []:
+        if isinstance(item, dict) and bool(item.get("foreground_changed", False)):
+            return True
+    return False
 
 
 def _resolve_output_root(output_root: str | Path) -> Path:
@@ -699,6 +834,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--owned-browser-executable", default="chrome.exe")
     parser.add_argument("--owned-browser-url", default="")
     parser.add_argument("--ide-bridge-url", action="append", default=None)
+    parser.add_argument("--background-screenshot-dir", default="")
     args = parser.parse_args(argv)
 
     report = run_primary_real_no_loss(
@@ -710,6 +846,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         owned_browser_url=args.owned_browser_url,
         browser_executable_resolver=_resolve_installed_browser_executable,
         ide_bridge_urls=tuple(args.ide_bridge_url or ("http://127.0.0.1:8787",)),
+        background_screenshot_dir=args.background_screenshot_dir,
     )
     if args.summary_json:
         print(json.dumps(summarize_report(report), ensure_ascii=False, indent=2))
