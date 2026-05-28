@@ -4957,3 +4957,41 @@ When a new conversation starts in this repo:
     - only after target visibility plus Value/Invoke readiness are both proven,
       add an explicit opt-in UIA semantic sender for owned or explicitly
       approved external-agent targets
+- 2026-05-28 refined UIA semantic action readiness diagnostics:
+  - implementation:
+    - changed `AgentAppUiaSemanticActionRequest.target_ready` to mean only
+      target visibility/matching, while `uia_value_pattern_ready` separately
+      reports whether a semantic composer supports ValuePattern
+    - added regression coverage for a project-only/new-task case where the
+      target is visible but no ValuePattern composer exists
+  - safe real validation:
+    - project-only command:
+      `python -m openwukong.evaluation.agent_app_real_no_loss --agent "codex app" --agent "claude desktop" --agent cursor --project-name openwukong --output-root logs\runtime\agent-app-real-no-loss-r5-project-only --screenshot-dir logs\runtime\agent-app-real-no-loss-r5-project-only\screenshots --output logs\runtime\agent-app-real-no-loss-r5-project-only\report.json`
+    - result:
+      `passed_cases=3/3`, `native_ready_cases=0`,
+      `uia_semantic_action_ready_cases=0`, `gated_cases=3`,
+      `background_screenshot_count=5`, `background_screenshot_focus_stable=true`
+    - safety counters remained zero:
+      `control_attempts=0`, `window_input_attempts=0`,
+      `uia_value_set_attempts=0`, `uia_invoke_attempts=0`
+    - refined readiness diagnosis:
+      Codex App: `target_ready=true`, `uia_value_pattern_ready=false`,
+      `uia_invoke_pattern_ready=true`, decision
+      `uia_semantic_action_value_pattern_not_ready`
+      Claude Desktop: `target_ready=false`, `uia_value_pattern_ready=true`,
+      `uia_invoke_pattern_ready=false`, decision
+      `uia_semantic_action_target_not_ready`
+      Cursor: `target_ready=false`, `uia_value_pattern_ready=true`,
+      `uia_invoke_pattern_ready=true`, decision
+      `uia_semantic_action_target_not_ready`
+  - verification:
+    - `python -m unittest discover tests`: `425 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - project-only/new-task semantics are now diagnosed correctly; Codex App is
+      no longer mislabeled as target-missing when the project is present
+    - the real remaining app-side blockers are now concrete: Codex needs a
+      native/CDP bridge or a UIA-exposed ValuePattern composer; Claude/Cursor
+      need the intended project surface to be visible before semantic action
+      can be considered

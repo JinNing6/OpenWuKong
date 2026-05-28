@@ -59,6 +59,34 @@ class AgentAppUiaActionContractTests(unittest.TestCase):
         self.assertEqual(data["control_attempts"], 0)
         self.assertFalse(data["request"]["uia_invoke_pattern_ready"])
 
+    def test_target_visible_without_value_pattern_reports_value_pattern_not_ready(self):
+        probe = _ready_uia_probe()
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "target_matched": True,
+            "semantic_composer_count": 0,
+            "composer_candidates": [],
+            "submit_candidate_count": 1,
+        }
+        request = build_agent_app_uia_semantic_action_request(
+            agent="codex app",
+            agent_id="codex",
+            project_name="openwukong",
+            task_name="",
+            message="Create a new task.",
+            selected_transport={"transport_id": "codex-desktop-shell"},
+            app_surface_probe=probe,
+        )
+
+        report = AgentAppUiaSemanticActionDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertTrue(data["request"]["target_ready"])
+        self.assertFalse(data["request"]["uia_value_pattern_ready"])
+        self.assertEqual(data["decision"], "uia_semantic_action_value_pattern_not_ready")
+        self.assertEqual(data["control_attempts"], 0)
+
 
 def _ready_uia_probe():
     return {

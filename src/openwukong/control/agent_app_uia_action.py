@@ -47,10 +47,7 @@ class AgentAppUiaSemanticActionRequest:
 
     @property
     def target_ready(self) -> bool:
-        return bool(
-            self.app_uia_probe.get("target_matched", False)
-            and int(self.app_uia_probe.get("semantic_composer_count", 0) or 0) > 0
-        )
+        return bool(self.app_uia_probe.get("target_matched", False))
 
     @property
     def composer(self) -> dict:
