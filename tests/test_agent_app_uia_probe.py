@@ -126,6 +126,53 @@ class AgentAppUiaProbeTests(unittest.TestCase):
         self.assertEqual(data["semantic_composer_count"], 1)
         self.assertEqual(data["foreground_takeover_request"], {})
 
+    def test_reports_visible_invoke_submit_candidates_for_semantic_action_readiness(self):
+        observer = StaticAccessibilityObserver(
+            [
+                AccessibilityWindowSnapshot(
+                    pid=84,
+                    process_name="Codex.exe",
+                    window_title="Codex",
+                    elements=(
+                        AccessibilityElementSnapshot(
+                            control_type="Text",
+                            name="openwukong",
+                            rect=(10, 10, 300, 40),
+                            patterns=("Text",),
+                        ),
+                        AccessibilityElementSnapshot(
+                            control_type="Edit",
+                            name="Message Codex",
+                            value_preview="",
+                            rect=(300, 800, 1000, 880),
+                            is_enabled=True,
+                            patterns=("Value", "Text"),
+                        ),
+                        AccessibilityElementSnapshot(
+                            control_type="Button",
+                            name="Send",
+                            rect=(1020, 800, 1100, 880),
+                            is_enabled=True,
+                            patterns=("Invoke",),
+                        ),
+                    ),
+                )
+            ]
+        )
+
+        report = run_agent_app_uia_probe(
+            agent="codex app",
+            project_name="openwukong",
+            observer=observer,
+            resolver=_resolver_with_codex_desktop(),
+        )
+        data = report.to_dict()
+
+        self.assertEqual(data["submit_candidate_count"], 1)
+        self.assertEqual(data["submit_candidates"][0]["name"], "Send")
+        self.assertIn("Invoke", data["submit_candidates"][0]["patterns"])
+        self.assertEqual(data["control_attempts"], 0)
+
     def test_cursor_app_surface_can_be_probed_as_optional_agent_surface(self):
         observer = StaticAccessibilityObserver(
             [

@@ -170,6 +170,7 @@ class AgentAppUiaProbeReport:
     project_match: AgentAppTextMatchReport
     task_match: AgentAppTextMatchReport
     composer_candidates: tuple[AgentAppElementEvidence, ...]
+    submit_candidates: tuple[AgentAppElementEvidence, ...] = ()
     background_screenshots: tuple[BackgroundWindowCaptureReport, ...] = ()
     foreground_takeover_request: ForegroundTakeoverRequest | None = None
     accessibility_window_count: int = 0
@@ -203,6 +204,10 @@ class AgentAppUiaProbeReport:
     @property
     def semantic_composer_count(self) -> int:
         return sum(1 for item in self.composer_candidates if item.semantic_composer)
+
+    @property
+    def submit_candidate_count(self) -> int:
+        return len(self.submit_candidates)
 
     @property
     def background_screenshot_count(self) -> int:
@@ -267,6 +272,8 @@ class AgentAppUiaProbeReport:
             "composer_candidate_count": self.composer_candidate_count,
             "semantic_composer_count": self.semantic_composer_count,
             "composer_candidates": [item.to_dict() for item in self.composer_candidates],
+            "submit_candidate_count": self.submit_candidate_count,
+            "submit_candidates": [item.to_dict() for item in self.submit_candidates],
             "background_screenshot_count": self.background_screenshot_count,
             "background_screenshot_success_count": self.background_screenshot_success_count,
             "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
@@ -315,6 +322,7 @@ def run_agent_app_uia_probe(
     project_match = _match_text(matched_windows, str(project_name or "").strip())
     task_match = _match_text(matched_windows, str(task_name or "").strip())
     composer_candidates = _find_composer_candidates(matched_windows)
+    submit_candidates = _find_submit_candidates(matched_windows)
     background_screenshots = _capture_background_screenshots(
         matched_windows,
         screenshot_dir=screenshot_dir,
@@ -334,6 +342,7 @@ def run_agent_app_uia_probe(
         project_match=project_match,
         task_match=task_match,
         composer_candidates=composer_candidates,
+        submit_candidates=submit_candidates,
         background_screenshots=background_screenshots,
         foreground_takeover_request=foreground_request,
         accessibility_window_count=report.window_count,
@@ -517,6 +526,19 @@ def _find_composer_candidates(
     return tuple(candidates[:20])
 
 
+def _find_submit_candidates(
+    windows: tuple[AccessibilityWindowSnapshot, ...],
+) -> tuple[AgentAppElementEvidence, ...]:
+    candidates: list[AgentAppElementEvidence] = []
+    for window in windows:
+        for element in window.elements:
+            if not _is_submit_candidate(window, element):
+                continue
+            candidates.append(_element_evidence(window, element))
+    candidates.sort(key=lambda item: (not item.visible, -item.rect[1], item.rect[0]))
+    return tuple(candidates[:20])
+
+
 def _is_composer_candidate(
     window: AccessibilityWindowSnapshot,
     element: AccessibilityElementSnapshot,
@@ -541,6 +563,44 @@ def _is_composer_candidate(
     if control_type == "Edit":
         return bool(element.is_enabled and (has_hint or has_semantic or near_bottom))
     return bool(element.is_enabled and has_hint)
+
+
+def _is_submit_candidate(
+    window: AccessibilityWindowSnapshot,
+    element: AccessibilityElementSnapshot,
+) -> bool:
+    if str(element.control_type or "") not in {"Button", "SplitButton", "Hyperlink", "MenuItem"}:
+        return False
+    if "Invoke" not in set(element.patterns):
+        return False
+    if not element.is_enabled:
+        return False
+    text = lower_text(
+        " ".join(
+            (
+                element.name,
+                element.automation_id,
+                element.class_name,
+                element.value_preview,
+            )
+        )
+    )
+    submit_hints = (
+        "send",
+        "submit",
+        "run",
+        "start",
+        "go",
+        "arrow",
+        "\u53d1\u9001",
+        "\u63d0\u4ea4",
+        "\u8fd0\u884c",
+        "\u5f00\u59cb",
+    )
+    return bool(
+        _rect_visible(element.rect, _window_root_rect(window))
+        and any(hint in text for hint in submit_hints)
+    )
 
 
 def _element_evidence(

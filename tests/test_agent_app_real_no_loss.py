@@ -43,6 +43,27 @@ class AgentAppRealNoLossTests(unittest.TestCase):
                     app_uia_probe={
                         "matched_window_count": 1,
                         "target_matched": True,
+                        "semantic_composer_count": 1,
+                        "submit_candidate_count": 1,
+                        "composer_candidates": [
+                            {
+                                "control_type": "Edit",
+                                "name": "Write your prompt to Claude",
+                                "is_enabled": True,
+                                "visible": True,
+                                "patterns": ["Value"],
+                                "semantic_composer": True,
+                            }
+                        ],
+                        "submit_candidates": [
+                            {
+                                "control_type": "Button",
+                                "name": "Send",
+                                "is_enabled": True,
+                                "visible": True,
+                                "patterns": ["Invoke"],
+                            }
+                        ],
                         "background_screenshot_count": 1,
                         "background_screenshot_success_count": 1,
                         "background_screenshot_focus_stable": True,
@@ -102,6 +123,7 @@ class AgentAppRealNoLossTests(unittest.TestCase):
         self.assertEqual(data["total_cases"], 2)
         self.assertEqual(data["passed_cases"], 2)
         self.assertEqual(data["native_ready_cases"], 1)
+        self.assertEqual(data["uia_semantic_action_ready_cases"], 1)
         self.assertEqual(data["gated_cases"], 1)
         self.assertEqual(data["real_verified_cases"], 2)
         self.assertEqual(data["background_screenshot_count"], 2)
@@ -109,6 +131,12 @@ class AgentAppRealNoLossTests(unittest.TestCase):
         self.assertTrue(data["background_screenshot_focus_stable"])
         self.assertEqual(data["cases"][0]["status"], "gated_native_endpoint_missing")
         self.assertEqual(data["cases"][1]["status"], "native_connector_ready")
+        self.assertEqual(
+            data["cases"][1]["uia_semantic_action_dry_run"]["decision"],
+            "uia_semantic_action_dry_run_ready",
+        )
+        self.assertEqual(data["cases"][1]["uia_value_set_attempts"], 0)
+        self.assertEqual(data["cases"][1]["uia_invoke_attempts"], 0)
         self.assertEqual(artifact_payloads[0]["probe"]["decision"], "agent_native_connector_not_exposed")
 
     def test_reports_focus_unstable_when_any_background_capture_changes_foreground(self):

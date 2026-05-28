@@ -4902,3 +4902,58 @@ When a new conversation starts in this repo:
       `native_ready_cases > 0`
     - keep app-side message sending disabled until native endpoint readiness,
       target visibility, and no-focus visual evidence are all present
+- 2026-05-28 added UIA semantic action readiness for agent desktop apps:
+  - implementation:
+    - `agent_app_uia_probe` now reports visible `Invoke` submit candidates in
+      addition to semantic composer candidates
+    - added `openwukong.control.agent_app_uia_action`, a dry-run contract for
+      future UIA semantic actions based on `ValuePattern` composer readiness
+      and `InvokePattern` submit readiness
+    - `agent_app_real_no_loss` now aggregates:
+      `uia_semantic_action_ready_cases`, `uia_value_set_attempts`, and
+      `uia_invoke_attempts`
+    - the UIA action contract is diagnostic-only: it never calls SetValue,
+      Invoke, keyboard, mouse, or clipboard APIs
+  - official-doc basis:
+    - Microsoft UI Automation `ValuePattern.SetValue` sets a supported
+      control value through UIA
+    - Microsoft UI Automation `InvokePattern.Invoke` invokes a supported
+      control through UIA provider semantics
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.agent_app_real_no_loss --agent "codex app" --agent "claude desktop" --agent cursor --project-name openwukong --task-name agent-app-real-no-loss --output-root logs\runtime\agent-app-real-no-loss-r3 --screenshot-dir logs\runtime\agent-app-real-no-loss-r3\screenshots --output logs\runtime\agent-app-real-no-loss-r3\report.json`
+    - result:
+      `passed_cases=3/3`, `failed_cases=0`, `native_ready_cases=0`,
+      `uia_semantic_action_ready_cases=0`, `gated_cases=3`,
+      `real_verified_cases=3`
+    - safety counters:
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=0`,
+      `uia_value_set_attempts=0`, `uia_invoke_attempts=0`
+    - visual evidence:
+      `background_screenshot_count=5`,
+      `background_screenshot_success_count=5`,
+      `background_screenshot_focus_stable=true`
+    - readiness diagnosis:
+      Codex App: task not visible, no semantic composer, 6 submit candidates
+      Claude Desktop: project/task not visible, 1 semantic composer, 0 submit
+      candidates
+      Cursor: project/task not visible, 6 semantic composers, 8 submit
+      candidates
+  - verification:
+    - `python -m unittest discover tests`: `424 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - we now have a second background-control readiness lane beyond CDP:
+      UIA semantic Value/Invoke readiness
+    - real desktop apps are still correctly gated because the specific target
+      project/task is not visible in the tested app surfaces, and Claude lacks
+      an exposed submit Invoke candidate in the current UIA tree
+  - next high-value steps:
+    - add a controlled foreground-prep/no-send flow that brings the target
+      project/task into view, then immediately reverts to background no-loss
+      validation before enabling any semantic action
+    - only after target visibility plus Value/Invoke readiness are both proven,
+      add an explicit opt-in UIA semantic sender for owned or explicitly
+      approved external-agent targets

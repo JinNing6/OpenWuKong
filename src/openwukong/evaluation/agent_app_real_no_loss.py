@@ -16,6 +16,10 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from openwukong.control.agent_app_uia_action import (
+    AgentAppUiaSemanticActionDryRunAdapter,
+    build_agent_app_uia_semantic_action_request,
+)
 from openwukong.control.app_resolution import WindowsAppResolver
 from openwukong.evaluation.agent_native_connector_probe import (
     run_agent_native_connector_probe,
@@ -36,6 +40,7 @@ class AgentAppRealNoLossCase:
     real_verified: bool
     native_ready: bool
     probe: dict
+    uia_semantic_action_dry_run: dict = dataclasses.field(default_factory=dict)
     artifact_path: str = ""
     errors: tuple[str, ...] = ()
 
@@ -71,6 +76,18 @@ class AgentAppRealNoLossCase:
         return _counter(self.probe, "agent_command_attempts")
 
     @property
+    def uia_value_set_attempts(self) -> int:
+        return _counter(self.uia_semantic_action_dry_run, "uia_value_set_attempts")
+
+    @property
+    def uia_invoke_attempts(self) -> int:
+        return _counter(self.uia_semantic_action_dry_run, "uia_invoke_attempts")
+
+    @property
+    def uia_semantic_action_ready(self) -> bool:
+        return bool(self.uia_semantic_action_dry_run.get("ok", False))
+
+    @property
     def background_screenshot_count(self) -> int:
         return _counter(_app_uia_probe(self.probe), "background_screenshot_count")
 
@@ -97,6 +114,10 @@ class AgentAppRealNoLossCase:
             "window_input_attempts": self.window_input_attempts,
             "bridge_send_attempts": self.bridge_send_attempts,
             "agent_command_attempts": self.agent_command_attempts,
+            "uia_value_set_attempts": self.uia_value_set_attempts,
+            "uia_invoke_attempts": self.uia_invoke_attempts,
+            "uia_semantic_action_ready": self.uia_semantic_action_ready,
+            "uia_semantic_action_dry_run": dict(self.uia_semantic_action_dry_run),
             "background_screenshot_count": self.background_screenshot_count,
             "background_screenshot_success_count": self.background_screenshot_success_count,
             "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
@@ -143,6 +164,14 @@ class AgentAppRealNoLossReport:
         return sum(case.agent_command_attempts for case in self.cases)
 
     @property
+    def uia_value_set_attempts(self) -> int:
+        return sum(case.uia_value_set_attempts for case in self.cases)
+
+    @property
+    def uia_invoke_attempts(self) -> int:
+        return sum(case.uia_invoke_attempts for case in self.cases)
+
+    @property
     def background_screenshot_count(self) -> int:
         return sum(case.background_screenshot_count for case in self.cases)
 
@@ -171,6 +200,10 @@ class AgentAppRealNoLossReport:
         return sum(1 for case in self.cases if case.native_ready)
 
     @property
+    def uia_semantic_action_ready_cases(self) -> int:
+        return sum(1 for case in self.cases if case.uia_semantic_action_ready)
+
+    @property
     def gated_cases(self) -> int:
         return sum(1 for case in self.cases if case.status.startswith("gated_"))
 
@@ -187,6 +220,8 @@ class AgentAppRealNoLossReport:
             "window_input_attempts": self.window_input_attempts,
             "bridge_send_attempts": self.bridge_send_attempts,
             "agent_command_attempts": self.agent_command_attempts,
+            "uia_value_set_attempts": self.uia_value_set_attempts,
+            "uia_invoke_attempts": self.uia_invoke_attempts,
             "background_screenshot_count": self.background_screenshot_count,
             "background_screenshot_success_count": self.background_screenshot_success_count,
             "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
@@ -197,6 +232,7 @@ class AgentAppRealNoLossReport:
             "passed_cases": self.passed_cases,
             "failed_cases": self.failed_cases,
             "native_ready_cases": self.native_ready_cases,
+            "uia_semantic_action_ready_cases": self.uia_semantic_action_ready_cases,
             "gated_cases": self.gated_cases,
             "real_verified_cases": self.real_verified_cases,
             "cases": [case.to_dict() for case in self.cases],
@@ -219,6 +255,7 @@ def run_agent_app_real_no_loss(
     max_windows: int = 80,
     max_elements: int = 1200,
     request_timeout: float = 0.2,
+    semantic_action_message: str = "OPENWUKONG_UIA_SEMANTIC_ACTION_DRY_RUN",
 ) -> AgentAppRealNoLossReport:
     started = time.perf_counter()
     root = _resolve_output_root(output_root)
@@ -246,7 +283,16 @@ def run_agent_app_real_no_loss(
             request_timeout=request_timeout,
         )
         probe = _report_to_dict(raw_probe)
-        cases.append(_write_case_artifact(root, _case_from_probe(agent, probe)))
+        cases.append(
+            _write_case_artifact(
+                root,
+                _case_from_probe(
+                    agent,
+                    probe,
+                    semantic_action_message=semantic_action_message,
+                ),
+            )
+        )
     return AgentAppRealNoLossReport(
         output_root=str(root),
         project_name=str(project_name or "").strip(),
@@ -303,6 +349,11 @@ def main(
     parser.add_argument("--max-windows", type=int, default=80)
     parser.add_argument("--max-elements", type=int, default=1200)
     parser.add_argument("--request-timeout", type=float, default=0.2)
+    parser.add_argument(
+        "--semantic-action-message",
+        default="OPENWUKONG_UIA_SEMANTIC_ACTION_DRY_RUN",
+        help="Message used only to build the UIA semantic dry-run contract; it is never sent.",
+    )
     args = parser.parse_args(argv)
 
     resolver = resolver_factory(args) if callable(resolver_factory) else WindowsAppResolver()
@@ -320,6 +371,7 @@ def main(
         max_windows=args.max_windows,
         max_elements=args.max_elements,
         request_timeout=args.request_timeout,
+        semantic_action_message=args.semantic_action_message,
     )
     payload = report.to_dict()
     if args.output:
@@ -336,7 +388,12 @@ def main(
     return 0 if report.failed_cases == 0 else 1
 
 
-def _case_from_probe(agent: str, probe: dict) -> AgentAppRealNoLossCase:
+def _case_from_probe(
+    agent: str,
+    probe: dict,
+    *,
+    semantic_action_message: str = "",
+) -> AgentAppRealNoLossCase:
     decision = str(probe.get("decision", "") or "")
     native_ready = int(probe.get("ready_endpoint_count", 0) or 0) > 0
     app_probe = _app_uia_probe(probe)
@@ -359,6 +416,17 @@ def _case_from_probe(agent: str, probe: dict) -> AgentAppRealNoLossCase:
         errors.append("bridge_send_attempts_nonzero")
     if command_attempts:
         errors.append("agent_command_attempts_nonzero")
+    semantic_action_dry_run = _build_uia_semantic_action_dry_run(
+        agent,
+        probe,
+        message=semantic_action_message,
+    )
+    uia_value_attempts = _counter(semantic_action_dry_run, "uia_value_set_attempts")
+    uia_invoke_attempts = _counter(semantic_action_dry_run, "uia_invoke_attempts")
+    if uia_value_attempts:
+        errors.append("uia_value_set_attempts_nonzero")
+    if uia_invoke_attempts:
+        errors.append("uia_invoke_attempts_nonzero")
     if decision == "agent_native_connector_ready":
         status = "native_connector_ready"
     elif matched_window_count > 0 or target_matched:
@@ -375,8 +443,35 @@ def _case_from_probe(agent: str, probe: dict) -> AgentAppRealNoLossCase:
         real_verified=real_verified,
         native_ready=native_ready,
         probe=probe,
+        uia_semantic_action_dry_run=semantic_action_dry_run,
         errors=tuple(errors),
     )
+
+
+def _build_uia_semantic_action_dry_run(agent: str, probe: dict, *, message: str) -> dict:
+    app_probe = _app_uia_probe(probe)
+    surface = app_probe.get("surface_binding")
+    selected_transport = app_probe.get("selected_transport")
+    agent_id = str(
+        probe.get("agent_id", "")
+        or app_probe.get("agent_id", "")
+        or _agent_id_from_name(agent)
+        or ""
+    )
+    if not isinstance(surface, dict):
+        surface = {}
+    if not isinstance(selected_transport, dict):
+        selected_transport = {}
+    request = build_agent_app_uia_semantic_action_request(
+        agent=agent,
+        agent_id=agent_id,
+        project_name=str(probe.get("project_name", "") or ""),
+        task_name=str(probe.get("task_name", "") or ""),
+        message=message,
+        selected_transport=selected_transport,
+        app_surface_probe=probe,
+    )
+    return AgentAppUiaSemanticActionDryRunAdapter().prepare(request).to_dict()
 
 
 def _write_case_artifact(
@@ -442,6 +537,17 @@ def _report_to_dict(report: object) -> dict:
 def _app_uia_probe(probe: dict) -> dict:
     value = probe.get("app_uia_probe", {})
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _agent_id_from_name(agent: str) -> str:
+    text = str(agent or "").strip().lower()
+    if text.startswith("codex"):
+        return "codex"
+    if text.startswith("claude"):
+        return "claude"
+    if text.startswith("cursor"):
+        return "cursor"
+    return text.split(" ", 1)[0] if text else ""
 
 
 def _counter(data: dict, key: str) -> int:
