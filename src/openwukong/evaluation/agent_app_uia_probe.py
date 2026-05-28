@@ -707,6 +707,8 @@ def _agent_process_names(agent_id: str) -> tuple[str, ...]:
         return ("codex.exe",)
     if normalized == "claude":
         return ("claude.exe",)
+    if normalized == "cursor":
+        return ("cursor.exe",)
     return (normalized,)
 
 
@@ -716,6 +718,8 @@ def _process_name_for_agent(agent_id: str) -> str:
         return "Codex.exe"
     if normalized == "claude":
         return "Claude.exe"
+    if normalized == "cursor":
+        return "Cursor.exe"
     return str(agent_id or "").strip()
 
 

@@ -126,6 +126,54 @@ class AgentAppUiaProbeTests(unittest.TestCase):
         self.assertEqual(data["semantic_composer_count"], 1)
         self.assertEqual(data["foreground_takeover_request"], {})
 
+    def test_cursor_app_surface_can_be_probed_as_optional_agent_surface(self):
+        observer = StaticAccessibilityObserver(
+            [
+                AccessibilityWindowSnapshot(
+                    pid=99,
+                    process_name="Cursor.exe",
+                    window_title="openwukong - Cursor",
+                    elements=(
+                        AccessibilityElementSnapshot(
+                            control_type="Text",
+                            name="openwukong",
+                            rect=(20, 20, 300, 50),
+                            patterns=("Text",),
+                        ),
+                        AccessibilityElementSnapshot(
+                            control_type="Text",
+                            name="agent-app-real-no-loss",
+                            rect=(20, 60, 300, 90),
+                            patterns=("Text",),
+                        ),
+                        AccessibilityElementSnapshot(
+                            control_type="Edit",
+                            name="Plan, Build, / for commands, @ for context",
+                            rect=(900, 700, 1400, 820),
+                            is_enabled=True,
+                            patterns=("Value",),
+                        ),
+                    ),
+                )
+            ]
+        )
+
+        report = run_agent_app_uia_probe(
+            agent="cursor",
+            project_name="openwukong",
+            task_name="agent-app-real-no-loss",
+            observer=observer,
+            resolver=_resolver_with_cursor_desktop(),
+        )
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["agent_id"], "cursor")
+        self.assertEqual(data["decision"], "agent_app_uia_ready")
+        self.assertEqual(data["matched_window_count"], 1)
+        self.assertEqual(data["selected_transport"]["transport_id"], "cursor-desktop-shell")
+        self.assertEqual(data["control_attempts"], 0)
+
     def test_text_match_distinguishes_accessible_tree_from_visible_root_bounds(self):
         observer = StaticAccessibilityObserver(
             [
@@ -334,6 +382,25 @@ def _resolver_with_codex_desktop():
                         executable_name="Codex.exe",
                         path="C:/Users/me/AppData/Local/OpenAI/Codex/app/Codex.exe",
                         pid=42,
+                    ),
+                ]
+            ),
+        )
+    )
+
+
+def _resolver_with_cursor_desktop():
+    return WindowsAppResolver(
+        candidate_providers=(
+            StaticAppCandidateProvider(
+                [
+                    AppResolutionCandidate(
+                        source="running-process",
+                        display_name="Cursor",
+                        process_name="Cursor.exe",
+                        executable_name="Cursor.exe",
+                        path="C:/Users/me/AppData/Local/Programs/cursor/Cursor.exe",
+                        pid=99,
                     ),
                 ]
             ),

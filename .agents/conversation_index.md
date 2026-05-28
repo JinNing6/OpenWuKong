@@ -4855,3 +4855,50 @@ When a new conversation starts in this repo:
       suite
     - continue implementing or discovering deterministic app-native bridges
       for Codex/Claude/WeChat before allowing background writes
+- 2026-05-28 added a unified agent desktop app real no-loss runner:
+  - implementation:
+    - added `openwukong.evaluation.agent_app_real_no_loss`, a multi-agent
+      runner that delegates to the read-only native connector probe and
+      aggregates app-surface safety evidence
+    - default app surfaces are `codex app` and `claude desktop`; Cursor is
+      supported as an optional desktop-shell/native-bridge surface but is not
+      included in the default real run
+    - reports now aggregate `control_attempts`, `window_input_attempts`,
+      `bridge_send_attempts`, `agent_command_attempts`,
+      background screenshot counts, focus stability, native-ready cases, and
+      gated cases
+    - JSON output for the new runner is ASCII-safe so Windows PowerShell
+      `ConvertFrom-Json` can parse reports even when UIA returns mixed
+      language text
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.agent_app_real_no_loss --agent "codex app" --agent "claude desktop" --project-name openwukong --task-name agent-app-real-no-loss --output-root logs\runtime\agent-app-real-no-loss-r2 --screenshot-dir logs\runtime\agent-app-real-no-loss-r2\screenshots --output logs\runtime\agent-app-real-no-loss-r2\report.json`
+    - result:
+      `passed_cases=2/2`, `failed_cases=0`, `native_ready_cases=0`,
+      `gated_cases=2`, `real_verified_cases=2`
+    - safety counters:
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=0`
+    - visual evidence:
+      `background_screenshot_count=2`,
+      `background_screenshot_success_count=2`,
+      `background_screenshot_focus_stable=true`
+    - evidence artifacts:
+      `logs\runtime\agent-app-real-no-loss-r2\report.json`
+      `logs\runtime\agent-app-real-no-loss-r2\screenshots\codex_app\01-Codex.exe-61920-199972.png`
+      `logs\runtime\agent-app-real-no-loss-r2\screenshots\claude_desktop\01-claude.exe-77064-138024.png`
+    - `ConvertFrom-Json` successfully parsed the r2 report after switching the
+      new runner to ASCII-safe JSON
+  - current conclusion:
+    - Codex App and Claude Desktop are now real-observable in the background
+      with no-focus screenshot evidence
+    - both remain correctly gated for background send/control because neither
+      exposes a ready native endpoint on this machine during the test
+    - hidden Word COM tests not showing a Word taskbar icon is expected and is
+      the intended no-loss background Office path
+  - next high-value steps:
+    - implement or install deterministic native app bridges for Codex App and
+      Claude Desktop, then re-run the same no-loss runner expecting
+      `native_ready_cases > 0`
+    - keep app-side message sending disabled until native endpoint readiness,
+      target visibility, and no-focus visual evidence are all present

@@ -165,6 +165,8 @@ def _build_transports(
         return _dedupe_transports(
             _claude_transports(resolution.candidates, require_desktop=require_desktop)
         )
+    if app_id == "cursor":
+        return _dedupe_transports(_cursor_transports(resolution.candidates))
     return ()
 
 
@@ -277,6 +279,33 @@ def _claude_transports(
                 )
             )
     return tuple(cli + desktop)
+
+
+def _cursor_transports(
+    candidates: tuple[AppResolutionCandidate, ...],
+) -> tuple[AgentTransportSurface, ...]:
+    desktop: list[AgentTransportSurface] = []
+    for candidate in candidates:
+        exe = lower_text(_candidate_file_name(candidate))
+        if exe != "cursor.exe":
+            continue
+        desktop.append(
+            AgentTransportSurface(
+                transport_id="cursor-desktop-shell",
+                display_name="Cursor Desktop Shell",
+                route_id="cursor-desktop-connector",
+                transport="desktop-shell-uia-or-native-bridge",
+                source=candidate.source,
+                path=_candidate_control_target(candidate),
+                pid=candidate.pid,
+                background_capable=False,
+                ready=True,
+                execution_allowed=False,
+                control_allowed=False,
+                notes=("background_task_submit_requires_ide_or_native_bridge",),
+            )
+        )
+    return tuple(desktop)
 
 
 def _is_codex_standalone_cli(candidate: AppResolutionCandidate) -> bool:

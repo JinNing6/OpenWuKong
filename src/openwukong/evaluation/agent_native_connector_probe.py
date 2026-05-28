@@ -440,6 +440,8 @@ def _agent_process_names(agent_id: str) -> tuple[str, ...]:
         return ("codex.exe",)
     if normalized == "claude":
         return ("claude.exe",)
+    if normalized == "cursor":
+        return ("cursor.exe",)
     return (normalized,)
 
 
