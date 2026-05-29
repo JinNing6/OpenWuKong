@@ -39,6 +39,24 @@ def main(
     parser.add_argument("--ide-extension-dir", default="extensions/openwukong-vscode")
     parser.add_argument("--ide-bridge-host", default="127.0.0.1")
     parser.add_argument("--ide-bridge-port", type=int, default=8787)
+    parser.add_argument("--agent-bridge-python-executable", default="")
+    parser.add_argument("--agent-bridge-agent", default="agent app")
+    parser.add_argument("--agent-bridge-agent-id", default="")
+    parser.add_argument("--agent-bridge-host", default="127.0.0.1")
+    parser.add_argument("--agent-bridge-port", type=int, default=18888)
+    parser.add_argument("--agent-bridge-debugger-url", default="")
+    parser.add_argument(
+        "--agent-bridge-registry-path",
+        default="logs/runtime/agent-native-cdp-bridge/native-bridges.json",
+    )
+    parser.add_argument("--agent-bridge-process-name", default="")
+    parser.add_argument("--agent-bridge-pid", type=int, default=0)
+    parser.add_argument("--agent-bridge-hwnd", type=int, default=0)
+    parser.add_argument("--agent-bridge-window-title", default="")
+    parser.add_argument("--agent-bridge-project", default="")
+    parser.add_argument("--agent-bridge-task", default="")
+    parser.add_argument("--agent-bridge-target-title", default="")
+    parser.add_argument("--agent-bridge-target-url", default="")
     parser.add_argument("--workspace-root", default="")
     parser.add_argument("--output", default="")
     parser.add_argument("--execute", action="store_true")
@@ -76,6 +94,24 @@ def main(
         ide_bridge_host=args.ide_bridge_host,
         ide_bridge_port=args.ide_bridge_port,
         workspace_root=args.workspace_root,
+        agent_bridge_python_executable=(
+            args.agent_bridge_python_executable
+            or SessionReadinessPlanOptions().agent_bridge_python_executable
+        ),
+        agent_bridge_agent=args.agent_bridge_agent,
+        agent_bridge_agent_id=args.agent_bridge_agent_id,
+        agent_bridge_host=args.agent_bridge_host,
+        agent_bridge_port=args.agent_bridge_port,
+        agent_bridge_debugger_url=args.agent_bridge_debugger_url,
+        agent_bridge_registry_path=args.agent_bridge_registry_path,
+        agent_bridge_process_name=args.agent_bridge_process_name,
+        agent_bridge_pid=args.agent_bridge_pid,
+        agent_bridge_hwnd=args.agent_bridge_hwnd,
+        agent_bridge_window_title=args.agent_bridge_window_title,
+        agent_bridge_project_name=args.agent_bridge_project,
+        agent_bridge_task_name=args.agent_bridge_task,
+        agent_bridge_target_title=args.agent_bridge_target_title,
+        agent_bridge_target_url=args.agent_bridge_target_url,
     )
     plan = build_session_readiness_plan(routes=routes, options=options)
     if args.execute:

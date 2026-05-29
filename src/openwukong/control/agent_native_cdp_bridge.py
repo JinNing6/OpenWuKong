@@ -9,10 +9,12 @@ import http.server
 import json
 import socketserver
 import sys
+from pathlib import Path
 
 from openwukong.connectors.browser import BrowserDevToolsClient, BrowserDevToolsTarget
 from openwukong.control.agent_app_bridge import _bridge_send_expression, _remote_object_value
 from openwukong.control.agent_native_bridge import SEND_ACTION
+from openwukong.control.native_bridge_registry import AGENT_NATIVE_BRIDGE_REGISTRY_SCHEMA_VERSION
 
 
 @dataclasses.dataclass(frozen=True)
@@ -185,6 +187,39 @@ def make_agent_native_cdp_bridge_handler(service: AgentNativeCdpBridgeService):
     return AgentNativeCdpBridgeHandler
 
 
+def write_agent_native_cdp_bridge_registry(
+    registry_path: str | Path,
+    *,
+    bridge_url: str,
+    config: AgentNativeCdpBridgeConfig,
+) -> None:
+    path = Path(registry_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "url": str(bridge_url or "").strip().rstrip("/"),
+        "type": "agent_native_bridge",
+        "agent_id": config.agent_id,
+        "agent": config.agent,
+        "surface_kind": "desktop_app",
+        "enabled": True,
+        "app_binding": {
+            "process_name": config.process_name,
+            "pid": int(config.pid or 0),
+            "hwnd": int(config.hwnd or 0),
+            "window_title": config.window_title,
+        },
+        "debugger_url": config.debugger_url,
+    }
+    data = {
+        "schema_version": AGENT_NATIVE_BRIDGE_REGISTRY_SCHEMA_VERSION,
+        "agent_native_bridges": [entry],
+    }
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Run a local CDP-backed agent native bridge."
@@ -202,6 +237,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--task", action="append", default=[])
     parser.add_argument("--target-title", default="")
     parser.add_argument("--target-url", default="")
+    parser.add_argument("--registry-path", default="")
     parser.add_argument("--request-timeout", type=float, default=5.0)
     args = parser.parse_args(argv)
 
@@ -224,7 +260,14 @@ def main(argv: list[str] | None = None) -> int:
     handler = make_agent_native_cdp_bridge_handler(service)
     with socketserver.TCPServer((args.host, int(args.port or 0)), handler) as server:
         host, port = server.server_address
-        sys.stdout.write(f"agent_native_cdp_bridge_url=http://{host}:{port}\n")
+        bridge_url = f"http://{host}:{port}"
+        if args.registry_path:
+            write_agent_native_cdp_bridge_registry(
+                args.registry_path,
+                bridge_url=bridge_url,
+                config=service.config,
+            )
+        sys.stdout.write(f"agent_native_cdp_bridge_url={bridge_url}\n")
         sys.stdout.flush()
         server.serve_forever()
     return 0
@@ -271,6 +314,7 @@ __all__ = [
     "AgentNativeCdpBridgeConfig",
     "AgentNativeCdpBridgeService",
     "make_agent_native_cdp_bridge_handler",
+    "write_agent_native_cdp_bridge_registry",
 ]
 
 

@@ -6222,3 +6222,56 @@ When a new conversation starts in this repo:
       Cursor do not expose a usable local background control endpoint in their
       present running state, so the next real unlock is starting/installing an
       owned app-side bridge or DevTools-enabled helper without stealing focus
+- 2026-05-29 added no-focus managed lifecycle for the agent native CDP bridge:
+  - implementation:
+    - `session_readiness_plan` now has an `agent-native-cdp-bridge` route that
+      launches `openwukong.control.agent_native_cdp_bridge` as a managed
+      background helper without requiring an isolated browser profile or
+      foreground window takeover
+    - helper actions are marked as `managed_background_helper`, so execution is
+      allowed only through the explicit helper lifecycle and cleanup manifest
+      path
+    - the CDP bridge helper can write a local native bridge registry file,
+      allowing the existing registry discovery path to pick up installed or
+      started app-side bridges without per-run manual URL flags
+    - the CLI exposes the helper parameters needed by installers or scenario
+      runners: agent id/name, local host/port, registry path, debugger URL, app
+      binding evidence, project/task, and target selectors
+  - official-doc basis:
+    - Python `subprocess` docs were checked before adding the managed helper
+      process lifecycle and manifest-backed stop path
+  - validation:
+    - red tests first:
+      `test_agent_native_cdp_bridge_plan_uses_background_python_helper_and_registry`,
+      `test_execute_allows_agent_native_cdp_bridge_managed_background_helper`,
+      `test_stop_manifest_accepts_agent_native_cdp_bridge_helper`,
+      `test_write_registry_creates_local_agent_native_bridge_entry`, and
+      `test_cli_outputs_agent_native_cdp_bridge_plan_json` failed before the
+      route, registry writer, stop allowlist, and CLI options existed
+    - targeted/focused green:
+      `python -m unittest tests.test_session_readiness_plan tests.test_agent_native_cdp_bridge tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss tests.test_major_real_no_loss`: `71 tests OK`
+    - R33 no-focus helper smoke:
+      `python -m openwukong.evaluation.session_readiness_plan --route agent-native-cdp-bridge ... --execute`
+      started managed helper PID `23908`, wrote
+      `logs\runtime\agent-native-cdp-bridge-r33\native-bridges.json`, and kept
+      `control_attempts=0`
+    - R33 read-only registry probe:
+      `python -m openwukong.evaluation.agent_native_connector_probe --agent "codex app" ... --agent-native-bridge-registry logs\runtime\agent-native-cdp-bridge-r33\native-bridges.json`
+      discovered the registry endpoint, rejected it as unhealthy because the
+      test used a fake debugger URL, and kept `control_attempts=0`
+    - R33 cleanup:
+      `python -m openwukong.evaluation.session_readiness_plan --stop-manifest logs\runtime\agent-native-cdp-bridge-r33\manifest.json --json`
+      reported `stop_attempts=1` and `status=stopped`; a follow-up process
+      check confirmed PID `23908` was gone
+    - full verification:
+      `python -m unittest discover tests`: `509 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - OpenWukong now has the no-focus helper lifecycle needed to start,
+      register, discover, probe, and stop app-side CDP bridges without
+      keyboard, mouse, clipboard, or foreground takeover
+    - this does not make Codex App / Claude Desktop / Cursor app chat fully
+      unlocked by itself; those products still need a real owned DevTools
+      endpoint or installed app-side bridge, after which the current control
+      layer can discover and gate the route precisely

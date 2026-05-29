@@ -100,6 +100,85 @@ class SessionReadinessPlanTests(unittest.TestCase):
             self.assertEqual(action["command"], "")
             self.assertFalse(action["foreground_required"])
 
+    def test_agent_native_cdp_bridge_plan_uses_background_python_helper_and_registry(self):
+        options = SessionReadinessPlanOptions(
+            agent_bridge_python_executable="python.exe",
+            agent_bridge_agent="codex app",
+            agent_bridge_agent_id="codex",
+            agent_bridge_host="127.0.0.1",
+            agent_bridge_port=18888,
+            agent_bridge_debugger_url="http://127.0.0.1:9555",
+            agent_bridge_registry_path="E:/tmp/openwukong/native-bridges.json",
+            agent_bridge_process_name="Codex.exe",
+            agent_bridge_pid=42,
+            agent_bridge_hwnd=70038,
+            agent_bridge_window_title="Codex",
+            agent_bridge_project_name="openwukong",
+            agent_bridge_task_name="desktop-message",
+            agent_bridge_target_title="openwukong",
+        )
+
+        report = build_session_readiness_plan(
+            routes=("agent-native-cdp-bridge",),
+            options=options,
+        )
+        action = report.to_dict()["actions"][0]
+
+        self.assertEqual(action["action_id"], "launch_agent_native_cdp_bridge")
+        self.assertEqual(action["route_id"], "agent-native-cdp-bridge")
+        self.assertEqual(action["connector_id"], "agent-native-bridge")
+        self.assertEqual(action["readiness_url"], "http://127.0.0.1:18888")
+        self.assertTrue(action["managed_background_helper"])
+        self.assertFalse(action["creates_isolated_profile"])
+        self.assertFalse(action["foreground_required"])
+        self.assertIn("openwukong.control.agent_native_cdp_bridge", action["argv"])
+        self.assertIn("--debugger-url", action["argv"])
+        self.assertIn("http://127.0.0.1:9555", action["argv"])
+        self.assertIn("--registry-path", action["argv"])
+        self.assertIn("E:/tmp/openwukong/native-bridges.json", action["argv"])
+        self.assertIn("--process-name", action["argv"])
+        self.assertIn("Codex.exe", action["argv"])
+        self.assertIn("--project", action["argv"])
+        self.assertIn("openwukong", action["argv"])
+
+    def test_execute_allows_agent_native_cdp_bridge_managed_background_helper(self):
+        class _FakeLauncher:
+            def __init__(self):
+                self.calls = []
+
+            def launch(self, argv, cwd=None):
+                self.calls.append((tuple(argv), cwd))
+                return 7171
+
+        with tempfile.TemporaryDirectory() as tmp:
+            launcher = _FakeLauncher()
+            manifest_path = Path(tmp) / "manifest.json"
+            plan = build_session_readiness_plan(
+                routes=("agent-native-cdp-bridge",),
+                options=SessionReadinessPlanOptions(
+                    agent_bridge_python_executable="python.exe",
+                    agent_bridge_port=18889,
+                    agent_bridge_debugger_url="http://127.0.0.1:9555",
+                    agent_bridge_registry_path=str(Path(tmp) / "native-bridges.json"),
+                    agent_bridge_agent_id="codex",
+                    agent_bridge_process_name="Codex.exe",
+                ),
+            )
+
+            report = execute_session_readiness_plan(
+                plan,
+                manifest_path=str(manifest_path),
+                launcher=launcher,
+            )
+            data = report.to_dict()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["launch_attempts"], 1)
+        self.assertEqual(data["results"][0]["status"], "started")
+        self.assertEqual(data["results"][0]["pid"], 7171)
+        self.assertEqual(manifest["launches"][0]["action_id"], "launch_agent_native_cdp_bridge")
+        self.assertIn("--registry-path", launcher.calls[0][0])
+
     def test_cli_outputs_readiness_plan_json(self):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -121,6 +200,39 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertEqual(data["mode"], "session-readiness-launch-plan")
         self.assertEqual(data["actions"][0]["connector_id"], "browser")
+
+    def test_cli_outputs_agent_native_cdp_bridge_plan_json(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "--route",
+                    "agent-native-cdp-bridge",
+                    "--agent-bridge-python-executable",
+                    "python.exe",
+                    "--agent-bridge-agent",
+                    "codex app",
+                    "--agent-bridge-agent-id",
+                    "codex",
+                    "--agent-bridge-port",
+                    "18888",
+                    "--agent-bridge-debugger-url",
+                    "http://127.0.0.1:9555",
+                    "--agent-bridge-registry-path",
+                    "E:/tmp/openwukong/native-bridges.json",
+                    "--agent-bridge-process-name",
+                    "Codex.exe",
+                    "--json",
+                ]
+            )
+
+        data = json.loads(stdout.getvalue())
+        action = data["actions"][0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(action["route_id"], "agent-native-cdp-bridge")
+        self.assertEqual(action["connector_id"], "agent-native-bridge")
+        self.assertTrue(action["managed_background_helper"])
+        self.assertIn("--registry-path", action["argv"])
 
     def test_cli_execute_writes_execution_report_without_launching_workspace_bind(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -725,6 +837,70 @@ class SessionReadinessPlanTests(unittest.TestCase):
             self.assertEqual(data["stop_attempts"], 1)
             self.assertEqual(terminator.pids, [6262])
             self.assertTrue(output_path.exists())
+
+    def test_stop_manifest_accepts_agent_native_cdp_bridge_helper(self):
+        class _FakeTerminator:
+            def __init__(self):
+                self.tree_pids = []
+                self.owned_argv = []
+
+            def terminate_tree(self, pid):
+                self.tree_pids.append(pid)
+
+            def terminate_owned_processes(self, argv):
+                self.owned_argv.append(tuple(argv))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = str(Path(tmp) / "native-bridges.json").replace("\\", "/")
+            argv = (
+                "python.exe",
+                "-m",
+                "openwukong.control.agent_native_cdp_bridge",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "18888",
+                "--agent-id",
+                "codex",
+                "--debugger-url",
+                "http://127.0.0.1:9555",
+                "--process-name",
+                "Codex.exe",
+                "--registry-path",
+                registry_path,
+            )
+            manifest_path = Path(tmp) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "mode": "session-readiness-execution",
+                        "safety_mode": "isolated_helper_launch",
+                        "launches": [
+                            {
+                                "action_id": "launch_agent_native_cdp_bridge",
+                                "route_id": "agent-native-cdp-bridge",
+                                "connector_id": "agent-native-bridge",
+                                "status": "started",
+                                "pid": 7171,
+                                "argv": list(argv),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            terminator = _FakeTerminator()
+
+            report = stop_session_readiness_manifest(
+                str(manifest_path),
+                terminator=terminator,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(data["stop_attempts"], 1)
+        self.assertEqual(data["results"][0]["status"], "stopped")
+        self.assertEqual(terminator.tree_pids, [7171])
+        self.assertEqual(terminator.owned_argv, [argv])
 
 
 if __name__ == "__main__":

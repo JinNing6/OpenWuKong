@@ -16,6 +16,7 @@ from typing import Protocol
 
 
 _MANAGED_HELPER_ACTION_IDS = {
+    "launch_agent_native_cdp_bridge",
     "launch_browser_devtools_isolated",
     "launch_ide_bridge_isolated",
 }
@@ -34,6 +35,21 @@ class SessionReadinessPlanOptions:
     ide_bridge_host: str = "127.0.0.1"
     ide_bridge_port: int = 8787
     workspace_root: str = ""
+    agent_bridge_python_executable: str = sys.executable or "python"
+    agent_bridge_agent: str = "agent app"
+    agent_bridge_agent_id: str = ""
+    agent_bridge_host: str = "127.0.0.1"
+    agent_bridge_port: int = 18888
+    agent_bridge_debugger_url: str = ""
+    agent_bridge_registry_path: str = "logs/runtime/agent-native-cdp-bridge/native-bridges.json"
+    agent_bridge_process_name: str = ""
+    agent_bridge_pid: int = 0
+    agent_bridge_hwnd: int = 0
+    agent_bridge_window_title: str = ""
+    agent_bridge_project_name: str = ""
+    agent_bridge_task_name: str = ""
+    agent_bridge_target_title: str = ""
+    agent_bridge_target_url: str = ""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -48,6 +64,7 @@ class SessionReadinessAction:
     workspace_root: str = ""
     settings_preview: dict | None = None
     creates_isolated_profile: bool = False
+    managed_background_helper: bool = False
     foreground_required: bool = False
     execute_supported: bool = False
 
@@ -63,6 +80,7 @@ class SessionReadinessAction:
             "workspace_root": self.workspace_root,
             "settings_preview": dict(self.settings_preview or {}),
             "creates_isolated_profile": self.creates_isolated_profile,
+            "managed_background_helper": self.managed_background_helper,
             "foreground_required": self.foreground_required,
             "execute_supported": self.execute_supported,
         }
@@ -505,7 +523,7 @@ def _execute_action(
             readiness_url=action.readiness_url,
             workspace_root=action.workspace_root,
         )
-    if not action.creates_isolated_profile:
+    if not action.creates_isolated_profile and not action.managed_background_helper:
         return SessionReadinessLaunchResult(
             action_id=action.action_id,
             route_id=action.route_id,
@@ -645,6 +663,8 @@ def _action_for_route(
     route_id: str,
     options: SessionReadinessPlanOptions,
 ) -> SessionReadinessAction | None:
+    if route_id == "agent-native-cdp-bridge":
+        return _agent_native_cdp_bridge_action(options)
     if route_id == "browser-devtools-or-extension":
         return _browser_action(options)
     if route_id == "ide-extension-connector":
@@ -652,6 +672,57 @@ def _action_for_route(
     if route_id in {"terminal-native-session", "git-cli"}:
         return _workspace_action(route_id, options)
     return None
+
+
+def _agent_native_cdp_bridge_action(
+    options: SessionReadinessPlanOptions,
+) -> SessionReadinessAction:
+    bridge_url = f"http://{options.agent_bridge_host}:{int(options.agent_bridge_port)}"
+    registry_path = _normalized_path(options.agent_bridge_registry_path)
+    argv_parts = [
+        options.agent_bridge_python_executable or sys.executable or "python",
+        "-m",
+        "openwukong.control.agent_native_cdp_bridge",
+        "--host",
+        options.agent_bridge_host,
+        "--port",
+        str(int(options.agent_bridge_port)),
+        "--agent",
+        options.agent_bridge_agent,
+        "--agent-id",
+        options.agent_bridge_agent_id,
+        "--debugger-url",
+        options.agent_bridge_debugger_url,
+        "--process-name",
+        options.agent_bridge_process_name,
+        "--registry-path",
+        registry_path,
+    ]
+    optional_pairs = (
+        ("--pid", str(int(options.agent_bridge_pid or 0))),
+        ("--hwnd", str(int(options.agent_bridge_hwnd or 0))),
+        ("--window-title", options.agent_bridge_window_title),
+        ("--project", options.agent_bridge_project_name),
+        ("--task", options.agent_bridge_task_name),
+        ("--target-title", options.agent_bridge_target_title),
+        ("--target-url", options.agent_bridge_target_url),
+    )
+    for flag, value in optional_pairs:
+        text = str(value or "").strip()
+        if text and text != "0":
+            argv_parts.extend([flag, text])
+    return SessionReadinessAction(
+        action_id="launch_agent_native_cdp_bridge",
+        route_id="agent-native-cdp-bridge",
+        connector_id="agent-native-bridge",
+        description="Launch a local background CDP-backed agent native bridge and registry entry.",
+        command=_join_command([_quote(part) for part in argv_parts]),
+        argv=tuple(argv_parts),
+        readiness_url=bridge_url,
+        creates_isolated_profile=False,
+        managed_background_helper=True,
+        foreground_required=False,
+    )
 
 
 def _browser_action(options: SessionReadinessPlanOptions) -> SessionReadinessAction:
@@ -815,7 +886,15 @@ def _managed_process_tokens(argv: tuple[str, ...]) -> tuple[str, ...]:
             continue
         if text.startswith("--remote-debugging-port="):
             tokens.extend(_token_variants(text))
+        if text == "openwukong.control.agent_native_cdp_bridge":
+            tokens.extend(_token_variants(text))
+        if text.startswith("http://127.0.0.1:") or text.startswith("https://127.0.0.1:"):
+            tokens.extend(_token_variants(text))
         if text.startswith("--user-data-dir=") or text.startswith("--extensions-dir="):
+            tokens.extend(_token_variants(text))
+            path_text = text.split("=", 1)[1].strip()
+            tokens.extend(_token_variants(path_text))
+        if text.startswith("--registry-path="):
             tokens.extend(_token_variants(text))
             path_text = text.split("=", 1)[1].strip()
             tokens.extend(_token_variants(path_text))

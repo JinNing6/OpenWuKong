@@ -1,6 +1,9 @@
+import json
 import socketserver
 import threading
+import tempfile
 import unittest
+from pathlib import Path
 
 from openwukong.connectors.browser import BrowserDevToolsTarget
 from openwukong.control.agent_native_bridge import (
@@ -11,6 +14,7 @@ from openwukong.control.agent_native_cdp_bridge import (
     AgentNativeCdpBridgeConfig,
     AgentNativeCdpBridgeService,
     make_agent_native_cdp_bridge_handler,
+    write_agent_native_cdp_bridge_registry,
 )
 
 
@@ -125,6 +129,27 @@ class AgentNativeCdpBridgeTests(unittest.TestCase):
         self.assertEqual(data["window_input_attempts"], 0)
         self.assertEqual(data["bridge_send_attempts"], 1)
         self.assertEqual(devtools.evaluate_calls[0][0], "http://127.0.0.1:9333")
+
+    def test_write_registry_creates_local_agent_native_bridge_entry(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry_path = Path(td) / "native-bridges.json"
+
+            write_agent_native_cdp_bridge_registry(
+                registry_path,
+                bridge_url="http://127.0.0.1:18888",
+                config=_config(),
+            )
+            data = json.loads(registry_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["schema_version"], "openwukong-native-bridge-registry-v1")
+        self.assertEqual(data["agent_native_bridges"][0]["url"], "http://127.0.0.1:18888")
+        self.assertEqual(data["agent_native_bridges"][0]["agent_id"], "codex")
+        self.assertEqual(data["agent_native_bridges"][0]["surface_kind"], "desktop_app")
+        self.assertTrue(data["agent_native_bridges"][0]["enabled"])
+        self.assertEqual(
+            data["agent_native_bridges"][0]["app_binding"]["process_name"],
+            "Codex.exe",
+        )
 
 
 class _FakeDevToolsClient:
