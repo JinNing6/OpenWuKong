@@ -5935,3 +5935,52 @@ When a new conversation starts in this repo:
     - current remaining true gaps are unchanged: real Codex App / Claude
       Desktop native bridge endpoints, and a real WeChat native connector for
       deterministic background send
+- 2026-05-29 added read-only agent native bridge registry discovery:
+  - implementation:
+    - added `native_bridge_registry` for local-only agent native bridge URL
+      discovery from:
+      `OPENWUKONG_AGENT_NATIVE_BRIDGE_URLS`,
+      `OPENWUKONG_AGENT_NATIVE_BRIDGE_REGISTRY_PATHS`,
+      explicit registry file paths, and default user/machine registry paths
+    - registry discovery accepts only local HTTP(S) loopback endpoints and
+      filters entries by bridge type, agent id, enabled flag, and desktop app
+      surface kind before probing
+    - `agent_native_connector_probe` now merges explicit URLs with registry
+      discovery, then still applies the existing native bridge dry-run,
+      desktop surface, and desktop app binding gates
+    - `agent_app_real_no_loss` and `major_real_no_loss` now pass registry
+      paths through to agent app probes and expose
+      `--agent-native-bridge-registry`
+  - official-doc basis:
+    - Python `json` docs were checked before defining the registry file parser
+    - Python `urllib.parse` docs were checked before local URL validation
+  - validation:
+    - red tests first:
+      `test_discovers_agent_native_bridge_endpoint_from_registry_file`,
+      `test_passes_agent_native_bridge_registry_paths_to_native_probe`,
+      and `test_runner_passes_agent_native_bridge_registry_paths_to_agent_app_runner`
+      failed before implementation
+    - targeted green:
+      `python -m unittest tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_discovers_agent_native_bridge_endpoint_from_registry_file tests.test_agent_app_real_no_loss.AgentAppRealNoLossTests.test_passes_agent_native_bridge_registry_paths_to_native_probe tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_passes_agent_native_bridge_registry_paths_to_agent_app_runner`: `3 tests OK`
+    - focused regression:
+      `python -m unittest tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_agent_app_bridge tests.test_agent_native_bridge`: `58 tests OK`
+    - full suite:
+      `python -m unittest discover tests`: `491 tests OK`
+    - compile/check:
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+    - real no-loss smoke without any explicit bridge URL:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r26-agent-native-bridge-registry-no-url --output logs\runtime\major-real-no-loss-r26-agent-native-bridge-registry-no-url\report.json --json`
+      produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `agent_command_attempts=0`,
+      `background_screenshot_success_count=5/5`, and
+      `background_screenshot_focus_stable=true`
+  - current conclusion:
+    - Codex App / Claude Desktop native bridge endpoints can now be installed
+      and discovered as local plugins instead of requiring per-run manual URL
+      flags
+    - the remaining work is to build or install the actual app-side bridges;
+      the orchestration layer will now discover them and still reject unsafe,
+      remote, CLI-only, or unbound endpoints

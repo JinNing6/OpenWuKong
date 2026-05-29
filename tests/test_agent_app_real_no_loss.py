@@ -355,6 +355,50 @@ class AgentAppRealNoLossTests(unittest.TestCase):
             "agent_native_bridge",
         )
 
+    def test_passes_agent_native_bridge_registry_paths_to_native_probe(self):
+        calls = []
+
+        def fake_probe_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=False,
+                decision="agent_native_connector_not_exposed",
+                agent=kwargs["agent"],
+                agent_id="codex",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                endpoint_count=0,
+                ready_endpoint_count=0,
+                endpoints=[],
+                app_uia_probe={
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "semantic_composer_count": 0,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            registry_path = Path(td) / "native-bridges.json"
+            report = run_agent_app_real_no_loss(
+                agents=("codex app",),
+                project_name="openwukong",
+                task_name="desktop-message",
+                probe_runner=fake_probe_runner,
+                agent_native_bridge_registry_paths=(registry_path,),
+            )
+        data = report.to_dict()
+
+        self.assertEqual(
+            calls[0]["agent_native_bridge_registry_paths"],
+            (registry_path,),
+        )
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["bridge_send_attempts"], 0)
+
     def test_app_bridge_sender_is_not_called_without_explicit_allow_flag(self):
         sender_calls = []
 

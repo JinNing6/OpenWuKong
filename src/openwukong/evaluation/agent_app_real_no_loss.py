@@ -355,6 +355,7 @@ def run_agent_app_real_no_loss(
     ide_bridge_urls: Iterable[str] = (),
     ide_bridge_probe: object | None = None,
     agent_native_bridge_urls: Iterable[str] = (),
+    agent_native_bridge_registry_paths: Iterable[str | Path] = (),
     workspace_path: str = "",
     window_capture_provider: object | None = None,
     max_windows: int = 80,
@@ -399,6 +400,9 @@ def run_agent_app_real_no_loss(
             ide_bridge_urls=tuple(ide_bridge_urls or ()),
             ide_bridge_probe=ide_bridge_probe,
             agent_native_bridge_urls=tuple(agent_native_bridge_urls or ()),
+            agent_native_bridge_registry_paths=tuple(
+                agent_native_bridge_registry_paths or ()
+            ),
             workspace_path=workspace_path,
             screenshot_dir=str(agent_screenshot_dir) if agent_screenshot_dir else "",
             window_capture_provider=window_capture_provider,
@@ -504,6 +508,12 @@ def main(
         help="Explicit agent app native bridge URL to probe read-only and use for app bridge sends when allowed.",
     )
     parser.add_argument(
+        "--agent-native-bridge-registry",
+        action="append",
+        default=[],
+        help="Read-only JSON registry file with agent app native bridge URLs.",
+    )
+    parser.add_argument(
         "--workspace-path",
         default="",
         help="Optional workspace path included in IDE bridge capability probes.",
@@ -593,6 +603,7 @@ def main(
         ide_bridge_urls=tuple(args.ide_bridge_url or ()),
         ide_bridge_probe=ide_bridge_probe,
         agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),
+        agent_native_bridge_registry_paths=tuple(args.agent_native_bridge_registry or ()),
         workspace_path=args.workspace_path,
         window_capture_provider=window_capture_provider,
         max_windows=args.max_windows,

@@ -18,6 +18,7 @@ from openwukong.control.agent_native_bridge import (
     AgentNativeBridgeDryRunAdapter,
     build_agent_native_bridge_request,
 )
+from openwukong.control.native_bridge_registry import discover_agent_native_bridge_urls
 from openwukong.evaluation.agent_app_uia_probe import (
     AgentAppUiaProbeReport,
     run_agent_app_uia_probe,
@@ -222,6 +223,7 @@ def run_agent_native_connector_probe(
     ide_bridge_urls: Iterable[str] = (),
     ide_bridge_probe: Callable[..., object] | None = None,
     agent_native_bridge_urls: Iterable[str] = (),
+    agent_native_bridge_registry_paths: Iterable[str | Path] = (),
     agent_native_bridge_probe: Callable[..., object] | None = None,
     workspace_path: str = "",
     screenshot_dir: str | Path = "",
@@ -258,7 +260,11 @@ def run_agent_native_connector_probe(
         agent_id=app_probe.surface_binding.agent_id,
     )
     agent_native_endpoints = _discover_agent_native_bridge_endpoints(
-        agent_native_bridge_urls,
+        discover_agent_native_bridge_urls(
+            agent_native_bridge_urls,
+            agent_id=app_probe.surface_binding.agent_id,
+            registry_paths=agent_native_bridge_registry_paths,
+        ),
         agent_native_bridge_probe=(
             agent_native_bridge_probe
             or AgentNativeBridgeDryRunAdapter(
@@ -374,6 +380,12 @@ def main(
         help="Explicit agent app native bridge URL to probe read-only. Repeat for multiple bridges.",
     )
     parser.add_argument(
+        "--agent-native-bridge-registry",
+        action="append",
+        default=[],
+        help="Read-only JSON registry file with agent app native bridge URLs.",
+    )
+    parser.add_argument(
         "--workspace-path",
         default="",
         help="Optional workspace path included in IDE bridge capability probes.",
@@ -392,6 +404,7 @@ def main(
         ide_bridge_urls=tuple(args.ide_bridge_url or ()),
         ide_bridge_probe=ide_bridge_probe,
         agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),
+        agent_native_bridge_registry_paths=tuple(args.agent_native_bridge_registry or ()),
         workspace_path=args.workspace_path,
         screenshot_dir=args.screenshot_dir,
         window_capture_provider=window_capture_provider,

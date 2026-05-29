@@ -293,6 +293,7 @@ def run_major_scenario_real_no_loss(
     app_bridge_forbidden_markers: tuple[str, ...] = (),
     ide_bridge_urls: Iterable[str] = (),
     agent_native_bridge_urls: Iterable[str] = (),
+    agent_native_bridge_registry_paths: Iterable[str | Path] = (),
     workspace_path: str = "",
     allow_owned_ide_bridge_helper_launch: bool = False,
     owned_ide_executable: str = "cursor.exe",
@@ -387,6 +388,9 @@ def run_major_scenario_real_no_loss(
                 forbidden_markers=tuple(app_bridge_forbidden_markers or ()),
                 ide_bridge_urls=effective_ide_bridge_urls,
                 agent_native_bridge_urls=tuple(agent_native_bridge_urls or ()),
+                agent_native_bridge_registry_paths=tuple(
+                    agent_native_bridge_registry_paths or ()
+                ),
                 workspace_path=effective_workspace_path,
             )
         )
@@ -1308,6 +1312,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Explicit agent app native bridge URL forwarded to agent app no-loss probes.",
     )
     parser.add_argument(
+        "--agent-native-bridge-registry",
+        action="append",
+        default=[],
+        help="Read-only JSON registry file with agent app native bridge URLs.",
+    )
+    parser.add_argument(
         "--workspace-path",
         default="",
         help="Optional workspace path included in IDE bridge capability probes.",
@@ -1364,6 +1374,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         app_bridge_forbidden_markers=tuple(args.app_forbid_marker or ()),
         ide_bridge_urls=tuple(args.ide_bridge_url or ()),
         agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),
+        agent_native_bridge_registry_paths=tuple(args.agent_native_bridge_registry or ()),
         workspace_path=args.workspace_path,
         allow_owned_ide_bridge_helper_launch=args.allow_owned_ide_bridge_helper_launch,
         owned_ide_executable=args.owned_ide_executable,
