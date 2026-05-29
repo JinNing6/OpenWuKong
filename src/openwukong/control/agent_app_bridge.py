@@ -10,6 +10,11 @@ import uuid
 from openwukong.connectors import ConnectorTarget
 from openwukong.connectors.browser import BrowserDevToolsClient, BrowserDevToolsTarget
 from openwukong.connectors.ide_extension import IDEExtensionBridgeClient
+from openwukong.control.agent_native_bridge import (
+    AgentNativeBridgeSenderAdapter,
+    SEND_ACTION as AGENT_NATIVE_SEND_ACTION,
+    build_agent_native_bridge_request,
+)
 
 
 BRIDGE_SCHEMA_VERSION = "agent-app-bridge-v1"
@@ -49,13 +54,19 @@ class AgentAppBridgeRequest:
             and (
                 int(self.app_uia_probe.get("semantic_composer_count", 0) or 0) > 0
                 or _endpoint_supports_ide_chat(self.endpoint, self.agent_id)
+                or _endpoint_supports_agent_native_bridge(self.endpoint, self.agent_id)
             )
         )
         if uia_target_ready:
             return True
+        endpoint = self.endpoint
         return bool(
-            _endpoint_supports_ide_chat(self.endpoint, self.agent_id)
-            and _endpoint_matches_project(self.endpoint, self.project_name)
+            (
+                _endpoint_supports_ide_chat(endpoint, self.agent_id)
+                or _endpoint_supports_agent_native_bridge(endpoint, self.agent_id)
+            )
+            and _endpoint_matches_project(endpoint, self.project_name)
+            and _endpoint_matches_task(endpoint, self.task_name)
         )
 
     @property
@@ -542,19 +553,205 @@ class AgentAppBridgeIdeExtensionAdapter:
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class AgentAppBridgeAgentNativeSendReport:
+    request: AgentAppBridgeRequest
+    dry_run_report: AgentAppBridgeDryRunReport
+    action_result: dict = dataclasses.field(default_factory=dict)
+    native_call_attempts: int = 0
+    error: str = ""
+    elapsed_ms: float = 0.0
+
+    @property
+    def mode(self) -> str:
+        return "agent-app-bridge-send"
+
+    @property
+    def safety_mode(self) -> str:
+        return "native_bridge_execute"
+
+    @property
+    def transport(self) -> str:
+        return "agent-native-bridge"
+
+    @property
+    def control_allowed(self) -> bool:
+        return bool(self.dry_run_report.ok and self.native_call_attempts and not self.error)
+
+    @property
+    def control_attempts(self) -> int:
+        return 0
+
+    @property
+    def window_input_attempts(self) -> int:
+        return _int_value(self.action_result, "window_input_attempts")
+
+    @property
+    def bridge_send_attempts(self) -> int:
+        return 1 if self.native_call_attempts else 0
+
+    @property
+    def readback_text(self) -> str:
+        return _first_text(
+            self.action_result,
+            "readbackText",
+            "readback_text",
+            "conversation",
+            "transcript",
+            "text",
+        )
+
+    @property
+    def missing_required_markers(self) -> tuple[str, ...]:
+        text = self.readback_text
+        return tuple(marker for marker in self.request.required_markers if marker not in text)
+
+    @property
+    def present_forbidden_markers(self) -> tuple[str, ...]:
+        text = self.readback_text
+        return tuple(marker for marker in self.request.forbidden_markers if marker in text)
+
+    @property
+    def accepted(self) -> bool:
+        return not self.missing_required_markers and not self.present_forbidden_markers
+
+    @property
+    def ok(self) -> bool:
+        return self.decision == "app_bridge_send_accepted"
+
+    @property
+    def decision(self) -> str:
+        if not self.dry_run_report.ok:
+            return "app_bridge_request_not_ready"
+        if not _endpoint_is_agent_native_bridge(self.request.endpoint):
+            return "app_bridge_native_target_not_ready"
+        if self.error:
+            return "app_bridge_send_failed"
+        if not self.action_result.get("bridgeOk"):
+            return "app_bridge_send_failed"
+        if self.window_input_attempts:
+            return "app_bridge_window_input_attempted"
+        if _int_value(self.action_result, "keyboard_input_attempts"):
+            return "app_bridge_keyboard_input_attempted"
+        if _int_value(self.action_result, "clipboard_write_attempts"):
+            return "app_bridge_clipboard_write_attempted"
+        if self.action_result.get("foreground_focus_stable") is False:
+            return "app_bridge_foreground_changed"
+        if self.present_forbidden_markers:
+            return "app_bridge_forbidden_marker_present"
+        if self.missing_required_markers:
+            return "app_bridge_message_submitted_acceptance_pending"
+        return "app_bridge_send_accepted"
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "safety_mode": self.safety_mode,
+            "transport": self.transport,
+            "ok": self.ok,
+            "decision": self.decision,
+            "accepted": self.accepted,
+            "control_allowed": self.control_allowed,
+            "control_attempts": self.control_attempts,
+            "window_input_attempts": self.window_input_attempts,
+            "bridge_send_attempts": self.bridge_send_attempts,
+            "native_call_attempts": int(self.native_call_attempts or 0),
+            "missing_required_markers": list(self.missing_required_markers),
+            "present_forbidden_markers": list(self.present_forbidden_markers),
+            "target": _agent_native_bridge_target_to_dict(self.request.endpoint, self.action_result),
+            "action_result": dict(self.action_result),
+            "error": self.error,
+            "dry_run_report": self.dry_run_report.to_dict(),
+            "request": self.request.to_dict(),
+            "elapsed_ms": round(self.elapsed_ms, 3),
+        }
+
+
+class AgentAppBridgeAgentNativeAdapter:
+    def __init__(self, *, bridge_client: object | None = None):
+        self._bridge_client = bridge_client
+
+    def send(self, request: AgentAppBridgeRequest) -> AgentAppBridgeAgentNativeSendReport:
+        started = time.perf_counter()
+        dry_run = AgentAppBridgeDryRunAdapter().prepare(request)
+        if not dry_run.ok:
+            return AgentAppBridgeAgentNativeSendReport(
+                request=request,
+                dry_run_report=dry_run,
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+
+        endpoint = request.endpoint
+        if not _endpoint_is_agent_native_bridge(endpoint):
+            return AgentAppBridgeAgentNativeSendReport(
+                request=request,
+                dry_run_report=dry_run,
+                error="agent_native_bridge_endpoint_not_ready",
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+
+        bridge_url = str(endpoint.get("bridge_url", "") or endpoint.get("debugger_url", "") or "").strip()
+        native_request = build_agent_native_bridge_request(
+            bridge_url=bridge_url,
+            agent=request.agent,
+            agent_id=request.agent_id,
+            project_name=request.project_name,
+            task_name=request.task_name,
+            message=request.message,
+            composed_message=request.composed_message or request.message,
+            selected_transport=request.selected_transport,
+            required_markers=request.required_markers,
+            forbidden_markers=request.forbidden_markers,
+        )
+        native_call_attempts = 0
+        try:
+            sender = AgentNativeBridgeSenderAdapter(client=self._bridge_client)
+            native_report = sender.send(native_request)
+            native_data = native_report.to_dict()
+            native_call_attempts = int(native_data.get("native_call_attempts", 0) or 0)
+            action_result = _agent_native_bridge_action_result(
+                native_data,
+                bridge_url=bridge_url,
+                agent_id=request.agent_id,
+            )
+            if native_report.ok or bool(action_result.get("bridgeOk", False)):
+                error = ""
+            else:
+                error = str(native_data.get("decision", "") or "agent_native_bridge_send_failed")
+        except Exception as exc:
+            action_result = {}
+            native_call_attempts = 1
+            error = str(exc) or exc.__class__.__name__
+
+        return AgentAppBridgeAgentNativeSendReport(
+            request=request,
+            dry_run_report=dry_run,
+            action_result=action_result,
+            native_call_attempts=native_call_attempts,
+            error=error,
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
+
+
 class AgentAppBridgeNativeAdapter:
     def __init__(
         self,
         *,
         devtools_client: BrowserDevToolsClient | None = None,
         ide_bridge_client: IDEExtensionBridgeClient | None = None,
+        agent_native_bridge_client: object | None = None,
     ):
         self._cdp = AgentAppBridgeCdpAdapter(devtools_client=devtools_client)
         self._ide = AgentAppBridgeIdeExtensionAdapter(bridge_client=ide_bridge_client)
+        self._agent_native = AgentAppBridgeAgentNativeAdapter(
+            bridge_client=agent_native_bridge_client
+        )
 
     def send(self, request: AgentAppBridgeRequest):
         if _endpoint_is_ide_bridge(request.endpoint):
             return self._ide.send(request)
+        if _endpoint_is_agent_native_bridge(request.endpoint):
+            return self._agent_native.send(request)
         return self._cdp.send(request)
 
 
@@ -775,6 +972,10 @@ def _endpoint_is_ide_bridge(endpoint: dict) -> bool:
     return str(endpoint.get("endpoint_type", "") or "").strip() == "ide_bridge"
 
 
+def _endpoint_is_agent_native_bridge(endpoint: dict) -> bool:
+    return str(endpoint.get("endpoint_type", "") or "").strip() == "agent_native_bridge"
+
+
 def _endpoint_supports_ide_chat(endpoint: dict, agent_id: str = "") -> bool:
     if not _endpoint_is_ide_bridge(endpoint):
         return False
@@ -803,14 +1004,50 @@ def _endpoint_supports_ide_chat(endpoint: dict, agent_id: str = "") -> bool:
     return False
 
 
+def _endpoint_supports_agent_native_bridge(endpoint: dict, agent_id: str = "") -> bool:
+    if not _endpoint_is_agent_native_bridge(endpoint):
+        return False
+    if not bool(endpoint.get("ready", False)):
+        return False
+    normalized_agent = str(agent_id or "").strip().lower()
+    preferred = str(endpoint.get("preferred_chat_adapter", "") or "").strip().lower()
+    if normalized_agent and preferred and preferred != normalized_agent:
+        return False
+    if normalized_agent:
+        metadata = endpoint.get("metadata")
+        if isinstance(metadata, dict):
+            metadata_agent = str(metadata.get("agent_id", "") or "").strip().lower()
+            if metadata_agent and metadata_agent != normalized_agent:
+                return False
+    return bool(str(endpoint.get("send_command_id", "") or "").strip() == AGENT_NATIVE_SEND_ACTION)
+
+
 def _endpoint_matches_project(endpoint: dict, project_name: str) -> bool:
     project = str(project_name or "").strip().lower()
     if not project:
-        return False
+        return True
     metadata = endpoint.get("metadata")
     if not isinstance(metadata, dict):
         return False
     haystack: list[str] = []
+    for key in ("project_name", "project", "workspace", "workspace_path"):
+        haystack.append(str(metadata.get(key, "") or ""))
+    for collection_key in ("projects", "workspaces", "workspaceFolders"):
+        items = metadata.get(collection_key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            haystack.extend(
+                [
+                    str(item.get("name", "") or ""),
+                    str(item.get("project_name", "") or ""),
+                    str(item.get("fsPath", "") or ""),
+                    str(item.get("path", "") or ""),
+                    str(item.get("uri", "") or ""),
+                ]
+            )
     folders = metadata.get("workspaceFolders")
     if isinstance(folders, list):
         for folder in folders:
@@ -832,6 +1069,40 @@ def _endpoint_matches_project(endpoint: dict, project_name: str) -> bool:
             ]
         )
     return any(project in text.lower().replace("\\", "/") for text in haystack if text)
+
+
+def _endpoint_matches_task(endpoint: dict, task_name: str) -> bool:
+    task = str(task_name or "").strip().lower()
+    if not task:
+        return True
+    if _endpoint_is_ide_bridge(endpoint):
+        return True
+    metadata = endpoint.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    haystack: list[str] = [
+        str(metadata.get("task_name", "") or ""),
+        str(metadata.get("task", "") or ""),
+        str(metadata.get("session", "") or ""),
+        str(metadata.get("conversation", "") or ""),
+    ]
+    for collection_key in ("tasks", "sessions", "conversations"):
+        items = metadata.get(collection_key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            haystack.extend(
+                [
+                    str(item.get("name", "") or ""),
+                    str(item.get("task_name", "") or ""),
+                    str(item.get("title", "") or ""),
+                    str(item.get("id", "") or ""),
+                    str(item.get("session_id", "") or ""),
+                ]
+            )
+    return any(task in text.lower() for text in haystack if text)
 
 
 def _select_ide_chat_adapter(endpoint: dict, agent_id: str) -> str:
@@ -901,6 +1172,48 @@ def _ide_bridge_action_result(data: dict, *, bridge_url: str, adapter_id: str) -
     }
 
 
+def _agent_native_bridge_action_result(data: dict, *, bridge_url: str, agent_id: str) -> dict:
+    if not isinstance(data, dict):
+        data = {}
+    action_result = data.get("action_result")
+    if not isinstance(action_result, dict):
+        action_result = {}
+    bridge_ok = bool(
+        action_result.get("ok", False)
+        or action_result.get("sent", False)
+        or str(data.get("decision", "") or "") == "agent_native_bridge_send_accepted"
+    )
+    return {
+        "bridgeOk": bridge_ok,
+        "messageSet": bridge_ok,
+        "submitAttempted": bool(data.get("native_call_attempts", 0) or bridge_ok),
+        "submitVerified": bridge_ok,
+        "readbackText": _first_text(
+            action_result,
+            "readbackText",
+            "readback_text",
+            "conversation",
+            "transcript",
+            "text",
+        ),
+        "conversation": _first_text(
+            action_result,
+            "conversation",
+            "transcript",
+            "readbackText",
+            "readback_text",
+            "text",
+        ),
+        "bridge_url": bridge_url,
+        "agent_id": agent_id,
+        "window_input_attempts": _int_value(action_result, "window_input_attempts"),
+        "keyboard_input_attempts": _int_value(action_result, "keyboard_input_attempts"),
+        "clipboard_write_attempts": _int_value(action_result, "clipboard_write_attempts"),
+        "foreground_focus_stable": action_result.get("foreground_focus_stable", True),
+        "response": dict(data),
+    }
+
+
 def _ide_bridge_target_to_dict(endpoint: dict, action_result: dict) -> dict:
     return {
         "endpoint_type": "ide_bridge",
@@ -910,12 +1223,28 @@ def _ide_bridge_target_to_dict(endpoint: dict, action_result: dict) -> dict:
     }
 
 
+def _agent_native_bridge_target_to_dict(endpoint: dict, action_result: dict) -> dict:
+    return {
+        "endpoint_type": "agent_native_bridge",
+        "bridge_url": str(endpoint.get("bridge_url", "") or endpoint.get("debugger_url", "") or ""),
+        "agent_id": str(action_result.get("agent_id", "") or endpoint.get("preferred_chat_adapter", "") or ""),
+        "command_id": str(endpoint.get("send_command_id", "") or ""),
+    }
+
+
 def _first_text(data: dict, *keys: str) -> str:
     for key in keys:
         value = data.get(key)
         if value:
             return str(value)
     return ""
+
+
+def _int_value(data: dict, key: str) -> int:
+    try:
+        return int(data.get(key, 0) or 0)
+    except Exception:
+        return 0
 
 
 def json_dumps_ascii(value: str) -> str:
@@ -938,6 +1267,8 @@ def _string_tuple(values: object) -> tuple[str, ...]:
 
 __all__ = [
     "BRIDGE_SCHEMA_VERSION",
+    "AgentAppBridgeAgentNativeAdapter",
+    "AgentAppBridgeAgentNativeSendReport",
     "AgentAppBridgeCdpAdapter",
     "AgentAppBridgeDryRunAdapter",
     "AgentAppBridgeDryRunReport",

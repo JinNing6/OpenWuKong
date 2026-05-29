@@ -292,6 +292,7 @@ def run_major_scenario_real_no_loss(
     app_bridge_required_markers: tuple[str, ...] = (),
     app_bridge_forbidden_markers: tuple[str, ...] = (),
     ide_bridge_urls: Iterable[str] = (),
+    agent_native_bridge_urls: Iterable[str] = (),
     workspace_path: str = "",
     allow_owned_ide_bridge_helper_launch: bool = False,
     owned_ide_executable: str = "cursor.exe",
@@ -385,6 +386,7 @@ def run_major_scenario_real_no_loss(
                 required_markers=tuple(app_bridge_required_markers or ()),
                 forbidden_markers=tuple(app_bridge_forbidden_markers or ()),
                 ide_bridge_urls=effective_ide_bridge_urls,
+                agent_native_bridge_urls=tuple(agent_native_bridge_urls or ()),
                 workspace_path=effective_workspace_path,
             )
         )
@@ -633,7 +635,11 @@ def _app_requirement(requirement_id: str, surface: str, case: dict) -> MajorRequ
         reason = ""
     elif raw_status.startswith("gated_") or bool(case.get("native_ready", False)):
         status = "gated"
-        reason = raw_status or "native_ready_send_not_verified"
+        reason = (
+            "native_connector_ready_but_send_not_verified"
+            if raw_status == "native_connector_ready"
+            else raw_status or "native_ready_send_not_verified"
+        )
     elif raw_status == "unavailable" or not case:
         status = "unavailable"
         reason = raw_status or "case_missing"
@@ -1296,6 +1302,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Explicit IDE extension/native bridge URL forwarded to agent app no-loss probes.",
     )
     parser.add_argument(
+        "--agent-native-bridge-url",
+        action="append",
+        default=[],
+        help="Explicit agent app native bridge URL forwarded to agent app no-loss probes.",
+    )
+    parser.add_argument(
         "--workspace-path",
         default="",
         help="Optional workspace path included in IDE bridge capability probes.",
@@ -1351,6 +1363,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         app_bridge_required_markers=tuple(args.app_acceptance_marker or ()),
         app_bridge_forbidden_markers=tuple(args.app_forbid_marker or ()),
         ide_bridge_urls=tuple(args.ide_bridge_url or ()),
+        agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),
         workspace_path=args.workspace_path,
         allow_owned_ide_bridge_helper_launch=args.allow_owned_ide_bridge_helper_launch,
         owned_ide_executable=args.owned_ide_executable,

@@ -354,6 +354,7 @@ def run_agent_app_real_no_loss(
     http_probe: object | None = None,
     ide_bridge_urls: Iterable[str] = (),
     ide_bridge_probe: object | None = None,
+    agent_native_bridge_urls: Iterable[str] = (),
     workspace_path: str = "",
     window_capture_provider: object | None = None,
     max_windows: int = 80,
@@ -397,6 +398,7 @@ def run_agent_app_real_no_loss(
             http_probe=http_probe,
             ide_bridge_urls=tuple(ide_bridge_urls or ()),
             ide_bridge_probe=ide_bridge_probe,
+            agent_native_bridge_urls=tuple(agent_native_bridge_urls or ()),
             workspace_path=workspace_path,
             screenshot_dir=str(agent_screenshot_dir) if agent_screenshot_dir else "",
             window_capture_provider=window_capture_provider,
@@ -496,6 +498,12 @@ def main(
         help="Explicit IDE extension/native bridge URL to probe read-only and use for app bridge sends when allowed.",
     )
     parser.add_argument(
+        "--agent-native-bridge-url",
+        action="append",
+        default=[],
+        help="Explicit agent app native bridge URL to probe read-only and use for app bridge sends when allowed.",
+    )
+    parser.add_argument(
         "--workspace-path",
         default="",
         help="Optional workspace path included in IDE bridge capability probes.",
@@ -584,6 +592,7 @@ def main(
         http_probe=http_probe,
         ide_bridge_urls=tuple(args.ide_bridge_url or ()),
         ide_bridge_probe=ide_bridge_probe,
+        agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),
         workspace_path=args.workspace_path,
         window_capture_provider=window_capture_provider,
         max_windows=args.max_windows,

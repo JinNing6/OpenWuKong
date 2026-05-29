@@ -154,6 +154,98 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(bridge_calls[0][0], "http://127.0.0.1:8787")
         self.assertEqual(bridge_calls[0][1]["workspace_path"], "")
 
+    def test_reports_ready_agent_native_bridge_endpoint_from_explicit_bridge_url(self):
+        bridge_calls = []
+        capability_report = {
+            "ok": True,
+            "background_safe": True,
+            "capabilities": ["agent_app_conversation.native_bridge_send_message"],
+            "agents": [{"agent_id": "codex", "available": True}],
+            "projects": [{"name": "openwukong", "available": True}],
+            "tasks": [{"name": "desktop-message", "available": True}],
+        }
+
+        def fake_agent_native_bridge_probe(request):
+            bridge_calls.append(request)
+            return _FakeIDEBridgeReport(
+                mode="agent-native-bridge-dry-run",
+                safety_mode="dry_run",
+                ok=True,
+                decision="agent_native_bridge_dry_run_ready",
+                bridge_send_attempts=0,
+                control_attempts=0,
+                capability_report=capability_report,
+                request=request.to_dict(capability_report),
+            )
+
+        report = run_agent_native_connector_probe(
+            agent="codex app",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_codex_target(task_name="desktop-message"),
+            resolver=_resolver_with_codex_desktop(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            agent_native_bridge_urls=("http://127.0.0.1:18888",),
+            agent_native_bridge_probe=fake_agent_native_bridge_probe,
+        )
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "agent_native_connector_ready")
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["endpoint_count"], 1)
+        self.assertEqual(data["ready_endpoint_count"], 1)
+        self.assertEqual(data["endpoints"][0]["endpoint_type"], "agent_native_bridge")
+        self.assertEqual(data["endpoints"][0]["bridge_url"], "http://127.0.0.1:18888")
+        self.assertEqual(data["endpoints"][0]["preferred_chat_adapter"], "codex")
+        self.assertEqual(
+            data["endpoints"][0]["send_command_id"],
+            "agent_app_conversation.native_bridge_send_message",
+        )
+        self.assertEqual(bridge_calls[0].agent_id, "codex")
+        self.assertEqual(bridge_calls[0].project_name, "openwukong")
+
+    def test_agent_native_bridge_endpoint_does_not_reuse_wrong_agent(self):
+        capability_report = {
+            "ok": True,
+            "background_safe": True,
+            "capabilities": ["agent_app_conversation.native_bridge_send_message"],
+            "agents": [{"agent_id": "cursor", "available": True}],
+            "projects": [{"name": "openwukong", "available": True}],
+            "tasks": [{"name": "desktop-message", "available": True}],
+        }
+
+        def fake_agent_native_bridge_probe(request):
+            return _FakeIDEBridgeReport(
+                mode="agent-native-bridge-dry-run",
+                safety_mode="dry_run",
+                ok=False,
+                decision="agent_native_bridge_agent_not_ready",
+                bridge_send_attempts=0,
+                control_attempts=0,
+                capability_report=capability_report,
+                request=request.to_dict(capability_report),
+            )
+
+        report = run_agent_native_connector_probe(
+            agent="codex app",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_codex_target(task_name="desktop-message"),
+            resolver=_resolver_with_codex_desktop(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            agent_native_bridge_urls=("http://127.0.0.1:18888",),
+            agent_native_bridge_probe=fake_agent_native_bridge_probe,
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["ready_endpoint_count"], 0)
+        self.assertEqual(data["endpoints"][0]["endpoint_type"], "agent_native_bridge")
+        self.assertFalse(data["endpoints"][0]["ready"])
+
     def test_ide_bridge_endpoint_does_not_reuse_cursor_adapter_for_codex_app(self):
         def fake_ide_bridge_probe(bridge_url, **kwargs):
             del kwargs
@@ -406,7 +498,7 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(data["app_uia_probe"]["background_screenshot_count"], 1)
 
 
-def _observer_with_codex_target(*, hwnd=0):
+def _observer_with_codex_target(*, hwnd=0, task_name="支持不同 IDE 监工输入"):
     return StaticAccessibilityObserver(
         [
             AccessibilityWindowSnapshot(
@@ -423,7 +515,7 @@ def _observer_with_codex_target(*, hwnd=0):
                     ),
                     AccessibilityElementSnapshot(
                         control_type="ListItem",
-                        name="支持不同 IDE 监工输入",
+                        name=task_name,
                         rect=(10, 100, 300, 160),
                         patterns=("Selection",),
                     ),

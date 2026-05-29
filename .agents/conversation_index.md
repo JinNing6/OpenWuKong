@@ -5782,3 +5782,59 @@ When a new conversation starts in this repo:
       connector behind this contract, or to select a supported WeChat-side
       protocol/automation integration that can expose File Transfer Assistant
       conversation operations without foreground takeover
+- 2026-05-29 added the generic Agent App native bridge contract for Codex and
+  Claude desktop app surfaces:
+  - implementation:
+    - added `agent_native_bridge`, a local JSON bridge contract for
+      deterministic agent app background sends through
+      `/v1/agent/capabilities` and `/v1/agent/chat`
+    - the bridge dry-run validates endpoint readiness, exact agent adapter,
+      project/task availability, send-action availability, background-safe
+      flags, and no foreground/window-input requirement
+    - the bridge sender is opt-in only, records native call attempts
+      separately from bridge send attempts, and rejects success if the bridge
+      reports window input, keyboard input, clipboard writes, foreground
+      change, missing required markers, or forbidden markers
+    - `agent_native_connector_probe` now accepts explicit
+      `agent_native_bridge_urls` and exposes ready
+      `endpoint_type=agent_native_bridge` endpoints only when the bridge
+      matches the requested agent/project/task
+    - `agent_app_bridge` now treats an `agent_native_bridge` endpoint as a
+      first-class native sender, mapped back into the existing
+      `app_bridge_send_accepted` acceptance contract
+    - `agent_app_real_no_loss` and `major_real_no_loss` now forward
+      `--agent-native-bridge-url` to agent app probes
+  - official-doc basis:
+    - Python `urllib.request` official docs were checked before implementing
+      the standard-library HTTP JSON client
+    - Python `http.server` official docs were checked before adding the local
+      fake bridge tests
+  - validation:
+    - red tests first:
+      `tests.test_agent_native_bridge` failed on missing module,
+      native connector probe failed on missing `agent_native_bridge_urls`,
+      app bridge failed on missing `agent_native_bridge_client`, and agent app
+      / major runners failed on missing forwarding options
+    - targeted green:
+      `python -m unittest tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_major_real_no_loss`: `47 tests OK`
+    - full suite:
+      `python -m unittest discover tests`: `480 tests OK`
+    - compile/check:
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+    - real no-loss smoke without an agent bridge URL:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r23-agent-native-bridge-contract-no-url --output logs\runtime\major-real-no-loss-r23-agent-native-bridge-contract-no-url\report.json --json`
+      produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `agent_command_attempts=0`,
+      `background_screenshot_success_count=5/5`, and
+      `background_screenshot_focus_stable=true`
+  - current conclusion:
+    - the unified architecture now has reusable native bridge contracts for
+      both IM-style apps and agent app surfaces
+    - Codex App and Claude Desktop are now blocked by missing real app-side
+      bridge endpoints, not by the orchestration/control architecture
+    - the next concrete action is to implement or install real Windows-side
+      app bridges for Codex App / Claude Desktop, then run an opt-in bridge
+      send test with required readback markers

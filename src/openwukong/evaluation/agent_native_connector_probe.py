@@ -13,6 +13,11 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Protocol
 
 from openwukong.control.app_resolution import WindowsAppResolver, lower_text
+from openwukong.control.agent_native_bridge import (
+    SEND_ACTION as AGENT_NATIVE_SEND_ACTION,
+    AgentNativeBridgeDryRunAdapter,
+    build_agent_native_bridge_request,
+)
 from openwukong.evaluation.agent_app_uia_probe import (
     AgentAppUiaProbeReport,
     run_agent_app_uia_probe,
@@ -91,6 +96,14 @@ class NativeConnectorEndpoint:
                 and self.capability_ok
                 and self.bridge_url
                 and (self.preferred_chat_adapter or self.send_command_id)
+            )
+        if self.endpoint_type == "agent_native_bridge":
+            return bool(
+                not self.error
+                and self.capability_ok
+                and self.bridge_url
+                and self.preferred_chat_adapter
+                and self.send_command_id
             )
         return bool(not self.error and self.version and any(target.ready for target in self.targets))
 
@@ -206,6 +219,8 @@ def run_agent_native_connector_probe(
     http_probe: NativeConnectorHTTPProbe | None = None,
     ide_bridge_urls: Iterable[str] = (),
     ide_bridge_probe: Callable[..., object] | None = None,
+    agent_native_bridge_urls: Iterable[str] = (),
+    agent_native_bridge_probe: Callable[..., object] | None = None,
     workspace_path: str = "",
     screenshot_dir: str | Path = "",
     window_capture_provider: object | None = None,
@@ -240,12 +255,25 @@ def run_agent_native_connector_probe(
         workspace_path=str(workspace_path or ""),
         agent_id=app_probe.surface_binding.agent_id,
     )
+    agent_native_endpoints = _discover_agent_native_bridge_endpoints(
+        agent_native_bridge_urls,
+        agent_native_bridge_probe=(
+            agent_native_bridge_probe
+            or AgentNativeBridgeDryRunAdapter(
+                request_timeout=max(0.05, float(request_timeout))
+            ).prepare
+        ),
+        agent=str(agent or "").strip(),
+        agent_id=app_probe.surface_binding.agent_id,
+        project_name=str(project_name or "").strip(),
+        task_name=str(task_name or "").strip(),
+    )
     return AgentNativeConnectorProbeReport(
         agent=str(agent or "").strip(),
         project_name=str(project_name or "").strip(),
         task_name=str(task_name or "").strip(),
         app_uia_probe=app_probe,
-        endpoints=tuple(endpoints) + tuple(ide_endpoints),
+        endpoints=tuple(endpoints) + tuple(ide_endpoints) + tuple(agent_native_endpoints),
         process_count=len(processes),
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
@@ -296,7 +324,11 @@ def format_agent_native_connector_probe_report(report: AgentNativeConnectorProbe
         f"App UIA: {report.app_uia_probe.decision}",
     ]
     for endpoint in report.endpoints:
-        endpoint_url = endpoint.bridge_url if endpoint.endpoint_type == "ide_bridge" else endpoint.debugger_url
+        endpoint_url = (
+            endpoint.bridge_url
+            if endpoint.endpoint_type in {"ide_bridge", "agent_native_bridge"}
+            else endpoint.debugger_url
+        )
         lines.append(
             f"- {endpoint_url} type={endpoint.endpoint_type} ready={str(endpoint.ready).lower()} "
             f"targets={endpoint.target_count} source={endpoint.source}"
@@ -333,6 +365,12 @@ def main(
         help="Explicit IDE extension/native bridge URL to probe read-only. Repeat for multiple bridges.",
     )
     parser.add_argument(
+        "--agent-native-bridge-url",
+        action="append",
+        default=[],
+        help="Explicit agent app native bridge URL to probe read-only. Repeat for multiple bridges.",
+    )
+    parser.add_argument(
         "--workspace-path",
         default="",
         help="Optional workspace path included in IDE bridge capability probes.",
@@ -350,6 +388,7 @@ def main(
         http_probe=http_probe,
         ide_bridge_urls=tuple(args.ide_bridge_url or ()),
         ide_bridge_probe=ide_bridge_probe,
+        agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),
         workspace_path=args.workspace_path,
         screenshot_dir=args.screenshot_dir,
         window_capture_provider=window_capture_provider,
@@ -504,6 +543,97 @@ def _probe_ide_bridge_endpoint(
         )
 
 
+def _discover_agent_native_bridge_endpoints(
+    bridge_urls: Iterable[str],
+    *,
+    agent_native_bridge_probe: Callable[..., object],
+    agent: str,
+    agent_id: str,
+    project_name: str,
+    task_name: str,
+) -> tuple[NativeConnectorEndpoint, ...]:
+    endpoints: list[NativeConnectorEndpoint] = []
+    seen: set[str] = set()
+    for raw_url in bridge_urls or ():
+        bridge_url = str(raw_url or "").strip().rstrip("/")
+        if not bridge_url or bridge_url in seen:
+            continue
+        seen.add(bridge_url)
+        endpoints.append(
+            _probe_agent_native_bridge_endpoint(
+                bridge_url,
+                agent_native_bridge_probe=agent_native_bridge_probe,
+                agent=agent,
+                agent_id=agent_id,
+                project_name=project_name,
+                task_name=task_name,
+            )
+        )
+    return tuple(endpoints)
+
+
+def _probe_agent_native_bridge_endpoint(
+    bridge_url: str,
+    *,
+    agent_native_bridge_probe: Callable[..., object],
+    agent: str,
+    agent_id: str,
+    project_name: str,
+    task_name: str,
+) -> NativeConnectorEndpoint:
+    request = build_agent_native_bridge_request(
+        bridge_url=bridge_url,
+        agent=agent,
+        agent_id=agent_id,
+        project_name=project_name,
+        task_name=task_name,
+        message="OPENWUKONG_AGENT_NATIVE_BRIDGE_PROBE",
+        composed_message=(
+            f"Project: {project_name}\n"
+            f"Task: {task_name}\n\n"
+            "Message:\nOPENWUKONG_AGENT_NATIVE_BRIDGE_PROBE"
+        ),
+    )
+    try:
+        raw_report = agent_native_bridge_probe(request)
+        data = _report_to_dict(raw_report)
+        capability_report = _dict_value(data.get("capability_report"))
+        request_data = _dict_value(data.get("request"))
+        metadata = _agent_native_bridge_metadata(
+            request_data,
+            capability_report,
+            agent_id=agent_id,
+            project_name=project_name,
+            task_name=task_name,
+        )
+        ok = bool(data.get("ok", False))
+        return NativeConnectorEndpoint(
+            debugger_url=bridge_url,
+            bridge_url=bridge_url,
+            port=_port_from_url(bridge_url),
+            source="explicit-agent-native-bridge-url",
+            endpoint_type="agent_native_bridge",
+            metadata=metadata,
+            preferred_chat_adapter=str(agent_id or "").strip().lower() if ok else "",
+            send_command_id=AGENT_NATIVE_SEND_ACTION if ok else "",
+            capability_ok=ok,
+            error="" if ok else str(
+                data.get("error", "")
+                or data.get("decision", "")
+                or "agent_native_bridge_capability_failed"
+            ),
+        )
+    except Exception as exc:
+        return NativeConnectorEndpoint(
+            debugger_url=bridge_url,
+            bridge_url=bridge_url,
+            port=_port_from_url(bridge_url),
+            source="explicit-agent-native-bridge-url",
+            endpoint_type="agent_native_bridge",
+            error=str(exc) or exc.__class__.__name__,
+        )
+
+
 def _probe_debugger_endpoint(
     port: int,
     *,
@@ -600,6 +730,43 @@ def _send_command_id(data: dict, metadata: dict) -> str:
         if value:
             return value
     return ""
+
+
+def _agent_native_bridge_metadata(
+    request_data: dict,
+    capability_report: dict,
+    *,
+    agent_id: str,
+    project_name: str,
+    task_name: str,
+) -> dict:
+    metadata = {
+        "agent_id": str(
+            request_data.get("agent_id", "")
+            or capability_report.get("agent_id", "")
+            or agent_id
+            or ""
+        ).strip().lower(),
+        "project_name": str(
+            request_data.get("project_name", "")
+            or capability_report.get("project_name", "")
+            or project_name
+            or ""
+        ).strip(),
+        "task_name": str(
+            request_data.get("task_name", "")
+            or capability_report.get("task_name", "")
+            or task_name
+            or ""
+        ).strip(),
+        "background_safe": bool(capability_report.get("background_safe", True)),
+        "capabilities": list(capability_report.get("capabilities", []) or []),
+    }
+    for key in ("agents", "projects", "tasks", "workspaces", "sessions"):
+        value = capability_report.get(key)
+        if isinstance(value, list):
+            metadata[key] = [dict(item) for item in value if isinstance(item, dict)]
+    return metadata
 
 
 def _dict_value(value: object) -> dict:

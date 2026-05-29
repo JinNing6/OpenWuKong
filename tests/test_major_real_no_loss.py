@@ -294,6 +294,90 @@ class MajorRealNoLossTests(unittest.TestCase):
         requirements = {item["requirement_id"]: item for item in data["requirements"]}
         self.assertEqual(requirements["codex_app_background_chat"]["status"], "verified")
 
+    def test_runner_passes_agent_native_bridge_urls_to_agent_app_runner(self):
+        app_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "passed_cases": 1,
+                    "failed_cases": 0,
+                    "native_ready_cases": 1,
+                    "cases": [
+                        {
+                            "agent": "codex app",
+                            "status": "native_connector_ready",
+                            "real_verified": True,
+                            "native_ready": True,
+                        }
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("codex app",),
+                cli_agents=(),
+                project_name="openwukong",
+                task_name="codex-agent-native-bridge",
+                agent_native_bridge_urls=("http://127.0.0.1:18888",),
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(
+            app_calls[0]["agent_native_bridge_urls"],
+            ("http://127.0.0.1:18888",),
+        )
+        requirements = {item["requirement_id"]: item for item in data["requirements"]}
+        self.assertEqual(requirements["codex_app_background_chat"]["status"], "gated")
+        self.assertEqual(
+            requirements["codex_app_background_chat"]["blocking_reason"],
+            "native_connector_ready_but_send_not_verified",
+        )
+
     def test_runner_passes_uia_semantic_options_and_marks_app_requirement_verified(self):
         app_calls = []
 

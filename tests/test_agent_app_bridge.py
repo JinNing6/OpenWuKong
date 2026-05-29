@@ -180,6 +180,81 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertTrue(data["request"]["native_endpoint_ready"])
         self.assertEqual(data["request"]["endpoint"]["preferred_chat_adapter"], "cursor")
 
+    def test_agent_native_bridge_endpoint_metadata_can_satisfy_target_without_uia_match(self):
+        probe = _ready_agent_native_bridge_probe()
+        probe["decision"] = "agent_app_target_not_visible"
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "decision": "agent_app_task_not_visible",
+            "target_matched": False,
+            "semantic_composer_count": 0,
+            "matched_windows": [
+                {
+                    "process_name": "Codex.exe",
+                    "pid": 32000,
+                    "window_title": "Codex",
+                    "hwnd": 2491830,
+                }
+            ],
+        }
+        request = build_agent_app_bridge_request(
+            agent="codex app",
+            agent_id="codex",
+            project_name="openwukong",
+            task_name="desktop-message",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: desktop-message",
+            selected_transport={"transport_id": "codex-desktop-shell"},
+            app_surface_probe=probe,
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_dry_run_ready")
+        self.assertTrue(data["request"]["target_ready"])
+        self.assertEqual(data["request"]["endpoint"]["endpoint_type"], "agent_native_bridge")
+        self.assertEqual(data["request"]["endpoint"]["preferred_chat_adapter"], "codex")
+
+    def test_native_adapter_sends_agent_native_bridge_without_cdp_or_window_input(self):
+        bridge = _FakeAgentNativeBridgeClient(
+            {
+                "ok": True,
+                "sent": True,
+                "foreground_focus_stable": True,
+                "window_input_attempts": 0,
+                "keyboard_input_attempts": 0,
+                "clipboard_write_attempts": 0,
+                "readbackText": "OPENWUKONG_ACCEPTANCE: PASS\nCodex accepted.",
+            }
+        )
+        request = build_agent_app_bridge_request(
+            agent="codex app",
+            agent_id="codex",
+            project_name="openwukong",
+            task_name="desktop-message",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: desktop-message\n\nMessage:\nSummarize the active task.",
+            selected_transport={"transport_id": "codex-desktop-shell"},
+            app_surface_probe=_ready_agent_native_bridge_probe(),
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+        )
+
+        report = AgentAppBridgeNativeAdapter(agent_native_bridge_client=bridge).send(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_send_accepted")
+        self.assertEqual(data["bridge_send_attempts"], 1)
+        self.assertEqual(data["native_call_attempts"], 1)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(data["transport"], "agent-native-bridge")
+        self.assertEqual(data["action_result"]["bridge_url"], "http://127.0.0.1:18888")
+        self.assertEqual(bridge.send_calls[0].agent_id, "codex")
+        self.assertIn("Project: openwukong", bridge.send_calls[0].composed_message)
+
     def test_dry_run_prefers_project_window_when_agent_has_multiple_windows(self):
         probe = _ready_ide_bridge_probe()
         probe["app_uia_probe"] = {
@@ -368,6 +443,28 @@ class _FakeIDEBridgeClient:
         return dict(self.value)
 
 
+class _FakeAgentNativeBridgeClient:
+    def __init__(self, value):
+        self.value = dict(value)
+        self.capability_calls = []
+        self.send_calls = []
+
+    def read_capabilities(self, request):
+        self.capability_calls.append(request)
+        return {
+            "ok": True,
+            "background_safe": True,
+            "capabilities": ["agent_app_conversation.native_bridge_send_message"],
+            "agents": [{"agent_id": request.agent_id, "available": True}],
+            "projects": [{"name": request.project_name, "available": True}],
+            "tasks": [{"name": request.task_name, "available": True}],
+        }
+
+    def send_message(self, request):
+        self.send_calls.append(request)
+        return dict(self.value)
+
+
 def _ready_probe():
     return {
         "mode": "agent-native-connector-probe",
@@ -439,6 +536,26 @@ def _ready_ide_bridge_probe():
                 }
             ],
             "metadata": {"ide_name": "Cursor"},
+        }
+    ]
+    return probe
+
+
+def _ready_agent_native_bridge_probe():
+    probe = _ready_probe()
+    probe["endpoints"] = [
+        {
+            "endpoint_type": "agent_native_bridge",
+            "bridge_url": "http://127.0.0.1:18888",
+            "debugger_url": "http://127.0.0.1:18888",
+            "ready": True,
+            "preferred_chat_adapter": "codex",
+            "send_command_id": "agent_app_conversation.native_bridge_send_message",
+            "metadata": {
+                "agent_id": "codex",
+                "projects": [{"name": "openwukong", "available": True}],
+                "tasks": [{"name": "desktop-message", "available": True}],
+            },
         }
     ]
     return probe
