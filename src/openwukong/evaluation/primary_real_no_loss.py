@@ -20,6 +20,11 @@ from openwukong.control.session_readiness_plan import (
     SessionReadinessLauncher,
     SessionReadinessTerminator,
 )
+from openwukong.control.wechat_native_bridge import (
+    WeChatNativeBridgeDryRunAdapter,
+    WeChatNativeBridgeSenderAdapter,
+    build_wechat_native_bridge_request,
+)
 from openwukong.control.wechat_uia_action import (
     WeChatUiaSemanticActionDryRunAdapter,
     WeChatUiaSemanticActionSenderAdapter,
@@ -289,6 +294,13 @@ def run_primary_real_no_loss(
     wechat_uia_required_markers: tuple[str, ...] = (),
     wechat_uia_forbidden_markers: tuple[str, ...] = (),
     wechat_uia_sender: object | None = None,
+    wechat_native_bridge_urls: tuple[str, ...] = (),
+    allow_wechat_native_bridge_send: bool = False,
+    wechat_native_bridge_message: str = "OPENWUKONG_WECHAT_NATIVE_BRIDGE_SEND",
+    wechat_native_bridge_required_markers: tuple[str, ...] = (),
+    wechat_native_bridge_forbidden_markers: tuple[str, ...] = (),
+    wechat_native_bridge_dry_run_adapter: object | None = None,
+    wechat_native_bridge_sender: object | None = None,
 ) -> PrimaryRealNoLossReport:
     started = time.perf_counter()
     root = _resolve_output_root(output_root)
@@ -334,6 +346,13 @@ def run_primary_real_no_loss(
                 tuple(wechat_uia_required_markers or ()),
                 tuple(wechat_uia_forbidden_markers or ()),
                 wechat_uia_sender,
+                tuple(wechat_native_bridge_urls or ()),
+                allow_wechat_native_bridge_send,
+                wechat_native_bridge_message,
+                tuple(wechat_native_bridge_required_markers or ()),
+                tuple(wechat_native_bridge_forbidden_markers or ()),
+                wechat_native_bridge_dry_run_adapter,
+                wechat_native_bridge_sender,
             )
         elif scenario_id == "files.search.find_candidate":
             case = _file_case(row, root)
@@ -546,6 +565,13 @@ def _wechat_case(
     wechat_uia_required_markers: tuple[str, ...],
     wechat_uia_forbidden_markers: tuple[str, ...],
     wechat_uia_sender: object | None,
+    wechat_native_bridge_urls: tuple[str, ...],
+    allow_wechat_native_bridge_send: bool,
+    wechat_native_bridge_message: str,
+    wechat_native_bridge_required_markers: tuple[str, ...],
+    wechat_native_bridge_forbidden_markers: tuple[str, ...],
+    wechat_native_bridge_dry_run_adapter: object | None,
+    wechat_native_bridge_sender: object | None,
 ) -> PrimaryRealNoLossCase:
     observer = accessibility_observer or PywinautoAccessibilityObserver(
         max_windows=40,
@@ -591,7 +617,27 @@ def _wechat_case(
     if allow_wechat_uia_semantic_send and bool(semantic_action_dry_run.get("ok", False)):
         active_sender = wechat_uia_sender or WeChatUiaSemanticActionSenderAdapter()
         semantic_action_send_report = _report_to_dict(active_sender.send(semantic_request))
-    background_send_verified = _wechat_uia_send_verified(semantic_action_send_report)
+    native_bridge_requests, native_bridge_dry_runs = _wechat_native_bridge_dry_runs(
+        row,
+        tuple(wechat_native_bridge_urls or ()),
+        background_screenshot_focus_stable=background_focus_stable,
+        message=wechat_native_bridge_message,
+        required_markers=wechat_native_bridge_required_markers,
+        forbidden_markers=wechat_native_bridge_forbidden_markers,
+        dry_run_adapter=wechat_native_bridge_dry_run_adapter,
+    )
+    native_bridge_ready_index = _first_ok_report_index(native_bridge_dry_runs)
+    native_bridge_send_report: dict = {}
+    if allow_wechat_native_bridge_send and native_bridge_ready_index >= 0:
+        active_sender = wechat_native_bridge_sender or WeChatNativeBridgeSenderAdapter()
+        native_bridge_send_report = _report_to_dict(
+            active_sender.send(native_bridge_requests[native_bridge_ready_index])
+        )
+    background_send_verified = bool(
+        _wechat_uia_send_verified(semantic_action_send_report)
+        or _wechat_native_bridge_send_verified(native_bridge_send_report)
+    )
+    native_bridge_decision = _wechat_native_bridge_decision(native_bridge_dry_runs)
     details = {
         "matching_window_count": len(matches),
         "windows": [
@@ -609,8 +655,18 @@ def _wechat_case(
         ],
         "uia_semantic_action_ready": bool(semantic_action_dry_run.get("ok", False)),
         "uia_semantic_action_dry_run": semantic_action_dry_run,
+        "wechat_native_bridge_urls": list(wechat_native_bridge_urls or ()),
+        "wechat_native_bridge_ready": native_bridge_ready_index >= 0,
+        "wechat_native_bridge_dry_run_decision": native_bridge_decision,
+        "wechat_native_bridge_dry_run": (
+            native_bridge_dry_runs[native_bridge_ready_index]
+            if native_bridge_ready_index >= 0
+            else (native_bridge_dry_runs[0] if native_bridge_dry_runs else {})
+        ),
+        "wechat_native_bridge_dry_run_reports": native_bridge_dry_runs,
         "background_send_verified": background_send_verified,
         "uia_semantic_action_send_report": semantic_action_send_report,
+        "wechat_native_bridge_send_report": native_bridge_send_report,
         "total_scanned_windows": report.window_count,
         "total_scanned_elements": report.total_elements,
     }
@@ -622,8 +678,14 @@ def _wechat_case(
         real_verified=bool(matches),
         real_probe_kind="wechat-uia-win32-read-only-locator",
         details=details,
-        send_attempts=_counter(semantic_action_send_report, "send_attempts"),
-        window_input_attempts=_counter(semantic_action_send_report, "window_input_attempts"),
+        send_attempts=(
+            _counter(semantic_action_send_report, "send_attempts")
+            + _counter(native_bridge_send_report, "send_attempts")
+        ),
+        window_input_attempts=(
+            _counter(semantic_action_send_report, "window_input_attempts")
+            + _counter(native_bridge_send_report, "window_input_attempts")
+        ),
     )
 
 
@@ -681,6 +743,113 @@ def _wechat_uia_send_verified(report: dict) -> bool:
         report.get("ok", False)
         and str(report.get("decision", "") or "") == "wechat_uia_semantic_action_send_accepted"
         and _counter(report, "send_attempts") == 1
+        and _counter(report, "window_input_attempts") == 0
+        and _counter(report, "keyboard_input_attempts") == 0
+        and _counter(report, "clipboard_write_attempts") == 0
+        and bool(report.get("foreground_focus_stable", True))
+        and not report.get("missing_required_markers")
+        and not report.get("present_forbidden_markers")
+    )
+
+
+def _wechat_native_bridge_dry_runs(
+    row: dict,
+    bridge_urls: tuple[str, ...],
+    *,
+    background_screenshot_focus_stable: bool,
+    message: str,
+    required_markers: tuple[str, ...],
+    forbidden_markers: tuple[str, ...],
+    dry_run_adapter: object | None,
+) -> tuple[list[object], list[dict]]:
+    requests: list[object] = []
+    reports: list[dict] = []
+    active_adapter = dry_run_adapter or WeChatNativeBridgeDryRunAdapter()
+    for bridge_url in bridge_urls:
+        request = _wechat_native_bridge_request(
+            row,
+            bridge_url,
+            background_screenshot_focus_stable=background_screenshot_focus_stable,
+            message=message,
+            required_markers=required_markers,
+            forbidden_markers=forbidden_markers,
+        )
+        requests.append(request)
+        try:
+            report = _report_to_dict(active_adapter.prepare(request))
+        except Exception as exc:
+            report = {
+                "mode": "wechat-native-bridge-dry-run",
+                "ok": False,
+                "decision": "wechat_native_bridge_capability_probe_failed",
+                "error": str(exc) or exc.__class__.__name__,
+                "control_attempts": 0,
+                "send_attempts": 0,
+                "window_input_attempts": 0,
+                "request": request.to_dict(),
+            }
+        reports.append(report)
+        if bool(report.get("ok", False)):
+            break
+    return requests, reports
+
+
+def _wechat_native_bridge_request(
+    row: dict,
+    bridge_url: str,
+    *,
+    background_screenshot_focus_stable: bool,
+    message: str,
+    required_markers: tuple[str, ...],
+    forbidden_markers: tuple[str, ...],
+):
+    plan = dict(row.get("plan", {}) or {})
+    intent = dict(plan.get("draft_action", {}).get("intent", {}) or {})
+    target_name = str(
+        intent.get("contact", "")
+        or intent.get("target_name", "")
+        or intent.get("recipient", "")
+        or ""
+    ).strip()
+    return build_wechat_native_bridge_request(
+        bridge_url=bridge_url,
+        target_name=target_name,
+        message=str(message or "").strip(),
+        background_screenshot_focus_stable=background_screenshot_focus_stable,
+        selected_transport={
+            "transport_id": "wechat-native-bridge",
+            "transport_channel": "native_bridge",
+            "safety_mode": "dry_run_or_explicit_opt_in_execute",
+        },
+        required_markers=required_markers,
+        forbidden_markers=forbidden_markers,
+    )
+
+
+def _first_ok_report_index(reports: list[dict]) -> int:
+    for index, report in enumerate(reports):
+        if bool(report.get("ok", False)):
+            return index
+    return -1
+
+
+def _wechat_native_bridge_decision(reports: list[dict]) -> str:
+    if not reports:
+        return "wechat_native_bridge_url_missing"
+    for report in reports:
+        if bool(report.get("ok", False)):
+            return str(report.get("decision", "") or "wechat_native_bridge_dry_run_ready")
+    return str(reports[-1].get("decision", "") or "wechat_native_bridge_not_ready")
+
+
+def _wechat_native_bridge_send_verified(report: dict) -> bool:
+    if not report:
+        return False
+    return bool(
+        report.get("ok", False)
+        and str(report.get("decision", "") or "") == "wechat_native_bridge_send_accepted"
+        and _counter(report, "send_attempts") == 1
+        and _counter(report, "native_call_attempts") == 1
         and _counter(report, "window_input_attempts") == 0
         and _counter(report, "keyboard_input_attempts") == 0
         and _counter(report, "clipboard_write_attempts") == 0
@@ -1002,6 +1171,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--owned-browser-url", default="")
     parser.add_argument("--ide-bridge-url", action="append", default=None)
     parser.add_argument("--background-screenshot-dir", default="")
+    parser.add_argument("--wechat-native-bridge-url", action="append", default=[])
+    parser.add_argument("--allow-wechat-native-bridge-send", action="store_true")
+    parser.add_argument(
+        "--wechat-native-bridge-message",
+        default="OPENWUKONG_WECHAT_NATIVE_BRIDGE_SEND",
+    )
+    parser.add_argument("--wechat-native-bridge-acceptance-marker", action="append", default=[])
+    parser.add_argument("--wechat-native-bridge-forbid-marker", action="append", default=[])
     args = parser.parse_args(argv)
 
     report = run_primary_real_no_loss(
@@ -1014,6 +1191,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         browser_executable_resolver=_resolve_installed_browser_executable,
         ide_bridge_urls=tuple(args.ide_bridge_url or ("http://127.0.0.1:8787",)),
         background_screenshot_dir=args.background_screenshot_dir,
+        wechat_native_bridge_urls=tuple(args.wechat_native_bridge_url or ()),
+        allow_wechat_native_bridge_send=args.allow_wechat_native_bridge_send,
+        wechat_native_bridge_message=args.wechat_native_bridge_message,
+        wechat_native_bridge_required_markers=tuple(
+            args.wechat_native_bridge_acceptance_marker or ()
+        ),
+        wechat_native_bridge_forbidden_markers=tuple(
+            args.wechat_native_bridge_forbid_marker or ()
+        ),
     )
     if args.summary_json:
         print(json.dumps(summarize_report(report), ensure_ascii=False, indent=2))

@@ -5719,3 +5719,66 @@ When a new conversation starts in this repo:
       a WeChat native/semantic connector or a deterministic target-conversation
       bridge that can expose the File Transfer Assistant composer without
       foreground keyboard/clipboard takeover
+- 2026-05-29 added the WeChat native bridge contract and wired it into the
+  unified no-loss runners:
+  - implementation:
+    - added `wechat_native_bridge`, a local JSON bridge contract for
+      deterministic WeChat background sends through `/v1/wechat/capabilities`
+      and `/v1/wechat/send`
+    - the bridge dry-run validates endpoint readiness, exact target
+      conversation match, send-action availability, background-safe flags,
+      and no foreground/window-input requirement
+    - the bridge sender is opt-in only, records native call attempts
+      separately from send attempts, and rejects success if the bridge reports
+      window input, keyboard input, clipboard writes, foreground change,
+      missing required markers, or forbidden markers
+    - `primary_real_no_loss` now accepts explicit
+      `wechat_native_bridge_urls`, bridge message/marker options, an injected
+      dry-run adapter, and an injected sender; default behavior still sends
+      nothing
+    - `major_real_no_loss` now exposes the same route through
+      `--wechat-native-bridge-url`,
+      `--allow-wechat-native-bridge-send`,
+      `--wechat-native-bridge-message`,
+      `--wechat-native-bridge-acceptance-marker`, and
+      `--wechat-native-bridge-forbid-marker`
+    - `wechat_background_send` evidence now reports both the old UIA decision
+      and the native bridge decision, so the current blocker is explicit:
+      no WeChat native bridge URL configured
+  - official-doc basis:
+    - Python `urllib.request` official docs were checked before implementing
+      the standard-library HTTP JSON client
+    - Python `http.server` official docs were checked before adding the local
+      fake bridge tests
+  - validation:
+    - red tests first:
+      `tests.test_wechat_native_bridge` failed on missing module,
+      primary failed on missing `wechat_native_bridge_urls`, and major failed
+      on missing `wechat_native_bridge_urls`
+    - targeted green:
+      `python -m unittest tests.test_wechat_native_bridge tests.test_primary_real_no_loss.PrimaryRealNoLossTests.test_runner_can_execute_opt_in_wechat_native_bridge_send_without_window_input tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_passes_wechat_native_bridge_options_and_marks_wechat_send_verified`: `5 tests OK`
+    - focused regression:
+      `python -m unittest tests.test_wechat_native_bridge tests.test_wechat_uia_action_contract tests.test_primary_real_no_loss tests.test_major_real_no_loss tests.test_agent_app_real_no_loss tests.test_agent_app_bridge`: `45 tests OK`
+    - full suite:
+      `python -m unittest discover tests`: `471 tests OK`
+    - compile/check:
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+    - real no-loss smoke without a WeChat bridge URL:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r22-wechat-native-bridge-contract-no-url --output logs\runtime\major-real-no-loss-r22-wechat-native-bridge-contract-no-url\report.json --json`
+      produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `background_screenshot_success_count=5/5`,
+      `background_screenshot_focus_stable=true`,
+      `wechat_background_observation=verified`, and
+      `wechat_background_send=gated (wechat_native_bridge_url_missing)`
+  - current conclusion:
+    - the unified architecture now has a first-class deterministic route for
+      WeChat background send when a native/local connector is available
+    - the current machine still does not have that real WeChat native bridge
+      installed, so real WeChat send remains gated rather than falling back to
+      keyboard/mouse/clipboard
+    - next concrete action is to implement the actual Windows-side WeChat
+      connector behind this contract, or to select a supported WeChat-side
+      protocol/automation integration that can expose File Transfer Assistant
+      conversation operations without foreground takeover

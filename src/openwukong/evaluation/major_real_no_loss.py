@@ -274,6 +274,11 @@ def run_major_scenario_real_no_loss(
     wechat_uia_message: str = "OPENWUKONG_WECHAT_UIA_SEMANTIC_SEND",
     wechat_uia_required_markers: tuple[str, ...] = (),
     wechat_uia_forbidden_markers: tuple[str, ...] = (),
+    wechat_native_bridge_urls: Iterable[str] = (),
+    allow_wechat_native_bridge_send: bool = False,
+    wechat_native_bridge_message: str = "OPENWUKONG_WECHAT_NATIVE_BRIDGE_SEND",
+    wechat_native_bridge_required_markers: tuple[str, ...] = (),
+    wechat_native_bridge_forbidden_markers: tuple[str, ...] = (),
     agent_apps: Iterable[str] = DEFAULT_AGENT_APPS,
     cli_agents: Iterable[str] = DEFAULT_CLI_AGENTS,
     project_name: str = "openwukong",
@@ -326,6 +331,15 @@ def run_major_scenario_real_no_loss(
             wechat_uia_message=wechat_uia_message,
             wechat_uia_required_markers=tuple(wechat_uia_required_markers or ()),
             wechat_uia_forbidden_markers=tuple(wechat_uia_forbidden_markers or ()),
+            wechat_native_bridge_urls=tuple(wechat_native_bridge_urls or ()),
+            allow_wechat_native_bridge_send=allow_wechat_native_bridge_send,
+            wechat_native_bridge_message=wechat_native_bridge_message,
+            wechat_native_bridge_required_markers=tuple(
+                wechat_native_bridge_required_markers or ()
+            ),
+            wechat_native_bridge_forbidden_markers=tuple(
+                wechat_native_bridge_forbidden_markers or ()
+            ),
         )
     )
     helper = _disabled_owned_ide_bridge_helper_report()
@@ -529,6 +543,8 @@ def _primary_requirement(
 def _wechat_background_send_requirement(case: dict) -> MajorRequirement:
     details = _details(case.get("details", {}))
     dry_run = _details(details.get("uia_semantic_action_dry_run", {}))
+    native_dry_run = _details(details.get("wechat_native_bridge_dry_run", {}))
+    native_send = _details(details.get("wechat_native_bridge_send_report", {}))
     if bool(details.get("background_send_verified", False)) or bool(
         case.get("background_send_verified", False)
     ):
@@ -537,7 +553,9 @@ def _wechat_background_send_requirement(case: dict) -> MajorRequirement:
     elif _case_verified(case):
         status = "gated"
         reason = str(
-            dry_run.get("decision", "")
+            details.get("wechat_native_bridge_dry_run_decision", "")
+            or native_dry_run.get("decision", "")
+            or dry_run.get("decision", "")
             or "background_send_not_verified"
         )
     elif not case:
@@ -559,6 +577,17 @@ def _wechat_background_send_requirement(case: dict) -> MajorRequirement:
                 details.get("uia_semantic_action_ready", False)
             ),
             "dry_run_decision": str(dry_run.get("decision", "") or ""),
+            "wechat_native_bridge_ready": bool(
+                details.get("wechat_native_bridge_ready", False)
+            ),
+            "wechat_native_bridge_dry_run_decision": str(
+                details.get("wechat_native_bridge_dry_run_decision", "")
+                or native_dry_run.get("decision", "")
+                or ""
+            ),
+            "wechat_native_bridge_send_decision": str(
+                native_send.get("decision", "") or ""
+            ),
         },
     )
 
@@ -1184,6 +1213,34 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=[],
         help="Forbidden WeChat UIA send readback marker. Repeat for multiple markers.",
     )
+    parser.add_argument(
+        "--wechat-native-bridge-url",
+        action="append",
+        default=[],
+        help="Explicit local WeChat native bridge URL used for read-only capabilities and optional send.",
+    )
+    parser.add_argument(
+        "--allow-wechat-native-bridge-send",
+        action="store_true",
+        help="Allow explicit WeChat native bridge sends when the dry-run contract is ready.",
+    )
+    parser.add_argument(
+        "--wechat-native-bridge-message",
+        default="OPENWUKONG_WECHAT_NATIVE_BRIDGE_SEND",
+        help="Message used for optional WeChat native bridge send.",
+    )
+    parser.add_argument(
+        "--wechat-native-bridge-acceptance-marker",
+        action="append",
+        default=[],
+        help="Required WeChat native bridge readback marker. Repeat for multiple markers.",
+    )
+    parser.add_argument(
+        "--wechat-native-bridge-forbid-marker",
+        action="append",
+        default=[],
+        help="Forbidden WeChat native bridge readback marker. Repeat for multiple markers.",
+    )
     parser.add_argument("--agent-app", action="append", default=None)
     parser.add_argument("--cli-agent", action="append", default=None)
     parser.add_argument("--project-name", default="openwukong")
@@ -1272,6 +1329,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         wechat_uia_message=args.wechat_uia_message,
         wechat_uia_required_markers=tuple(args.wechat_uia_acceptance_marker or ()),
         wechat_uia_forbidden_markers=tuple(args.wechat_uia_forbid_marker or ()),
+        wechat_native_bridge_urls=tuple(args.wechat_native_bridge_url or ()),
+        allow_wechat_native_bridge_send=args.allow_wechat_native_bridge_send,
+        wechat_native_bridge_message=args.wechat_native_bridge_message,
+        wechat_native_bridge_required_markers=tuple(
+            args.wechat_native_bridge_acceptance_marker or ()
+        ),
+        wechat_native_bridge_forbidden_markers=tuple(
+            args.wechat_native_bridge_forbid_marker or ()
+        ),
         agent_apps=tuple(args.agent_app or DEFAULT_AGENT_APPS),
         cli_agents=tuple(args.cli_agent or DEFAULT_CLI_AGENTS),
         project_name=args.project_name,

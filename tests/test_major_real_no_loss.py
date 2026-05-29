@@ -489,6 +489,122 @@ class MajorRealNoLossTests(unittest.TestCase):
         requirements = {item["requirement_id"]: item for item in data["requirements"]}
         self.assertEqual(requirements["wechat_background_send"]["status"], "verified")
 
+    def test_runner_passes_wechat_native_bridge_options_and_marks_wechat_send_verified(self):
+        primary_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            primary_calls.append({"fixture": fixture, "kwargs": dict(kwargs)})
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 1,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [
+                        {
+                            "scenario_id": "wechat.chat.draft_reply",
+                            "status": "verified",
+                            "real_verified": True,
+                            "send_attempts": 1,
+                            "window_input_attempts": 0,
+                            "details": {
+                                "background_send_verified": True,
+                                "wechat_native_bridge_ready": True,
+                                "wechat_native_bridge_dry_run_decision": "wechat_native_bridge_dry_run_ready",
+                                "wechat_native_bridge_send_report": {
+                                    "decision": "wechat_native_bridge_send_accepted",
+                                    "send_attempts": 1,
+                                    "native_call_attempts": 1,
+                                    "window_input_attempts": 0,
+                                    "foreground_focus_stable": True,
+                                },
+                            },
+                        }
+                    ],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=(),
+                cli_agents=(),
+                wechat_native_bridge_urls=("http://127.0.0.1:18180",),
+                allow_wechat_native_bridge_send=True,
+                wechat_native_bridge_message="OPENWUKONG WECHAT NATIVE CHECK",
+                wechat_native_bridge_required_markers=(
+                    "OPENWUKONG WECHAT NATIVE CHECK",
+                ),
+                wechat_native_bridge_forbidden_markers=(
+                    "OPENWUKONG WECHAT NATIVE FAIL",
+                ),
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(
+            primary_calls[0]["kwargs"]["wechat_native_bridge_urls"],
+            ("http://127.0.0.1:18180",),
+        )
+        self.assertTrue(primary_calls[0]["kwargs"]["allow_wechat_native_bridge_send"])
+        self.assertEqual(
+            primary_calls[0]["kwargs"]["wechat_native_bridge_message"],
+            "OPENWUKONG WECHAT NATIVE CHECK",
+        )
+        self.assertEqual(
+            primary_calls[0]["kwargs"]["wechat_native_bridge_required_markers"],
+            ("OPENWUKONG WECHAT NATIVE CHECK",),
+        )
+        self.assertEqual(
+            primary_calls[0]["kwargs"]["wechat_native_bridge_forbidden_markers"],
+            ("OPENWUKONG WECHAT NATIVE FAIL",),
+        )
+        self.assertEqual(data["external_communication_attempts"], 1)
+        self.assertEqual(data["window_input_attempts"], 0)
+        requirements = {item["requirement_id"]: item for item in data["requirements"]}
+        self.assertEqual(requirements["wechat_background_send"]["status"], "verified")
+        self.assertEqual(
+            requirements["wechat_background_send"]["evidence"][
+                "wechat_native_bridge_dry_run_decision"
+            ],
+            "wechat_native_bridge_dry_run_ready",
+        )
+
     def test_runner_prepares_owned_ide_bridge_and_forwards_endpoint_to_agent_app(self):
         app_calls = []
         helper_calls = []
