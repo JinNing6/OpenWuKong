@@ -17,6 +17,7 @@ from typing import Protocol
 
 _MANAGED_HELPER_ACTION_IDS = {
     "launch_agent_native_cdp_bridge",
+    "launch_agent_app_devtools_owned",
     "launch_browser_devtools_isolated",
     "launch_ide_bridge_isolated",
 }
@@ -28,6 +29,10 @@ class SessionReadinessPlanOptions:
     browser_debug_port: int = 9222
     browser_user_data_dir: str = "logs/runtime/browser-devtools-profile"
     browser_url: str = "about:blank"
+    agent_app_executable: str = ""
+    agent_app_debug_port: int = 9555
+    agent_app_user_data_dir: str = "logs/runtime/agent-app-devtools-profile"
+    agent_app_url: str = ""
     ide_executable: str = "cursor.exe"
     ide_user_data_dir: str = "logs/runtime/ide-bridge-user-data"
     ide_extensions_dir: str = "logs/runtime/ide-bridge-extensions"
@@ -265,6 +270,14 @@ class SubprocessSessionReadinessLauncher:
     """Launch readiness helpers without shell expansion."""
 
     def launch(self, argv: tuple[str, ...], cwd: str | None = None) -> int:
+        startupinfo = None
+        creationflags = 0
+        if sys.platform.startswith("win") and hasattr(subprocess, "STARTUPINFO"):
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            # SW_SHOWMINNOACTIVE: show minimized without activating the window.
+            startupinfo.wShowWindow = 7
+            creationflags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         process = subprocess.Popen(
             list(argv),
             cwd=cwd or None,
@@ -273,6 +286,8 @@ class SubprocessSessionReadinessLauncher:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             close_fds=True,
+            startupinfo=startupinfo,
+            creationflags=creationflags,
         )
         return int(process.pid)
 
@@ -665,6 +680,8 @@ def _action_for_route(
 ) -> SessionReadinessAction | None:
     if route_id == "agent-native-cdp-bridge":
         return _agent_native_cdp_bridge_action(options)
+    if route_id == "agent-app-devtools-owned":
+        return _agent_app_devtools_owned_action(options)
     if route_id == "browser-devtools-or-extension":
         return _browser_action(options)
     if route_id == "ide-extension-connector":
@@ -746,6 +763,36 @@ def _browser_action(options: SessionReadinessPlanOptions) -> SessionReadinessAct
         argv=argv,
         readiness_url=f"http://127.0.0.1:{int(options.browser_debug_port)}",
         creates_isolated_profile=True,
+        foreground_required=False,
+    )
+
+
+def _agent_app_devtools_owned_action(
+    options: SessionReadinessPlanOptions,
+) -> SessionReadinessAction:
+    user_data_dir = _normalized_path(options.agent_app_user_data_dir)
+    debug_port = int(options.agent_app_debug_port)
+    argv_parts = [
+        str(options.agent_app_executable or "").strip(),
+        f"--remote-debugging-port={debug_port}",
+        f"--user-data-dir={user_data_dir}",
+        "--no-first-run",
+        "--disable-crash-reporter",
+    ]
+    app_url = str(options.agent_app_url or "").strip()
+    if app_url:
+        argv_parts.append(app_url)
+    argv = tuple(part for part in argv_parts if part)
+    return SessionReadinessAction(
+        action_id="launch_agent_app_devtools_owned",
+        route_id="agent-app-devtools-owned",
+        connector_id="agent-app-devtools",
+        description="Launch an owned agent desktop app instance with an isolated profile and local DevTools endpoint.",
+        command=_join_command([_quote(part) for part in argv]),
+        argv=argv,
+        readiness_url=f"http://127.0.0.1:{debug_port}",
+        creates_isolated_profile=True,
+        managed_background_helper=True,
         foreground_required=False,
     )
 

@@ -1001,6 +1001,26 @@ class MajorRealNoLossTests(unittest.TestCase):
             "<required-owned-local-devtools-url>",
         )
         self.assertEqual(
+            cases["codex"]["owned_devtools_launch_plan_template"]["route_id"],
+            "agent-app-devtools-owned",
+        )
+        self.assertEqual(
+            cases["codex"]["owned_devtools_launch_plan_template"]["debug_port"],
+            19555,
+        )
+        self.assertEqual(
+            cases["codex"]["owned_devtools_launch_plan_template"]["readiness_url"],
+            "http://127.0.0.1:19555",
+        )
+        self.assertIn(
+            "--remote-debugging-port=19555",
+            cases["codex"]["owned_devtools_launch_plan_template"]["argv"],
+        )
+        self.assertEqual(
+            cases["codex"]["owned_devtools_launch_plan_template"]["startup_mode"],
+            "minimized_no_activate",
+        )
+        self.assertEqual(
             cases["codex"]["helper_status"]["bridge_url"],
             "http://127.0.0.1:18890",
         )

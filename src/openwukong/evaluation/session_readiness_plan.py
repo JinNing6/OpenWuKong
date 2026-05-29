@@ -33,6 +33,13 @@ def main(
     parser.add_argument("--browser-debug-port", type=int, default=9222)
     parser.add_argument("--browser-user-data-dir", default="logs/runtime/browser-devtools-profile")
     parser.add_argument("--browser-url", default="about:blank")
+    parser.add_argument("--agent-app-executable", default="")
+    parser.add_argument("--agent-app-debug-port", type=int, default=9555)
+    parser.add_argument(
+        "--agent-app-user-data-dir",
+        default="logs/runtime/agent-app-devtools-profile",
+    )
+    parser.add_argument("--agent-app-url", default="")
     parser.add_argument("--ide-executable", default="cursor.exe")
     parser.add_argument("--ide-user-data-dir", default="logs/runtime/ide-bridge-user-data")
     parser.add_argument("--ide-extensions-dir", default="logs/runtime/ide-bridge-extensions")
@@ -87,6 +94,10 @@ def main(
         browser_debug_port=args.browser_debug_port,
         browser_user_data_dir=args.browser_user_data_dir,
         browser_url=args.browser_url,
+        agent_app_executable=args.agent_app_executable,
+        agent_app_debug_port=args.agent_app_debug_port,
+        agent_app_user_data_dir=args.agent_app_user_data_dir,
+        agent_app_url=args.agent_app_url,
         ide_executable=args.ide_executable,
         ide_user_data_dir=args.ide_user_data_dir,
         ide_extensions_dir=args.ide_extensions_dir,

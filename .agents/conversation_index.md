@@ -6437,3 +6437,66 @@ When a new conversation starts in this repo:
     - the system is still correctly not claiming unified precise background
       app-chat control for Codex App / Claude Desktop / Cursor until a real
       owned local DevTools/native endpoint is present and send readback passes
+- 2026-05-29 added the owned agent-app DevTools launch route:
+  - implementation:
+    - `session_readiness_plan` now supports route
+      `agent-app-devtools-owned`
+    - the route launches an explicitly provided agent desktop app executable
+      with an isolated `--user-data-dir`, `--remote-debugging-port`,
+      `--no-first-run`, and `--disable-crash-reporter`
+    - the Windows subprocess launcher now uses `SW_SHOWMINNOACTIVE` and a new
+      process group for readiness helpers, so owned helper launches request a
+      minimized/no-activate startup instead of normal foreground activation
+    - manifest stop now accepts `launch_agent_app_devtools_owned` and cleans
+      residual owned processes by the recorded remote-debugging port and
+      isolated profile token
+    - the readiness CLI exposes:
+      `--agent-app-executable`, `--agent-app-debug-port`,
+      `--agent-app-user-data-dir`, and `--agent-app-url`
+    - `agent_app_endpoint_acceptance` now includes
+      `owned_devtools_launch_plan_template` for Codex App / Claude Desktop /
+      Cursor with default readiness URLs:
+      `http://127.0.0.1:19555`, `http://127.0.0.1:19556`, and
+      `http://127.0.0.1:19557`
+  - official-doc basis:
+    - Electron / Chromium-style command-line debugging behavior and Python
+      `subprocess` startup handling were checked before adding the route and
+      no-activate launcher path
+  - validation:
+    - red tests first:
+      `test_agent_app_devtools_owned_plan_uses_isolated_profile_and_remote_debugging`,
+      `test_execute_allows_agent_app_devtools_owned_and_writes_manifest`,
+      `test_cli_outputs_agent_app_devtools_owned_plan_json`,
+      `test_stop_manifest_accepts_agent_app_devtools_owned_helper`, and
+      `test_subprocess_launcher_uses_no_activate_startupinfo_on_windows`
+      failed before the route, CLI args, stop allowlist, and startup info
+      existed
+    - red test first:
+      `test_report_exposes_agent_app_endpoint_acceptance_package` failed before
+      the endpoint package included an owned DevTools launch plan template
+    - focused green:
+      `python -m unittest tests.test_session_readiness_plan tests.test_major_real_no_loss`: `46 tests OK`
+    - R40 plan smoke:
+      `python -m openwukong.evaluation.session_readiness_plan --route agent-app-devtools-owned --agent-app-executable Codex.exe --agent-app-debug-port 19555 --agent-app-user-data-dir logs/runtime/agent-app-devtools/codex/profile --json`
+      produced a plan-only report with `control_attempts=0`,
+      `foreground_required=false`, an isolated profile, and readiness URL
+      `http://127.0.0.1:19555`
+    - R40 real no-loss smoke:
+      `run_major_scenario_real_no_loss(... agent_apps=("codex app", "claude desktop", "cursor"), cli_agents=())`
+      wrote
+      `logs/runtime/major-real-no-loss-r40-agent-app-devtools-plan/major-real-no-loss-report.json`
+      and produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, and launch templates for all three app
+      surfaces with `startup_mode=minimized_no_activate`
+    - full verification:
+      `python -m unittest discover tests`: `523 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - the remaining app-surface gap is no longer only "provide a debugger URL";
+      OpenWukong can now generate and safely manage the owned app launch shape
+      needed to create one
+    - the route is not yet auto-executed inside the major runner because real
+      GUI app launch still requires explicit permission and app-specific path
+      resolution; the current default remains plan/report-only and no-focus

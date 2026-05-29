@@ -2,6 +2,7 @@ import contextlib
 import base64
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from unittest.mock import patch
 
 from openwukong.control.session_readiness_plan import (
     SessionReadinessPlanOptions,
+    SubprocessSessionReadinessLauncher,
     TaskTreeSessionReadinessTerminator,
     _managed_process_tokens,
     build_session_readiness_plan,
@@ -142,6 +144,113 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertIn("--project", action["argv"])
         self.assertIn("openwukong", action["argv"])
 
+    def test_agent_app_devtools_owned_plan_uses_isolated_profile_and_remote_debugging(self):
+        options = SessionReadinessPlanOptions(
+            agent_app_executable="C:/Users/me/AppData/Local/Programs/Codex/Codex.exe",
+            agent_app_debug_port=9555,
+            agent_app_user_data_dir="logs/runtime/openwukong-codex-app-profile",
+            agent_app_url="openwukong://workspace/E:/ideaProjects/agent/openwukong",
+        )
+
+        report = build_session_readiness_plan(
+            routes=("agent-app-devtools-owned",),
+            options=options,
+        )
+        action = report.to_dict()["actions"][0]
+
+        self.assertEqual(action["action_id"], "launch_agent_app_devtools_owned")
+        self.assertEqual(action["route_id"], "agent-app-devtools-owned")
+        self.assertEqual(action["connector_id"], "agent-app-devtools")
+        self.assertEqual(action["readiness_url"], "http://127.0.0.1:9555")
+        self.assertTrue(action["creates_isolated_profile"])
+        self.assertTrue(action["managed_background_helper"])
+        self.assertFalse(action["foreground_required"])
+        self.assertIn("--remote-debugging-port=9555", action["argv"])
+        self.assertNotIn("--headless", action["argv"])
+        user_data_arg = next(
+            item for item in action["argv"] if item.startswith("--user-data-dir=")
+        )
+        self.assertTrue(Path(user_data_arg.split("=", 1)[1]).is_absolute())
+        self.assertIn("--no-first-run", action["argv"])
+        self.assertIn("--disable-crash-reporter", action["argv"])
+        self.assertEqual(
+            action["argv"][-1],
+            "openwukong://workspace/E:/ideaProjects/agent/openwukong",
+        )
+
+    def test_execute_allows_agent_app_devtools_owned_and_writes_manifest(self):
+        class _FakeLauncher:
+            def __init__(self):
+                self.calls = []
+
+            def launch(self, argv, cwd=None):
+                self.calls.append((tuple(argv), cwd))
+                return 8181
+
+        with tempfile.TemporaryDirectory() as tmp:
+            launcher = _FakeLauncher()
+            profile = Path(tmp) / "codex-app-profile"
+            manifest_path = Path(tmp) / "manifest.json"
+            plan = build_session_readiness_plan(
+                routes=("agent-app-devtools-owned",),
+                options=SessionReadinessPlanOptions(
+                    agent_app_executable="Codex.exe",
+                    agent_app_debug_port=9555,
+                    agent_app_user_data_dir=str(profile),
+                ),
+            )
+
+            report = execute_session_readiness_plan(
+                plan,
+                manifest_path=str(manifest_path),
+                launcher=launcher,
+            )
+            data = report.to_dict()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            profile_exists_at_launch = profile.is_dir()
+
+        self.assertEqual(data["launch_attempts"], 1)
+        self.assertEqual(data["results"][0]["status"], "started")
+        self.assertEqual(data["results"][0]["pid"], 8181)
+        self.assertTrue(profile_exists_at_launch)
+        self.assertEqual(
+            manifest["launches"][0]["action_id"],
+            "launch_agent_app_devtools_owned",
+        )
+        self.assertIn("--remote-debugging-port=9555", launcher.calls[0][0])
+
+    def test_subprocess_launcher_uses_no_activate_startupinfo_on_windows(self):
+        if not hasattr(subprocess, "STARTUPINFO"):
+            self.skipTest("Windows subprocess startup info is unavailable")
+
+        class _FakeProcess:
+            pid = 9090
+
+        calls = []
+
+        def _fake_popen(argv, **kwargs):
+            calls.append((tuple(argv), dict(kwargs)))
+            return _FakeProcess()
+
+        with patch(
+            "openwukong.control.session_readiness_plan.subprocess.Popen",
+            side_effect=_fake_popen,
+        ):
+            pid = SubprocessSessionReadinessLauncher().launch(
+                ("Codex.exe", "--remote-debugging-port=9555")
+            )
+
+        self.assertEqual(pid, 9090)
+        kwargs = calls[0][1]
+        startupinfo = kwargs["startupinfo"]
+        self.assertTrue(
+            startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW
+        )
+        self.assertEqual(startupinfo.wShowWindow, 7)
+        self.assertTrue(
+            kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+        )
+
     def test_execute_allows_agent_native_cdp_bridge_managed_background_helper(self):
         class _FakeLauncher:
             def __init__(self):
@@ -234,6 +343,31 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertEqual(action["connector_id"], "agent-native-bridge")
         self.assertTrue(action["managed_background_helper"])
         self.assertIn("--registry-path", action["argv"])
+
+    def test_cli_outputs_agent_app_devtools_owned_plan_json(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "--route",
+                    "agent-app-devtools-owned",
+                    "--agent-app-executable",
+                    "Codex.exe",
+                    "--agent-app-debug-port",
+                    "9555",
+                    "--agent-app-user-data-dir",
+                    "E:/tmp/openwukong-codex-profile",
+                    "--json",
+                ]
+            )
+
+        data = json.loads(stdout.getvalue())
+        action = data["actions"][0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(action["route_id"], "agent-app-devtools-owned")
+        self.assertEqual(action["connector_id"], "agent-app-devtools")
+        self.assertTrue(action["managed_background_helper"])
+        self.assertIn("--remote-debugging-port=9555", action["argv"])
 
     def test_cli_execute_writes_execution_report_without_launching_workspace_bind(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -901,6 +1035,60 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertEqual(data["stop_attempts"], 1)
         self.assertEqual(data["results"][0]["status"], "stopped")
         self.assertEqual(terminator.tree_pids, [7171])
+        self.assertEqual(terminator.owned_argv, [argv])
+
+    def test_stop_manifest_accepts_agent_app_devtools_owned_helper(self):
+        class _FakeTerminator:
+            def __init__(self):
+                self.tree_pids = []
+                self.owned_argv = []
+
+            def terminate_tree(self, pid):
+                self.tree_pids.append(pid)
+
+            def terminate_owned_processes(self, argv):
+                self.owned_argv.append(tuple(argv))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = str(Path(tmp) / "codex-app-profile").replace("\\", "/")
+            argv = (
+                "Codex.exe",
+                "--remote-debugging-port=9555",
+                f"--user-data-dir={profile}",
+                "--no-first-run",
+                "--disable-crash-reporter",
+            )
+            manifest_path = Path(tmp) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "mode": "session-readiness-execution",
+                        "safety_mode": "isolated_helper_launch",
+                        "launches": [
+                            {
+                                "action_id": "launch_agent_app_devtools_owned",
+                                "route_id": "agent-app-devtools-owned",
+                                "connector_id": "agent-app-devtools",
+                                "status": "started",
+                                "pid": 8181,
+                                "argv": list(argv),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            terminator = _FakeTerminator()
+
+            report = stop_session_readiness_manifest(
+                str(manifest_path),
+                terminator=terminator,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(data["stop_attempts"], 1)
+        self.assertEqual(data["results"][0]["status"], "stopped")
+        self.assertEqual(terminator.tree_pids, [8181])
         self.assertEqual(terminator.owned_argv, [argv])
 
     def test_agent_native_cdp_bridge_residual_tokens_exclude_target_debugger_url(self):

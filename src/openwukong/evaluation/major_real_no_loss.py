@@ -887,6 +887,11 @@ def _build_agent_app_endpoint_acceptance_case(
             "target_title": "",
             "target_url": "",
         },
+        "owned_devtools_launch_plan_template": _owned_devtools_launch_plan_template(
+            agent=agent or defaults["agent"],
+            agent_id=agent_id or defaults["agent_id"],
+            defaults=defaults,
+        ),
         "helper_status": helper_status,
     }
 
@@ -899,6 +904,7 @@ def _agent_app_endpoint_defaults(agent: str) -> dict:
             "agent_id": "claude",
             "process_name": "Claude.exe",
             "bridge_port": 18891,
+            "devtools_port": 19556,
         }
     if key.startswith("cursor"):
         return {
@@ -906,12 +912,43 @@ def _agent_app_endpoint_defaults(agent: str) -> dict:
             "agent_id": "cursor",
             "process_name": "Cursor.exe",
             "bridge_port": 18892,
+            "devtools_port": 19557,
         }
     return {
         "agent": "codex app",
         "agent_id": "codex",
         "process_name": "Codex.exe",
         "bridge_port": 18890,
+        "devtools_port": 19555,
+    }
+
+
+def _owned_devtools_launch_plan_template(
+    *,
+    agent: str,
+    agent_id: str,
+    defaults: dict,
+) -> dict:
+    port = int(defaults.get("devtools_port", 19555) or 19555)
+    process_name = str(defaults.get("process_name", "") or "").strip()
+    user_data_dir = f"logs/runtime/agent-app-devtools/{agent_id or 'agent'}/profile"
+    executable = f"<path-to-{process_name or 'agent-app.exe'}>"
+    return {
+        "route_id": "agent-app-devtools-owned",
+        "agent": agent,
+        "agent_id": agent_id,
+        "executable": executable,
+        "debug_port": port,
+        "user_data_dir": user_data_dir,
+        "readiness_url": f"http://127.0.0.1:{port}",
+        "startup_mode": "minimized_no_activate",
+        "argv": [
+            executable,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={user_data_dir}",
+            "--no-first-run",
+            "--disable-crash-reporter",
+        ],
     }
 
 
