@@ -311,6 +311,7 @@ def run_major_scenario_real_no_loss(
     app_bridge_message: str = "OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
     app_bridge_required_markers: tuple[str, ...] = (),
     app_bridge_forbidden_markers: tuple[str, ...] = (),
+    debugger_urls: Iterable[str] = (),
     ide_bridge_urls: Iterable[str] = (),
     agent_native_bridge_urls: Iterable[str] = (),
     agent_native_bridge_registry_paths: Iterable[str | Path] = (),
@@ -406,6 +407,7 @@ def run_major_scenario_real_no_loss(
                 bridge_message=app_bridge_message,
                 required_markers=tuple(app_bridge_required_markers or ()),
                 forbidden_markers=tuple(app_bridge_forbidden_markers or ()),
+                debugger_urls=tuple(debugger_urls or ()),
                 ide_bridge_urls=effective_ide_bridge_urls,
                 agent_native_bridge_urls=tuple(agent_native_bridge_urls or ()),
                 agent_native_bridge_registry_paths=tuple(
@@ -1320,6 +1322,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Forbidden app bridge readback marker. Repeat for multiple markers.",
     )
     parser.add_argument(
+        "--debugger-url",
+        action="append",
+        default=[],
+        help="Explicit local DevTools debugger URL forwarded to agent app no-loss probes after process-port ownership validation.",
+    )
+    parser.add_argument(
         "--ide-bridge-url",
         action="append",
         default=[],
@@ -1392,6 +1400,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         app_bridge_message=args.app_bridge_message,
         app_bridge_required_markers=tuple(args.app_acceptance_marker or ()),
         app_bridge_forbidden_markers=tuple(args.app_forbid_marker or ()),
+        debugger_urls=tuple(args.debugger_url or ()),
         ide_bridge_urls=tuple(args.ide_bridge_url or ()),
         agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),
         agent_native_bridge_registry_paths=tuple(args.agent_native_bridge_registry or ()),

@@ -352,6 +352,7 @@ def run_agent_app_real_no_loss(
     probe_runner: ProbeRunner | None = None,
     process_provider: object | None = None,
     http_probe: object | None = None,
+    debugger_urls: Iterable[str] = (),
     ide_bridge_urls: Iterable[str] = (),
     ide_bridge_probe: object | None = None,
     agent_native_bridge_urls: Iterable[str] = (),
@@ -397,6 +398,7 @@ def run_agent_app_real_no_loss(
             resolver=resolver,
             process_provider=process_provider,
             http_probe=http_probe,
+            debugger_urls=tuple(debugger_urls or ()),
             ide_bridge_urls=tuple(ide_bridge_urls or ()),
             ide_bridge_probe=ide_bridge_probe,
             agent_native_bridge_urls=tuple(agent_native_bridge_urls or ()),
@@ -495,6 +497,12 @@ def main(
     parser.add_argument("--max-windows", type=int, default=80)
     parser.add_argument("--max-elements", type=int, default=1200)
     parser.add_argument("--request-timeout", type=float, default=0.2)
+    parser.add_argument(
+        "--debugger-url",
+        action="append",
+        default=[],
+        help="Explicit local DevTools debugger URL to probe read-only after validating port ownership by the target app process.",
+    )
     parser.add_argument(
         "--ide-bridge-url",
         action="append",
@@ -600,6 +608,7 @@ def main(
         probe_runner=probe_runner,
         process_provider=process_provider,
         http_probe=http_probe,
+        debugger_urls=tuple(args.debugger_url or ()),
         ide_bridge_urls=tuple(args.ide_bridge_url or ()),
         ide_bridge_probe=ide_bridge_probe,
         agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),

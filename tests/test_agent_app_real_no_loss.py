@@ -301,6 +301,71 @@ class AgentAppRealNoLossTests(unittest.TestCase):
         self.assertEqual(data["bridge_send_attempts"], 0)
         self.assertEqual(data["cases"][0]["probe"]["endpoints"][0]["endpoint_type"], "ide_bridge")
 
+    def test_passes_explicit_debugger_urls_to_native_probe(self):
+        calls = []
+
+        def fake_probe_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="agent_native_connector_ready",
+                agent=kwargs["agent"],
+                agent_id="claude",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=1,
+                endpoints=[
+                    {
+                        "endpoint_type": "devtools",
+                        "debugger_url": "http://127.0.0.1:9444",
+                        "ready": True,
+                        "process": {
+                            "process_name": "claude.exe",
+                            "pid": 77064,
+                            "listening_ports": [9444],
+                        },
+                        "targets": [
+                            {
+                                "target_id": "page-1",
+                                "type": "page",
+                                "webSocketDebuggerUrl": "ws://127.0.0.1:9444/devtools/page/page-1",
+                            }
+                        ],
+                    }
+                ],
+                app_uia_probe={
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "semantic_composer_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "matched_windows": [
+                        {
+                            "process_name": "claude.exe",
+                            "pid": 77064,
+                            "window_title": "Claude",
+                            "hwnd": 138024,
+                        }
+                    ],
+                },
+            )
+
+        report = run_agent_app_real_no_loss(
+            agents=("claude desktop",),
+            project_name="openwukong",
+            task_name="desktop-message",
+            probe_runner=fake_probe_runner,
+            debugger_urls=("http://127.0.0.1:9444",),
+        )
+        data = report.to_dict()
+
+        self.assertEqual(calls[0]["debugger_urls"], ("http://127.0.0.1:9444",))
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["cases"][0]["status"], "native_connector_ready")
+
     def test_passes_explicit_agent_native_bridge_urls_to_native_probe(self):
         calls = []
 

@@ -11,6 +11,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Protocol
+from urllib.parse import urlsplit
 
 from openwukong.control.app_resolution import WindowsAppResolver, lower_text
 from openwukong.control.agent_native_bridge import (
@@ -37,6 +38,7 @@ class NativeProcessSnapshot:
     process_name: str
     executable_path: str = ""
     command_line: str = ""
+    listening_ports: tuple[int, ...] = ()
 
     def to_dict(self) -> dict:
         return {
@@ -44,6 +46,7 @@ class NativeProcessSnapshot:
             "process_name": self.process_name,
             "executable_path": self.executable_path,
             "command_line": self.command_line,
+            "listening_ports": [int(port) for port in self.listening_ports],
         }
 
 
@@ -220,6 +223,7 @@ def run_agent_native_connector_probe(
     resolver: WindowsAppResolver | None = None,
     process_provider: Callable[[], Iterable[NativeProcessSnapshot]] | None = None,
     http_probe: NativeConnectorHTTPProbe | None = None,
+    debugger_urls: Iterable[str] = (),
     ide_bridge_urls: Iterable[str] = (),
     ide_bridge_probe: Callable[..., object] | None = None,
     agent_native_bridge_urls: Iterable[str] = (),
@@ -247,8 +251,15 @@ def run_agent_native_connector_probe(
     provider = process_provider or list_native_processes
     processes = tuple(provider())
     matching = tuple(_matching_agent_processes(processes, app_probe))
-    endpoints = _discover_debugger_endpoints(
+    debugger_endpoints = _discover_debugger_endpoints(
         matching,
+        http_probe=http_probe or RequestsNativeConnectorHTTPProbe(),
+        timeout=max(0.05, float(request_timeout)),
+    )
+    explicit_debugger_endpoints = _discover_explicit_debugger_endpoints(
+        debugger_urls,
+        matching_processes=matching,
+        known_ports={endpoint.port for endpoint in debugger_endpoints},
         http_probe=http_probe or RequestsNativeConnectorHTTPProbe(),
         timeout=max(0.05, float(request_timeout)),
     )
@@ -282,7 +293,12 @@ def run_agent_native_connector_probe(
         project_name=str(project_name or "").strip(),
         task_name=str(task_name or "").strip(),
         app_uia_probe=app_probe,
-        endpoints=tuple(endpoints) + tuple(ide_endpoints) + tuple(agent_native_endpoints),
+        endpoints=(
+            tuple(debugger_endpoints)
+            + tuple(explicit_debugger_endpoints)
+            + tuple(ide_endpoints)
+            + tuple(agent_native_endpoints)
+        ),
         process_count=len(processes),
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
@@ -305,18 +321,21 @@ def list_native_processes() -> tuple[NativeProcessSnapshot, ...]:
     except Exception:
         return ()
 
+    listening_ports_by_pid = _listening_ports_by_pid(psutil)
     snapshots: list[NativeProcessSnapshot] = []
     for proc in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
         try:
             info = proc.info
+            pid = int(info.get("pid", 0) or 0)
             cmdline = info.get("cmdline") or ()
             command_text = _join_command_line(cmdline)
             snapshots.append(
                 NativeProcessSnapshot(
-                    pid=int(info.get("pid", 0) or 0),
+                    pid=pid,
                     process_name=str(info.get("name", "") or ""),
                     executable_path=str(info.get("exe", "") or ""),
                     command_line=command_text,
+                    listening_ports=tuple(listening_ports_by_pid.get(pid, ())),
                 )
             )
         except Exception:
@@ -368,6 +387,12 @@ def main(
     parser.add_argument("--max-elements", type=int, default=1200)
     parser.add_argument("--request-timeout", type=float, default=0.2)
     parser.add_argument(
+        "--debugger-url",
+        action="append",
+        default=[],
+        help="Explicit local DevTools debugger URL to probe read-only after validating port ownership by the target app process.",
+    )
+    parser.add_argument(
         "--ide-bridge-url",
         action="append",
         default=[],
@@ -401,6 +426,7 @@ def main(
         resolver=resolver,
         process_provider=process_provider,
         http_probe=http_probe,
+        debugger_urls=tuple(args.debugger_url or ()),
         ide_bridge_urls=tuple(args.ide_bridge_url or ()),
         ide_bridge_probe=ide_bridge_probe,
         agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),
@@ -475,6 +501,48 @@ def _discover_debugger_endpoints(
                     timeout=timeout,
                 )
             )
+    return tuple(endpoints)
+
+
+def _discover_explicit_debugger_endpoints(
+    debugger_urls: Iterable[str],
+    *,
+    matching_processes: Iterable[NativeProcessSnapshot],
+    known_ports: set[int],
+    http_probe: NativeConnectorHTTPProbe,
+    timeout: float,
+) -> tuple[NativeConnectorEndpoint, ...]:
+    endpoints: list[NativeConnectorEndpoint] = []
+    seen_ports = set(int(port) for port in known_ports if int(port or 0) > 0)
+    processes = tuple(matching_processes or ())
+    for raw_url in debugger_urls or ():
+        base = _normalize_local_debugger_url(raw_url)
+        if not base:
+            continue
+        port = _port_from_url(base)
+        if port <= 0 or port in seen_ports:
+            continue
+        seen_ports.add(port)
+        process = _process_listening_on_port(processes, port)
+        if process is None:
+            endpoints.append(
+                NativeConnectorEndpoint(
+                    debugger_url=base,
+                    port=port,
+                    source="explicit-devtools-url",
+                    error="devtools_endpoint_not_bound_to_agent_process",
+                )
+            )
+            continue
+        endpoints.append(
+            _probe_debugger_endpoint(
+                port,
+                process=process,
+                source="explicit-devtools-url",
+                http_probe=http_probe,
+                timeout=timeout,
+            )
+        )
     return tuple(endpoints)
 
 
@@ -882,6 +950,69 @@ def _port_from_url(url: str) -> int:
         return 0
     port = int(match.group(1))
     return port if 0 < port <= 65535 else 0
+
+
+def _normalize_local_debugger_url(value: object) -> str:
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return ""
+    try:
+        parsed = urlsplit(text)
+    except Exception:
+        return ""
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    host = str(parsed.hostname or "").strip().casefold()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    if not port or not (0 < int(port) <= 65535):
+        return ""
+    path = str(parsed.path or "").strip()
+    if path and path != "/":
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _process_listening_on_port(
+    processes: Iterable[NativeProcessSnapshot],
+    port: int,
+) -> NativeProcessSnapshot | None:
+    expected = int(port or 0)
+    if expected <= 0:
+        return None
+    for process in processes or ():
+        ports = _positive_int_set(process.listening_ports)
+        if expected in ports:
+            return process
+    return None
+
+
+def _listening_ports_by_pid(psutil_module) -> dict[int, tuple[int, ...]]:
+    try:
+        connections = psutil_module.net_connections(kind="tcp")
+    except Exception:
+        return {}
+    listen_status = str(getattr(psutil_module, "CONN_LISTEN", "LISTEN") or "LISTEN")
+    values: dict[int, list[int]] = {}
+    for connection in connections:
+        try:
+            pid = int(getattr(connection, "pid", 0) or 0)
+            status = str(getattr(connection, "status", "") or "")
+            if pid <= 0 or status != listen_status:
+                continue
+            laddr = getattr(connection, "laddr", None)
+            port = int(getattr(laddr, "port", 0) or (laddr[1] if laddr else 0) or 0)
+            if 0 < port <= 65535:
+                values.setdefault(pid, [])
+                if port not in values[pid]:
+                    values[pid].append(port)
+        except Exception:
+            continue
+    return {pid: tuple(ports) for pid, ports in values.items()}
 
 
 def _extract_remote_debugging_ports(command_line: str) -> tuple[int, ...]:

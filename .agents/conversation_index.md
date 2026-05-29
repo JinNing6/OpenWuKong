@@ -6126,3 +6126,52 @@ When a new conversation starts in this repo:
       `cursor_background_chat` with `gated_native_endpoint_missing`
     - R30 still reports `claude_cli_background_task=auth_required` because
       the local Claude CLI returned `Not logged in - Please run /login`
+- 2026-05-29 added explicit local DevTools URL probing with process-port
+  ownership validation for agent app surfaces:
+  - implementation:
+    - `NativeProcessSnapshot` now records `listening_ports`
+    - `list_native_processes` collects TCP listening ports per PID through
+      `psutil.net_connections(kind="tcp")`
+    - `agent_native_connector_probe` now accepts explicit local
+      `debugger_urls` / `--debugger-url`, but marks them ready only when the
+      URL is local loopback and the port belongs to a matching target app
+      process
+    - unbound explicit endpoints are recorded as
+      `devtools_endpoint_not_bound_to_agent_process` and are not probed or
+      treated as ready
+    - `agent_app_real_no_loss` and `major_real_no_loss` now forward explicit
+      debugger URLs into the same safe probe path
+  - official-doc basis:
+    - Chrome DevTools Protocol `Target` docs were checked for DevTools target
+      discovery shape
+    - psutil `net_connections` docs were checked for process-port ownership
+      discovery
+  - validation:
+    - red tests first:
+      `test_reports_ready_from_explicit_debugger_url_owned_by_matching_process_port`,
+      `test_explicit_debugger_url_is_not_ready_without_matching_process_port_binding`,
+      `test_passes_explicit_debugger_urls_to_native_probe`, and
+      `test_runner_passes_explicit_debugger_urls_to_agent_app_runner` failed
+      before the new API existed
+    - targeted green:
+      `python -m unittest tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_reports_ready_from_explicit_debugger_url_owned_by_matching_process_port tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_explicit_debugger_url_is_not_ready_without_matching_process_port_binding tests.test_agent_app_real_no_loss.AgentAppRealNoLossTests.test_passes_explicit_debugger_urls_to_native_probe tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_passes_explicit_debugger_urls_to_agent_app_runner`: `4 tests OK`
+    - focused regression:
+      `python -m unittest tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_agent_app_bridge`: `60 tests OK`
+    - full suite:
+      `python -m unittest discover tests`: `502 tests OK`
+    - compile/check:
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+    - R31 unbound explicit URL smoke:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r31-explicit-debugger-url-unbound --output logs\runtime\major-real-no-loss-r31-explicit-debugger-url-unbound\report.json --json --debugger-url http://127.0.0.1:9444`
+      produced `safe_run_ok=true`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `automation_focus_safe=true`, and each app surface endpoint reported
+      `devtools_endpoint_not_bound_to_agent_process`
+  - current conclusion:
+    - users or installers can now expose/declare a local DevTools endpoint
+      without relying on command-line flag parsing, while the safety gate still
+      refuses endpoints that are not owned by the matched desktop app process
+    - this directly supports real Codex App / Claude Desktop / Cursor app
+      background control once the app is launched with an owned local DevTools
+      port or a companion bridge registers one
