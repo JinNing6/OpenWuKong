@@ -55,6 +55,7 @@ class AgentAppBridgeRequest:
                 int(self.app_uia_probe.get("semantic_composer_count", 0) or 0) > 0
                 or _endpoint_supports_ide_chat(self.endpoint, self.agent_id)
                 or _endpoint_supports_agent_native_bridge(self.endpoint, self.agent_id)
+                or _endpoint_supports_app_devtools(self.endpoint, self.agent_id)
             )
         )
         if uia_target_ready:
@@ -346,7 +347,11 @@ class AgentAppBridgeCdpAdapter:
                 elapsed_ms=(time.perf_counter() - started) * 1000,
             )
 
-        target = _select_devtools_target(request.endpoint)
+        target = _select_devtools_target(
+            request.endpoint,
+            project_name=request.project_name,
+            task_name=request.task_name,
+        )
         if target is None:
             return AgentAppBridgeSendReport(
                 request=request,
@@ -860,7 +865,12 @@ def _endpoint_summary(endpoint: dict) -> dict:
     return summary
 
 
-def _select_devtools_target(endpoint: dict) -> BrowserDevToolsTarget | None:
+def _select_devtools_target(
+    endpoint: dict,
+    *,
+    project_name: str = "",
+    task_name: str = "",
+) -> BrowserDevToolsTarget | None:
     targets = endpoint.get("targets")
     if not isinstance(targets, list):
         return None
@@ -876,10 +886,48 @@ def _select_devtools_target(endpoint: dict) -> BrowserDevToolsTarget | None:
             candidates.append(target)
     if not candidates:
         return None
+    scored = sorted(
+        (
+            (
+                _devtools_target_match_score(
+                    target,
+                    project_name=project_name,
+                    task_name=task_name,
+                ),
+                index,
+                target,
+            )
+            for index, target in enumerate(candidates)
+        ),
+        key=lambda item: (-item[0], item[1]),
+    )
+    if scored and scored[0][0] > 0:
+        return scored[0][2]
     for target in candidates:
         if (target.type or "").lower() in {"page", "webview"}:
             return target
     return candidates[0]
+
+
+def _devtools_target_match_score(
+    target: BrowserDevToolsTarget,
+    *,
+    project_name: str = "",
+    task_name: str = "",
+) -> int:
+    haystack = " ".join(
+        str(item or "").strip().lower()
+        for item in (target.title, target.url)
+        if str(item or "").strip()
+    )
+    score = 0
+    task = str(task_name or "").strip().lower()
+    project = str(project_name or "").strip().lower()
+    if task and task in haystack:
+        score += 20
+    if project and project in haystack:
+        score += 10
+    return score
 
 
 def _remote_object_value(result: dict) -> dict:
@@ -979,6 +1027,10 @@ def _endpoint_is_agent_native_bridge(endpoint: dict) -> bool:
     return str(endpoint.get("endpoint_type", "") or "").strip() == "agent_native_bridge"
 
 
+def _endpoint_is_devtools(endpoint: dict) -> bool:
+    return str(endpoint.get("endpoint_type", "") or "devtools").strip() == "devtools"
+
+
 def _endpoint_supports_ide_chat(endpoint: dict, agent_id: str = "") -> bool:
     if not _endpoint_is_ide_bridge(endpoint):
         return False
@@ -1028,6 +1080,45 @@ def _endpoint_supports_agent_native_bridge(endpoint: dict, agent_id: str = "") -
         if metadata_agent and metadata_agent != normalized_agent:
             return False
     return bool(str(endpoint.get("send_command_id", "") or "").strip() == AGENT_NATIVE_SEND_ACTION)
+
+
+def _endpoint_supports_app_devtools(endpoint: dict, agent_id: str = "") -> bool:
+    if not _endpoint_is_devtools(endpoint):
+        return False
+    if not bool(endpoint.get("ready", False)):
+        return False
+    if not str(endpoint.get("debugger_url", "") or "").strip():
+        return False
+    if _select_devtools_target(endpoint) is None:
+        return False
+    return _endpoint_devtools_app_binding_matches(endpoint, agent_id)
+
+
+def _endpoint_devtools_app_binding_matches(endpoint: dict, agent_id: str) -> bool:
+    expected_names = {
+        _normalize_process_name(name)
+        for name in _agent_process_names(agent_id)
+        if _normalize_process_name(name)
+    }
+    candidates: list[dict] = []
+    process = endpoint.get("process")
+    if isinstance(process, dict):
+        candidates.append(process)
+    metadata = endpoint.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("app_binding", "desktop_app_binding", "target_app"):
+            binding = metadata.get(key)
+            if isinstance(binding, dict):
+                candidates.append(binding)
+    for binding in candidates:
+        actual_name = _binding_process_name(binding)
+        if expected_names:
+            if actual_name in expected_names:
+                return True
+            continue
+        if actual_name:
+            return True
+    return False
 
 
 def _endpoint_agent_native_app_binding_matches(metadata: dict, agent_id: str) -> bool:

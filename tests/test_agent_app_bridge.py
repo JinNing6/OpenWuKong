@@ -415,6 +415,82 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertEqual(devtools.evaluate_calls[0][1].target_id, "page-1")
         self.assertIn("Summarize the active task.", devtools.evaluate_calls[0][2])
 
+    def test_bound_devtools_endpoint_is_ready_without_uia_semantic_composer(self):
+        probe = _ready_probe()
+        probe["app_uia_probe"]["composer_candidate_count"] = 0
+        probe["app_uia_probe"]["semantic_composer_count"] = 0
+        probe["endpoints"][0]["process"] = {
+            "process_name": "claude.exe",
+            "pid": 77064,
+            "executable_path": "C:/Program Files/WindowsApps/Claude/app/claude.exe",
+        }
+        request = build_agent_app_bridge_request(
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="bridge-contract",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: bridge-contract\n\nMessage:\nSummarize the active task.",
+            selected_transport={"transport_id": "claude-desktop-shell"},
+            app_surface_probe=probe,
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"], data)
+        self.assertTrue(data["request"]["target_ready"])
+        self.assertTrue(data["request"]["native_endpoint_ready"])
+
+    def test_cdp_adapter_prefers_target_matching_project_or_task(self):
+        devtools = _FakeDevToolsClient(
+            {
+                "composerFound": True,
+                "messageSet": True,
+                "submitAttempted": True,
+                "submitVerified": True,
+                "readbackText": "OPENWUKONG_ACCEPTANCE: PASS\nTarget matched.",
+            }
+        )
+        probe = _ready_probe()
+        probe["endpoints"][0]["targets"] = [
+            {
+                "target_id": "page-settings",
+                "id": "page-settings",
+                "type": "page",
+                "title": "Settings",
+                "url": "app://claude/settings.html",
+                "ready": True,
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/page-settings",
+            },
+            {
+                "target_id": "page-openwukong",
+                "id": "page-openwukong",
+                "type": "page",
+                "title": "openwukong - bridge-contract",
+                "url": "app://claude/chat/openwukong/bridge-contract",
+                "ready": True,
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/page-openwukong",
+            },
+        ]
+        request = build_agent_app_bridge_request(
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="bridge-contract",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: bridge-contract\n\nMessage:\nSummarize the active task.",
+            selected_transport={"transport_id": "claude-desktop-shell"},
+            app_surface_probe=probe,
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+        )
+
+        report = AgentAppBridgeCdpAdapter(devtools_client=devtools).send(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(devtools.evaluate_calls[0][1].target_id, "page-openwukong")
+
     def test_cdp_adapter_does_not_send_when_request_not_ready(self):
         devtools = _FakeDevToolsClient({})
         request = build_agent_app_bridge_request(

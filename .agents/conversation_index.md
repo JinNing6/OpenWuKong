@@ -6051,3 +6051,59 @@ When a new conversation starts in this repo:
     - remaining true gaps are still app-side endpoints and product-specific
       connectors: WeChat native bridge, Codex App bridge installation, Claude
       Desktop bridge installation, and auth/permission for real agent execution
+- 2026-05-29 tightened direct DevTools app-bridge routing for Electron-style
+  agent apps:
+  - implementation:
+    - `AgentAppBridgeRequest` now treats a bound local DevTools endpoint as a
+      valid native app control surface even when UIA does not expose a semantic
+      composer, as long as the UIA probe has already matched the target app
+      surface and the endpoint is bound to the expected desktop process
+    - direct CDP sends now score DevTools page/webview targets by task name and
+      project name before falling back to the first page/webview, reducing the
+      risk of sending to an unrelated settings/about target
+    - the DevTools route still records zero `control_attempts` and zero
+      `window_input_attempts`; send attempts are still gated behind the
+      explicit `allow_app_bridge_send` path
+  - official-doc basis:
+    - Chrome DevTools Protocol `Target` docs were checked for target discovery
+      semantics and target IDs
+    - Chrome DevTools Protocol `Runtime.evaluate` docs were checked for the
+      existing execution command used by the CDP sender
+  - validation:
+    - red tests first:
+      `test_bound_devtools_endpoint_is_ready_without_uia_semantic_composer`
+      failed with `app_bridge_target_not_ready` before implementation
+    - red tests first:
+      `test_cdp_adapter_prefers_target_matching_project_or_task` failed
+      because CDP selected `page-settings` instead of `page-openwukong`
+    - targeted green:
+      `python -m unittest tests.test_agent_app_bridge.AgentAppBridgeTests.test_bound_devtools_endpoint_is_ready_without_uia_semantic_composer tests.test_agent_app_bridge.AgentAppBridgeTests.test_cdp_adapter_prefers_target_matching_project_or_task`: `2 tests OK`
+    - focused regression:
+      `python -m unittest tests.test_agent_app_bridge tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss tests.test_major_real_no_loss`: `56 tests OK`
+    - full suite:
+      `python -m unittest discover tests`: `498 tests OK`
+    - compile/check:
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+    - owned local DevTools fixture:
+      `python -m openwukong.evaluation.agent_app_bridge_fixture_smoke --json`
+      produced `ok=true`, `decision=agent_app_bridge_fixture_smoke_verified`,
+      `Runtime.evaluate` request count `1`, `desktop_control_attempts=0`, and
+      `window_input_attempts=0`
+    - real no-loss smoke without bridge/send opt-in:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r29-bound-devtools-target-selection-no-url --output logs\runtime\major-real-no-loss-r29-bound-devtools-target-selection-no-url\report.json --json`
+      produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `agent_command_attempts=0`,
+      `background_screenshot_success_count=6/6`,
+      `automation_focus_risk_attempts=0`, and
+      `automation_focus_safe=true`
+  - current conclusion:
+    - if Codex App / Claude Desktop / Cursor exposes a local DevTools endpoint
+      on the actual desktop process, OpenWukong can now move from
+      `gated_native_endpoint_missing` to a precise CDP dry-run route even when
+      Windows accessibility does not expose the chat input
+    - the current live machine still did not expose those local app endpoints
+      during R29, so real app chat remains gated rather than falling back to
+      foreground keyboard, mouse, or clipboard
