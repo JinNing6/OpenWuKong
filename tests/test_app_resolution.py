@@ -214,11 +214,52 @@ class AppResolutionModuleTests(unittest.TestCase):
             ]
         )
 
-        for app_name in ("openai codex", "codex cli", "codex app"):
+        for app_name in ("openai codex", "codex cli"):
             with self.subTest(app_name=app_name):
                 report = WindowsAppResolver(candidate_providers=(provider,)).resolve(app_name)
                 self.assertTrue(report.ok)
                 self.assertEqual(report.identity.app_id, "codex")
+
+    def test_codex_app_alias_requires_desktop_surface_not_cli_path(self):
+        cli_provider = StaticAppCandidateProvider(
+            [
+                AppResolutionCandidate(
+                    source="path",
+                    display_name="codex",
+                    executable_name="codex.cmd",
+                    path="C:/Users/me/AppData/Roaming/npm/codex.cmd",
+                ),
+            ]
+        )
+        desktop_provider = StaticAppCandidateProvider(
+            [
+                AppResolutionCandidate(
+                    source="path",
+                    display_name="codex",
+                    executable_name="codex.cmd",
+                    path="C:/Users/me/AppData/Roaming/npm/codex.cmd",
+                ),
+                AppResolutionCandidate(
+                    source="running-process",
+                    display_name="Codex.exe",
+                    process_name="Codex.exe",
+                    executable_name="Codex.exe",
+                    path="C:/Program Files/WindowsApps/OpenAI.Codex/app/Codex.exe",
+                    pid=3001,
+                ),
+            ]
+        )
+
+        cli_only = WindowsAppResolver(candidate_providers=(cli_provider,)).resolve("codex app")
+        with_desktop = WindowsAppResolver(candidate_providers=(desktop_provider,)).resolve("codex app")
+
+        self.assertFalse(cli_only.ok)
+        self.assertEqual(cli_only.error, "app_not_found")
+        self.assertTrue(with_desktop.ok)
+        self.assertEqual(
+            with_desktop.path,
+            "C:/Program Files/WindowsApps/OpenAI.Codex/app/Codex.exe",
+        )
 
     def test_claude_resolution_supports_claude_code_cli_without_model_name_false_positive(self):
         provider = StaticAppCandidateProvider(
@@ -322,11 +363,29 @@ class AppResolutionModuleTests(unittest.TestCase):
             ]
         )
 
-        for app_name in ("claude code", "anthropic claude", "claude cli", "claude app", "claude desktop app"):
+        for app_name in ("claude code", "anthropic claude", "claude cli"):
             with self.subTest(app_name=app_name):
                 report = WindowsAppResolver(candidate_providers=(provider,)).resolve(app_name)
                 self.assertTrue(report.ok)
                 self.assertEqual(report.identity.app_id, "claude")
+
+    def test_claude_app_alias_requires_desktop_surface_not_cli_path(self):
+        provider = StaticAppCandidateProvider(
+            [
+                AppResolutionCandidate(
+                    source="path",
+                    display_name="claude",
+                    executable_name="claude.cmd",
+                    path="C:/Users/me/AppData/Roaming/npm/claude.cmd",
+                ),
+            ]
+        )
+
+        report = WindowsAppResolver(candidate_providers=(provider,)).resolve("claude app")
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.error, "app_not_found")
+
 
     def test_claude_desktop_alias_prefers_desktop_when_cli_process_is_transient(self):
         provider = StaticAppCandidateProvider(

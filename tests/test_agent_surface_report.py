@@ -284,7 +284,11 @@ class AgentSurfaceReportTests(unittest.TestCase):
         surface = data["agents"][0]
 
         self.assertFalse(surface["ok"])
-        self.assertEqual(surface["decision"], "agent_transport_not_ready")
+        self.assertEqual(surface["decision"], "agent_app_not_found")
+        self.assertEqual(
+            surface["app_resolution"]["resolution"]["error"],
+            "app_not_found",
+        )
         self.assertEqual(surface["transports"], [])
 
     def test_main_writes_json_without_control_attempts(self):

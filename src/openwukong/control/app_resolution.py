@@ -802,7 +802,7 @@ def candidate_matches_identity(candidate: AppResolutionCandidate, identity: AppI
 
 
 def requested_agent_surface_kind(app_name: str, identity: AppIdentity) -> str:
-    if identity.app_id not in {"claude"}:
+    if identity.app_id not in {"claude", "codex"}:
         return ""
     normalized = " ".join(str(app_name or "").replace("-", " ").lower().split())
     tokens = set(normalized.split())
@@ -812,6 +812,32 @@ def requested_agent_surface_kind(app_name: str, identity: AppIdentity) -> str:
         return "desktop"
     if identity.app_id == "claude" and "code" in tokens:
         return "cli"
+    return ""
+
+
+def codex_candidate_surface_kind(candidate: AppResolutionCandidate) -> str:
+    path_text = _normalized_candidate_path(candidate.path)
+    exe = _candidate_file_name(candidate)
+    exe_lower = lower_text(exe)
+    name = normalize_app_name(candidate.display_name)
+    if exe_lower in {"codex.cmd", "codex.bat", "codex"}:
+        return "cli"
+    if exe_lower == "codex.exe" and (
+        "/.local/bin/" in path_text
+        or "/appdata/roaming/npm/" in path_text
+        or "/extensions/" in path_text
+        or "/resources/" in path_text
+    ):
+        return "cli"
+    if exe == "Codex.exe":
+        return "desktop"
+    if candidate.source in {"start-apps", "start-menu"} and name in {
+        "codex",
+        "openaicodex",
+        "codexapp",
+        "codexdesktop",
+    }:
+        return "desktop"
     return ""
 
 
@@ -848,14 +874,19 @@ def _prefer_requested_agent_surface_candidates(
     candidates: tuple[AppResolutionCandidate, ...],
 ) -> tuple[AppResolutionCandidate, ...]:
     requested_surface = requested_agent_surface_kind(app_name, identity)
+    if identity.app_id == "codex" and requested_surface:
+        return tuple(
+            candidate
+            for candidate in candidates
+            if codex_candidate_surface_kind(candidate) == requested_surface
+        )
     if identity.app_id == "claude" and requested_surface:
         preferred = tuple(
             candidate
             for candidate in candidates
             if claude_candidate_surface_kind(candidate) == requested_surface
         )
-        if preferred:
-            return preferred
+        return preferred
     return candidates
 
 
@@ -1065,6 +1096,7 @@ __all__ = [
     "candidate_names",
     "candidate_score",
     "candidate_unique_value",
+    "codex_candidate_surface_kind",
     "dedupe_candidates",
     "default_app_identities",
     "default_start_menu_roots",

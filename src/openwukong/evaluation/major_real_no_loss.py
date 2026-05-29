@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from openwukong.control.app_resolution import WindowsAppResolver
 from openwukong.control.session_readiness_plan import (
     SessionReadinessPlanOptions,
     build_session_readiness_plan,
@@ -48,6 +49,7 @@ AgentAppRunner = Callable[..., object]
 AgentCliRunner = Callable[..., object]
 OwnedIdeBridgeHelperRunner = Callable[..., object]
 AgentNativeCdpBridgeHelperRunner = Callable[..., object]
+AgentAppDevToolsResolver = object
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,6 +89,7 @@ class MajorScenarioRealNoLossReport:
     agent_app_report: dict
     agent_cli_report: dict
     requirements: tuple[MajorRequirement, ...]
+    agent_app_devtools_resolution_report: dict = dataclasses.field(default_factory=dict)
     elapsed_ms: float = 0.0
 
     @property
@@ -225,6 +228,7 @@ class MajorScenarioRealNoLossReport:
         return _build_agent_app_endpoint_acceptance(
             self.agent_app_report,
             self.agent_native_cdp_bridge_helper_report,
+            self.agent_app_devtools_resolution_report,
         )
 
     @property
@@ -299,6 +303,9 @@ class MajorScenarioRealNoLossReport:
             "goal_complete": self.goal_complete,
             "safe_run_ok": self.safe_run_ok,
             "agent_app_endpoint_acceptance": self.agent_app_endpoint_acceptance,
+            "agent_app_devtools_resolution": dict(
+                self.agent_app_devtools_resolution_report
+            ),
             "unmet_requirements": list(self.unmet_requirements),
             "requirements": [
                 requirement.to_dict() for requirement in self.requirements
@@ -312,6 +319,9 @@ class MajorScenarioRealNoLossReport:
                     self.agent_native_cdp_bridge_helper_report
                 ),
                 "agent_app": dict(self.agent_app_report),
+                "agent_app_devtools_resolution": dict(
+                    self.agent_app_devtools_resolution_report
+                ),
                 "agent_cli": dict(self.agent_cli_report),
             },
             "elapsed_ms": round(self.elapsed_ms, 3),
@@ -382,6 +392,7 @@ def run_major_scenario_real_no_loss(
     owned_ide_bridge_helper_runner: OwnedIdeBridgeHelperRunner | None = None,
     agent_native_cdp_bridge_helper_runner: AgentNativeCdpBridgeHelperRunner | None = None,
     agent_app_runner: AgentAppRunner | None = None,
+    agent_app_devtools_resolver: AgentAppDevToolsResolver | None = None,
     agent_cli_runner: AgentCliRunner | None = None,
 ) -> MajorScenarioRealNoLossReport:
     started = time.perf_counter()
@@ -421,6 +432,7 @@ def run_major_scenario_real_no_loss(
     native_helper = _disabled_agent_native_cdp_bridge_helper_report()
     app: dict = {}
     cli: dict = {}
+    app_devtools_resolution: dict = {}
     try:
         if allow_owned_ide_bridge_helper_launch:
             helper = _report_to_dict(
@@ -519,6 +531,10 @@ def run_major_scenario_real_no_loss(
                 timeout_sec=agent_cli_timeout_sec,
             )
         )
+        app_devtools_resolution = _build_agent_app_devtools_resolution_report(
+            tuple(agent_apps),
+            resolver=agent_app_devtools_resolver,
+        )
     finally:
         native_helper = _stop_agent_native_cdp_bridge_helper_if_needed(native_helper)
         helper = _stop_owned_ide_bridge_helper_if_needed(helper)
@@ -531,6 +547,7 @@ def run_major_scenario_real_no_loss(
         agent_native_cdp_bridge_helper_report=native_helper,
         agent_app_report=app,
         agent_cli_report=cli,
+        agent_app_devtools_resolution_report=app_devtools_resolution,
         requirements=_build_requirements(primary, app, cli),
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
@@ -783,9 +800,14 @@ def _app_requirement(requirement_id: str, surface: str, case: dict) -> MajorRequ
 def _build_agent_app_endpoint_acceptance(
     app_report: dict,
     native_helper_report: dict,
+    app_devtools_resolution_report: dict | None = None,
 ) -> dict:
     cases = [
-        _build_agent_app_endpoint_acceptance_case(case, native_helper_report)
+        _build_agent_app_endpoint_acceptance_case(
+            case,
+            native_helper_report,
+            app_devtools_resolution_report or {},
+        )
         for case in app_report.get("cases", []) or []
         if isinstance(case, dict)
     ]
@@ -815,6 +837,7 @@ def _build_agent_app_endpoint_acceptance(
 def _build_agent_app_endpoint_acceptance_case(
     case: dict,
     native_helper_report: dict,
+    app_devtools_resolution_report: dict,
 ) -> dict:
     agent = str(case.get("agent", "") or "").strip()
     defaults = _agent_app_endpoint_defaults(agent)
@@ -847,6 +870,11 @@ def _build_agent_app_endpoint_acceptance_case(
         }
     )
     helper_status = _agent_native_helper_status(native_helper_report, agent, agent_id)
+    devtools_resolution = _agent_app_devtools_resolution_status(
+        app_devtools_resolution_report,
+        agent=agent,
+        agent_id=agent_id,
+    )
     return {
         "agent": agent,
         "agent_id": agent_id,
@@ -891,9 +919,98 @@ def _build_agent_app_endpoint_acceptance_case(
             agent=agent or defaults["agent"],
             agent_id=agent_id or defaults["agent_id"],
             defaults=defaults,
+            resolution=devtools_resolution,
         ),
         "helper_status": helper_status,
     }
+
+
+def _build_agent_app_devtools_resolution_report(
+    agents: Iterable[str],
+    *,
+    resolver: AgentAppDevToolsResolver | None = None,
+) -> dict:
+    cases = [
+        _build_agent_app_devtools_resolution_case(agent, resolver=resolver)
+        for agent in agents or ()
+        if str(agent or "").strip()
+    ]
+    return {
+        "mode": "agent-app-devtools-resolution",
+        "safety_mode": "read_only",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "total_cases": len(cases),
+        "resolved_cases": sum(1 for case in cases if case.get("status") == "resolved"),
+        "executable_ready_cases": sum(
+            1 for case in cases if bool(case.get("executable_ready", False))
+        ),
+        "cases": cases,
+    }
+
+
+def _build_agent_app_devtools_resolution_case(
+    agent: str,
+    *,
+    resolver: AgentAppDevToolsResolver | None,
+) -> dict:
+    defaults = _agent_app_endpoint_defaults(agent)
+    active_resolver = resolver or WindowsAppResolver()
+    try:
+        resolve = getattr(active_resolver, "resolve", None)
+        raw_resolution = resolve(agent) if callable(resolve) else active_resolver(agent)
+        resolution = _report_to_dict(raw_resolution)
+    except Exception as exc:
+        resolution = {
+            "mode": "app-resolution",
+            "ok": False,
+            "decision": "resolution_failed",
+            "error": str(exc) or exc.__class__.__name__,
+        }
+    executable_path = _launchable_agent_app_executable_path(resolution)
+    if executable_path:
+        status = "resolved"
+    elif bool(resolution.get("ok", False)):
+        status = "resolved_no_executable_path"
+    else:
+        status = str(
+            resolution.get("error", "") or resolution.get("decision", "") or "not_found"
+        )
+    return {
+        "agent": str(agent or "").strip() or defaults["agent"],
+        "agent_id": defaults["agent_id"],
+        "status": status,
+        "executable_ready": bool(executable_path),
+        "executable_path": executable_path,
+        "app_resolution": resolution,
+    }
+
+
+def _launchable_agent_app_executable_path(resolution: dict) -> str:
+    path = str(resolution.get("path", "") or "").strip()
+    source = str(resolution.get("source", "") or "").strip()
+    if not path or source in {"start-menu", "start-apps"}:
+        return ""
+    if Path(path).suffix.lower() != ".exe":
+        return ""
+    return path
+
+
+def _agent_app_devtools_resolution_status(
+    report: dict,
+    *,
+    agent: str,
+    agent_id: str,
+) -> dict:
+    for item in report.get("cases", []) or []:
+        if not isinstance(item, dict):
+            continue
+        item_agent_id = str(item.get("agent_id", "") or "").strip().lower()
+        item_agent = str(item.get("agent", "") or "").strip().lower()
+        if item_agent_id == str(agent_id or "").strip().lower() or item_agent == str(agent or "").strip().lower():
+            return dict(item)
+    return {}
 
 
 def _agent_app_endpoint_defaults(agent: str) -> dict:
@@ -928,16 +1045,23 @@ def _owned_devtools_launch_plan_template(
     agent: str,
     agent_id: str,
     defaults: dict,
+    resolution: dict | None = None,
 ) -> dict:
     port = int(defaults.get("devtools_port", 19555) or 19555)
     process_name = str(defaults.get("process_name", "") or "").strip()
     user_data_dir = f"logs/runtime/agent-app-devtools/{agent_id or 'agent'}/profile"
-    executable = f"<path-to-{process_name or 'agent-app.exe'}>"
+    resolved = dict(resolution or {})
+    executable = str(resolved.get("executable_path", "") or "").strip()
+    executable_ready = bool(resolved.get("executable_ready", False) and executable)
+    if not executable:
+        executable = f"<path-to-{process_name or 'agent-app.exe'}>"
     return {
         "route_id": "agent-app-devtools-owned",
         "agent": agent,
         "agent_id": agent_id,
         "executable": executable,
+        "executable_ready": executable_ready,
+        "executable_resolution_status": str(resolved.get("status", "") or "not_resolved"),
         "debug_port": port,
         "user_data_dir": user_data_dir,
         "readiness_url": f"http://127.0.0.1:{port}",

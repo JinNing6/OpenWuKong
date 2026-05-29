@@ -25,7 +25,14 @@ class _FakeMainReport(_FakeReport):
     safe_run_ok = True
 
 
-def _major_report(primary=None, app=None, cli=None, helper=None, native_helper=None):
+def _major_report(
+    primary=None,
+    app=None,
+    cli=None,
+    helper=None,
+    native_helper=None,
+    app_devtools_resolution=None,
+):
     return MajorScenarioRealNoLossReport(
         output_root="",
         artifact_path="",
@@ -34,6 +41,7 @@ def _major_report(primary=None, app=None, cli=None, helper=None, native_helper=N
         agent_native_cdp_bridge_helper_report=dict(native_helper or {}),
         agent_app_report=dict(app or {}),
         agent_cli_report=dict(cli or {}),
+        agent_app_devtools_resolution_report=dict(app_devtools_resolution or {}),
         requirements=(),
     )
 
@@ -974,9 +982,34 @@ class MajorRealNoLossTests(unittest.TestCase):
                     }
                 ],
             },
+            app_devtools_resolution={
+                "mode": "agent-app-devtools-resolution",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "cases": [
+                    {
+                        "agent": "codex app",
+                        "agent_id": "codex",
+                        "status": "resolved",
+                        "executable_ready": True,
+                        "executable_path": "C:/Program Files/WindowsApps/OpenAI.Codex/app/Codex.exe",
+                    },
+                    {
+                        "agent": "claude desktop",
+                        "agent_id": "claude",
+                        "status": "resolved_no_executable_path",
+                        "executable_ready": False,
+                        "executable_path": "",
+                    },
+                ],
+            },
         )
 
         package = report.to_dict()["agent_app_endpoint_acceptance"]
+        self.assertEqual(
+            report.to_dict()["agent_app_devtools_resolution"]["mode"],
+            "agent-app-devtools-resolution",
+        )
         cases = {item["agent_id"]: item for item in package["cases"]}
 
         self.assertEqual(package["mode"], "agent-app-endpoint-acceptance")
@@ -1012,6 +1045,13 @@ class MajorRealNoLossTests(unittest.TestCase):
             cases["codex"]["owned_devtools_launch_plan_template"]["readiness_url"],
             "http://127.0.0.1:19555",
         )
+        self.assertEqual(
+            cases["codex"]["owned_devtools_launch_plan_template"]["executable"],
+            "C:/Program Files/WindowsApps/OpenAI.Codex/app/Codex.exe",
+        )
+        self.assertTrue(
+            cases["codex"]["owned_devtools_launch_plan_template"]["executable_ready"],
+        )
         self.assertIn(
             "--remote-debugging-port=19555",
             cases["codex"]["owned_devtools_launch_plan_template"]["argv"],
@@ -1027,6 +1067,15 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(
             cases["claude"]["observed_endpoint_errors"],
             ["cdp_endpoint_unhealthy"],
+        )
+        self.assertFalse(
+            cases["claude"]["owned_devtools_launch_plan_template"]["executable_ready"],
+        )
+        self.assertEqual(
+            cases["claude"]["owned_devtools_launch_plan_template"][
+                "executable_resolution_status"
+            ],
+            "resolved_no_executable_path",
         )
         self.assertEqual(
             cases["cursor"]["next_action"],

@@ -6500,3 +6500,56 @@ When a new conversation starts in this repo:
     - the route is not yet auto-executed inside the major runner because real
       GUI app launch still requires explicit permission and app-specific path
       resolution; the current default remains plan/report-only and no-focus
+- 2026-05-29 added safe agent app executable resolution for owned DevTools:
+  - implementation:
+    - `WindowsAppResolver` now treats explicit `codex app` / `codex desktop`
+      requests as desktop-surface requests and refuses to satisfy them with
+      `codex.cmd`, extension worker `codex.exe`, or other CLI/helper paths
+    - the existing Claude surface split was tightened so explicit
+      `claude app` / `claude desktop` also returns `app_not_found` when only a
+      CLI candidate is available, instead of falling back to CLI transport
+    - `major_real_no_loss` now builds a read-only
+      `agent_app_devtools_resolution` report for Codex App / Claude Desktop /
+      Cursor and exposes it both top-level and inside subreports
+    - `agent_app_endpoint_acceptance` now fills
+      `owned_devtools_launch_plan_template.executable` from the resolved app
+      executable path when available, and records `executable_ready` plus
+      `executable_resolution_status`
+  - official-doc basis:
+    - Microsoft Windows application registration / App Paths and
+      PowerShell `Get-StartApps` documentation were checked before relying on
+      resolver evidence sources for executable and packaged-app identity
+  - validation:
+    - red tests first:
+      `test_codex_app_alias_requires_desktop_surface_not_cli_path` and
+      `test_claude_app_alias_requires_desktop_surface_not_cli_path` failed
+      because app aliases could still resolve to CLI paths
+    - red test first:
+      `test_report_exposes_agent_app_endpoint_acceptance_package` failed before
+      `agent_app_devtools_resolution` was emitted top-level and before launch
+      templates consumed resolved executable paths
+    - focused green:
+      `python -m unittest tests.test_agent_surface_report tests.test_app_resolution tests.test_major_real_no_loss`: `43 tests OK`
+    - R41 real read-only app resolution smoke:
+      `python -m openwukong.evaluation.app_resolution_report --app-name codex --app-name "codex app" --app-name "claude desktop" --app-name cursor --json`
+      produced `control_attempts=0`, resolved all four names, and selected
+      the real desktop app paths for Codex App, Claude Desktop, and Cursor
+    - R41 real no-loss smoke:
+      `run_major_scenario_real_no_loss(... agent_apps=("codex app", "claude desktop", "cursor"), cli_agents=())`
+      wrote
+      `logs/runtime/major-real-no-loss-r41-agent-app-resolution/major-real-no-loss-report.json`
+      and produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, and `executable_ready=true` for all three app
+      launch templates
+    - full verification:
+      `python -m unittest discover tests`: `525 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - current machine evidence now proves OpenWukong can identify the real
+      Codex App, Claude Desktop, and Cursor executable paths without hardcoded
+      install locations and without confusing them with CLI/helper processes
+    - the remaining app-chat gap is explicit opt-in execution of the owned
+      DevTools launch route, probing the new endpoint, then performing native
+      bridge send/readback verification without foreground takeover
