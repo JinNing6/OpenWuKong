@@ -160,6 +160,12 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
             "ok": True,
             "background_safe": True,
             "surface_kind": "desktop_app",
+            "app_binding": {
+                "process_name": "Codex.exe",
+                "pid": 42,
+                "hwnd": 70038,
+                "window_title": "Codex",
+            },
             "capabilities": ["agent_app_conversation.native_bridge_send_message"],
             "agents": [{"agent_id": "codex", "available": True}],
             "projects": [{"name": "openwukong", "available": True}],
@@ -206,12 +212,20 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         )
         self.assertEqual(bridge_calls[0].agent_id, "codex")
         self.assertEqual(bridge_calls[0].project_name, "openwukong")
+        self.assertEqual(bridge_calls[0].expected_app_process_names, ("codex.exe",))
+        self.assertTrue(data["endpoints"][0]["metadata"]["app_binding_ready"])
 
     def test_agent_native_bridge_endpoint_does_not_reuse_wrong_agent(self):
         capability_report = {
             "ok": True,
             "background_safe": True,
             "surface_kind": "desktop_app",
+            "app_binding": {
+                "process_name": "Codex.exe",
+                "pid": 42,
+                "hwnd": 70038,
+                "window_title": "Codex",
+            },
             "capabilities": ["agent_app_conversation.native_bridge_send_message"],
             "agents": [{"agent_id": "cursor", "available": True}],
             "projects": [{"name": "openwukong", "available": True}],
@@ -289,6 +303,56 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(data["endpoints"][0]["endpoint_type"], "agent_native_bridge")
         self.assertEqual(data["endpoints"][0]["metadata"]["surface_kind"], "cli")
         self.assertFalse(data["endpoints"][0]["ready"])
+
+    def test_agent_native_bridge_endpoint_requires_matching_app_binding(self):
+        capability_report = {
+            "ok": True,
+            "background_safe": True,
+            "surface_kind": "desktop_app",
+            "app_binding": {
+                "process_name": "Claude.exe",
+                "pid": 42,
+                "hwnd": 70038,
+                "window_title": "Claude",
+            },
+            "capabilities": ["agent_app_conversation.native_bridge_send_message"],
+            "agents": [{"agent_id": "codex", "available": True}],
+            "projects": [{"name": "openwukong", "available": True}],
+            "tasks": [{"name": "desktop-message", "available": True}],
+        }
+
+        def fake_agent_native_bridge_probe(request):
+            return _FakeIDEBridgeReport(
+                mode="agent-native-bridge-dry-run",
+                safety_mode="dry_run",
+                ok=False,
+                decision="agent_native_bridge_app_binding_not_ready",
+                bridge_send_attempts=0,
+                control_attempts=0,
+                capability_report=capability_report,
+                request=request.to_dict(capability_report),
+            )
+
+        report = run_agent_native_connector_probe(
+            agent="codex app",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_codex_target(hwnd=70038, task_name="desktop-message"),
+            resolver=_resolver_with_codex_desktop(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            agent_native_bridge_urls=("http://127.0.0.1:18888",),
+            agent_native_bridge_probe=fake_agent_native_bridge_probe,
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["ready_endpoint_count"], 0)
+        self.assertEqual(data["endpoints"][0]["endpoint_type"], "agent_native_bridge")
+        self.assertFalse(data["endpoints"][0]["ready"])
+        self.assertEqual(data["endpoints"][0]["metadata"]["app_binding"]["process_name"], "Claude.exe")
+        self.assertFalse(data["endpoints"][0]["metadata"]["app_binding_ready"])
+        self.assertEqual(data["endpoints"][0]["error"], "agent_native_bridge_app_binding_not_ready")
 
     def test_ide_bridge_endpoint_does_not_reuse_cursor_adapter_for_codex_app(self):
         def fake_ide_bridge_probe(bridge_url, **kwargs):

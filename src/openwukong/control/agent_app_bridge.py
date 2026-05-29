@@ -699,6 +699,9 @@ class AgentAppBridgeAgentNativeAdapter:
             task_name=request.task_name,
             message=request.message,
             composed_message=request.composed_message or request.message,
+            expected_app_process_names=_agent_process_names(request.agent_id),
+            expected_app_pids=_request_target_pids(request),
+            expected_app_hwnds=_request_target_hwnds(request),
             selected_transport=request.selected_transport,
             required_markers=request.required_markers,
             forbidden_markers=request.forbidden_markers,
@@ -1014,6 +1017,8 @@ def _endpoint_supports_agent_native_bridge(endpoint: dict, agent_id: str = "") -
         return False
     if _normalize_surface_kind(metadata.get("surface_kind", "")) != "desktop_app":
         return False
+    if not _endpoint_agent_native_app_binding_matches(metadata, agent_id):
+        return False
     normalized_agent = str(agent_id or "").strip().lower()
     preferred = str(endpoint.get("preferred_chat_adapter", "") or "").strip().lower()
     if normalized_agent and preferred and preferred != normalized_agent:
@@ -1023,6 +1028,26 @@ def _endpoint_supports_agent_native_bridge(endpoint: dict, agent_id: str = "") -
         if metadata_agent and metadata_agent != normalized_agent:
             return False
     return bool(str(endpoint.get("send_command_id", "") or "").strip() == AGENT_NATIVE_SEND_ACTION)
+
+
+def _endpoint_agent_native_app_binding_matches(metadata: dict, agent_id: str) -> bool:
+    binding = metadata.get("app_binding")
+    if not isinstance(binding, dict) or not binding:
+        return False
+    expected_names = {
+        _normalize_process_name(name)
+        for name in _agent_process_names(agent_id)
+        if _normalize_process_name(name)
+    }
+    actual_name = _binding_process_name(binding)
+    if expected_names and actual_name not in expected_names:
+        return False
+    return bool(
+        actual_name
+        or _int_value(binding, "pid")
+        or _int_value(binding, "hwnd")
+        or str(binding.get("window_title", "") or binding.get("title", "") or "").strip()
+    )
 
 
 def _endpoint_matches_project(endpoint: dict, project_name: str) -> bool:
@@ -1248,6 +1273,46 @@ def _int_value(data: dict, key: str) -> int:
         return int(data.get(key, 0) or 0)
     except Exception:
         return 0
+
+
+def _request_target_pids(request: AgentAppBridgeRequest) -> tuple[int, ...]:
+    value = _int_value(request.target, "pid")
+    return (value,) if value > 0 else ()
+
+
+def _request_target_hwnds(request: AgentAppBridgeRequest) -> tuple[int, ...]:
+    value = _int_value(request.target, "hwnd")
+    return (value,) if value > 0 else ()
+
+
+def _agent_process_names(agent_id: str) -> tuple[str, ...]:
+    normalized = str(agent_id or "").strip().casefold()
+    if normalized == "codex":
+        return ("codex.exe",)
+    if normalized == "claude":
+        return ("claude.exe",)
+    if normalized == "cursor":
+        return ("cursor.exe",)
+    return (normalized,) if normalized else ()
+
+
+def _binding_process_name(binding: dict) -> str:
+    for key in ("process_name", "processName", "executable_name", "executableName"):
+        value = _normalize_process_name(binding.get(key, ""))
+        if value:
+            return value
+    for key in ("executable_path", "executablePath", "path"):
+        value = _normalize_process_name(binding.get(key, ""))
+        if value:
+            return value
+    return ""
+
+
+def _normalize_process_name(value: object) -> str:
+    text = str(value or "").strip().casefold().replace("\\", "/")
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    return text
 
 
 def _normalize_surface_kind(value: object) -> str:

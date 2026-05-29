@@ -37,6 +37,9 @@ class AgentNativeBridgeRequest:
     message: str
     composed_message: str
     required_surface_kind: str = "desktop_app"
+    expected_app_process_names: tuple[str, ...] = ()
+    expected_app_pids: tuple[int, ...] = ()
+    expected_app_hwnds: tuple[int, ...] = ()
     selected_transport: dict = dataclasses.field(default_factory=dict)
     required_markers: tuple[str, ...] = ()
     forbidden_markers: tuple[str, ...] = ()
@@ -63,6 +66,9 @@ class AgentNativeBridgeRequest:
             "message": self.message,
             "composed_message": self.composed_message,
             "required_surface_kind": self.required_surface_kind,
+            "expected_app_process_names": list(self.expected_app_process_names),
+            "expected_app_pids": list(self.expected_app_pids),
+            "expected_app_hwnds": list(self.expected_app_hwnds),
             "required_markers": list(self.required_markers),
             "forbidden_markers": list(self.forbidden_markers),
         }
@@ -77,6 +83,7 @@ class AgentNativeBridgeRequest:
             "native_endpoint_ready": _native_endpoint_ready(self, capabilities),
             "agent_ready": _agent_ready(capabilities, self.agent_id),
             "surface_ready": _surface_ready(capabilities, self.required_surface_kind),
+            "app_binding_ready": _app_binding_ready(capabilities, self),
             "project_ready": _project_ready(capabilities, self.project_name),
             "task_ready": _task_ready(capabilities, self.task_name),
             "send_action_ready": _send_action_ready(capabilities),
@@ -84,6 +91,9 @@ class AgentNativeBridgeRequest:
             "agent": self.agent,
             "agent_id": self.agent_id,
             "required_surface_kind": self.required_surface_kind,
+            "expected_app_process_names": list(self.expected_app_process_names),
+            "expected_app_pids": list(self.expected_app_pids),
+            "expected_app_hwnds": list(self.expected_app_hwnds),
             "project_name": self.project_name,
             "task_name": self.task_name,
             "selected_transport": dict(self.selected_transport),
@@ -142,6 +152,10 @@ class AgentNativeBridgeDryRunReport:
         return _surface_ready(self.capability_report, self.request.required_surface_kind)
 
     @property
+    def app_binding_ready(self) -> bool:
+        return _app_binding_ready(self.capability_report, self.request)
+
+    @property
     def task_ready(self) -> bool:
         return _task_ready(self.capability_report, self.request.task_name)
 
@@ -171,6 +185,8 @@ class AgentNativeBridgeDryRunReport:
             return "agent_native_bridge_agent_not_ready"
         if not self.surface_ready:
             return "agent_native_bridge_surface_not_ready"
+        if not self.app_binding_ready:
+            return "agent_native_bridge_app_binding_not_ready"
         if not self.project_ready:
             return "agent_native_bridge_project_not_ready"
         if not self.task_ready:
@@ -197,6 +213,7 @@ class AgentNativeBridgeDryRunReport:
             "native_endpoint_ready": self.native_endpoint_ready,
             "agent_ready": self.agent_ready,
             "surface_ready": self.surface_ready,
+            "app_binding_ready": self.app_binding_ready,
             "project_ready": self.project_ready,
             "task_ready": self.task_ready,
             "send_action_ready": self.send_action_ready,
@@ -468,19 +485,28 @@ def build_agent_native_bridge_request(
     message: str,
     composed_message: str,
     required_surface_kind: str = "desktop_app",
+    expected_app_process_names: tuple[str, ...] = (),
+    expected_app_pids: tuple[int, ...] = (),
+    expected_app_hwnds: tuple[int, ...] = (),
     selected_transport: dict | object | None = None,
     required_markers: tuple[str, ...] = (),
     forbidden_markers: tuple[str, ...] = (),
 ) -> AgentNativeBridgeRequest:
+    normalized_agent_id = str(agent_id or "").strip().lower()
     return AgentNativeBridgeRequest(
         bridge_url=str(bridge_url or "").strip(),
         agent=str(agent or "").strip(),
-        agent_id=str(agent_id or "").strip().lower(),
+        agent_id=normalized_agent_id,
         project_name=str(project_name or "").strip(),
         task_name=str(task_name or "").strip(),
         message=str(message or "").strip(),
         composed_message=str(composed_message or "").strip(),
         required_surface_kind=str(required_surface_kind or "").strip() or "desktop_app",
+        expected_app_process_names=_process_name_tuple(
+            expected_app_process_names or _default_agent_process_names(normalized_agent_id)
+        ),
+        expected_app_pids=_int_tuple(expected_app_pids),
+        expected_app_hwnds=_int_tuple(expected_app_hwnds),
         selected_transport=_dict_from_report(selected_transport),
         required_markers=_string_tuple(required_markers),
         forbidden_markers=_string_tuple(forbidden_markers),
@@ -506,6 +532,8 @@ def _validate_request(
         errors.append("agent_not_ready")
     if not _surface_ready(capability_report, request.required_surface_kind):
         errors.append("surface_not_ready")
+    if not _app_binding_ready(capability_report, request):
+        errors.append("app_binding_not_ready")
     if not _project_ready(capability_report, request.project_name):
         errors.append("project_not_ready")
     if not _task_ready(capability_report, request.task_name):
@@ -570,6 +598,75 @@ def _surface_ready(capability_report: dict, required_surface_kind: str) -> bool:
     return required in {value for value in actual_values if value}
 
 
+def _app_binding_ready(capability_report: dict, request: AgentNativeBridgeRequest) -> bool:
+    if _normalize_kind(request.required_surface_kind) != "desktop_app":
+        return True
+    binding = _app_binding(capability_report)
+    if not binding:
+        return False
+    expected_names = {
+        _normalize_process_name(name)
+        for name in (request.expected_app_process_names or _default_agent_process_names(request.agent_id))
+        if _normalize_process_name(name)
+    }
+    actual_name = _binding_process_name(binding)
+    if expected_names and actual_name not in expected_names:
+        return False
+    expected_pids = {int(pid) for pid in request.expected_app_pids if int(pid or 0) > 0}
+    if expected_pids:
+        pid = _int_value(binding, "pid")
+        if pid not in expected_pids:
+            return False
+    expected_hwnds = {int(hwnd) for hwnd in request.expected_app_hwnds if int(hwnd or 0) > 0}
+    if expected_hwnds:
+        hwnd = _int_value(binding, "hwnd")
+        if hwnd not in expected_hwnds:
+            return False
+    return bool(
+        actual_name
+        or _int_value(binding, "pid")
+        or _int_value(binding, "hwnd")
+        or str(binding.get("window_title", "") or binding.get("title", "") or "").strip()
+    )
+
+
+def _app_binding(capability_report: dict) -> dict:
+    for key in ("app_binding", "desktop_app_binding", "target_app", "application_binding"):
+        value = capability_report.get(key)
+        if isinstance(value, dict):
+            return dict(value)
+    top_level = {
+        key: capability_report.get(key)
+        for key in (
+            "process_name",
+            "processName",
+            "executable_name",
+            "executableName",
+            "executable_path",
+            "executablePath",
+            "pid",
+            "hwnd",
+            "window_title",
+            "windowTitle",
+            "title",
+        )
+        if key in capability_report
+    }
+    return dict(top_level) if top_level else {}
+
+
+def _binding_process_name(binding: dict) -> str:
+    for key in ("process_name", "processName", "executable_name", "executableName"):
+        value = _normalize_process_name(binding.get(key, ""))
+        if value:
+            return value
+    for key in ("executable_path", "executablePath", "path"):
+        value = _normalize_process_name(binding.get(key, ""))
+        if value:
+            return value
+    return ""
+
+
 def _project_ready(capability_report: dict, project_name: str) -> bool:
     project = _normalize(project_name)
     if not project:
@@ -605,11 +702,17 @@ def _task_ready(capability_report: dict, task_name: str) -> bool:
 
 
 def _target_summary(capability_report: dict, request: AgentNativeBridgeRequest) -> dict:
+    binding = _app_binding(capability_report)
     return {
         "agent_id": request.agent_id,
         "agent_ready": _agent_ready(capability_report, request.agent_id),
         "required_surface_kind": request.required_surface_kind,
         "surface_ready": _surface_ready(capability_report, request.required_surface_kind),
+        "expected_app_process_names": list(request.expected_app_process_names),
+        "expected_app_pids": list(request.expected_app_pids),
+        "expected_app_hwnds": list(request.expected_app_hwnds),
+        "app_binding": binding,
+        "app_binding_ready": _app_binding_ready(capability_report, request),
         "project_name": request.project_name,
         "project_ready": _project_ready(capability_report, request.project_name),
         "task_name": request.task_name,
@@ -736,6 +839,59 @@ def _int_value(data: dict, key: str) -> int:
         return int(data.get(key, 0) or 0)
     except Exception:
         return 0
+
+
+def _int_tuple(values: object) -> tuple[int, ...]:
+    if values is None:
+        return ()
+    try:
+        items = tuple(values)  # type: ignore[arg-type]
+    except TypeError:
+        items = (values,)
+    result: list[int] = []
+    for item in items:
+        try:
+            value = int(item or 0)
+        except Exception:
+            continue
+        if value > 0 and value not in result:
+            result.append(value)
+    return tuple(result)
+
+
+def _process_name_tuple(values: object) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    if isinstance(values, str):
+        values = (values,)
+    try:
+        items = tuple(values)  # type: ignore[arg-type]
+    except TypeError:
+        items = (values,)
+    result: list[str] = []
+    for item in items:
+        value = _normalize_process_name(item)
+        if value and value not in result:
+            result.append(value)
+    return tuple(result)
+
+
+def _default_agent_process_names(agent_id: str) -> tuple[str, ...]:
+    normalized = _normalize(agent_id)
+    if normalized == "codex":
+        return ("codex.exe",)
+    if normalized == "claude":
+        return ("claude.exe",)
+    if normalized == "cursor":
+        return ("cursor.exe",)
+    return (normalized,) if normalized else ()
+
+
+def _normalize_process_name(value: object) -> str:
+    text = str(value or "").strip().replace("\\", "/").casefold()
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    return text
 
 
 def _normalize(value: object) -> str:

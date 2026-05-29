@@ -5883,3 +5883,55 @@ When a new conversation starts in this repo:
     - the next implementation target remains a real desktop-app bridge
       endpoint for Codex App / Claude Desktop, or a WeChat native connector
       that exposes File Transfer Assistant without foreground takeover
+- 2026-05-29 hardened Agent App native bridge desktop app binding:
+  - implementation:
+    - `AgentNativeBridgeRequest` now carries expected desktop app evidence:
+      process names, matched PIDs, and matched HWNDs
+    - bridge dry-run now requires `app_binding` / `desktop_app_binding` /
+      `target_app` evidence for `required_surface_kind=desktop_app`
+    - a bridge that is unbound, or bound to the wrong desktop process, fails
+      with `agent_native_bridge_app_binding_not_ready`
+    - `agent_native_connector_probe` now propagates app binding metadata,
+      expected process/PID/HWND evidence, and refuses to mark a native bridge
+      endpoint ready unless the binding matches the requested desktop app
+    - `agent_app_bridge` now rechecks agent-native endpoint metadata before
+      satisfying Codex App / Claude Desktop target readiness, so a standalone
+      local service cannot be mistaken for app control
+  - official-doc basis:
+    - Python `dataclasses` docs were checked before extending the request
+      dataclass contract
+    - Python `http.server` docs were checked for the local fake bridge test
+      server pattern
+  - validation:
+    - red tests first:
+      `test_sender_refuses_unbound_bridge_for_desktop_app_request`,
+      `test_sender_refuses_bridge_bound_to_wrong_desktop_process`,
+      `test_agent_native_bridge_endpoint_requires_matching_app_binding`,
+      `test_agent_native_bridge_unbound_endpoint_cannot_satisfy_app_request`,
+      and `test_agent_native_bridge_wrong_app_binding_cannot_satisfy_app_request`
+      failed before implementation
+    - targeted green:
+      `python -m unittest tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_agent_app_bridge`: `34 tests OK`
+    - focused regression:
+      `python -m unittest tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_major_real_no_loss`: `55 tests OK`
+    - full suite:
+      `python -m unittest discover tests`: `488 tests OK`
+    - compile/check:
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+    - real no-loss smoke without app bridge URLs:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r25-agent-native-bridge-app-binding-no-url --output logs\runtime\major-real-no-loss-r25-agent-native-bridge-app-binding-no-url\report.json --json`
+      produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `agent_command_attempts=0`,
+      `background_screenshot_success_count=5/5`, and
+      `background_screenshot_focus_stable=true`
+  - current conclusion:
+    - the app native bridge contract now requires three layers before a
+      background app-chat route can be considered real:
+      `desktop_app` surface, matching agent adapter, and matching desktop app
+      binding evidence
+    - current remaining true gaps are unchanged: real Codex App / Claude
+      Desktop native bridge endpoints, and a real WeChat native connector for
+      deterministic background send

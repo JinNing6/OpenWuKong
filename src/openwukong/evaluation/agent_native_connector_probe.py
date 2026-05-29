@@ -105,6 +105,7 @@ class NativeConnectorEndpoint:
                 and self.preferred_chat_adapter
                 and self.send_command_id
                 and _agent_native_bridge_surface_ok(dict(self.metadata or {}))
+                and _agent_native_bridge_app_binding_ok(dict(self.metadata or {}))
             )
         return bool(not self.error and self.version and any(target.ready for target in self.targets))
 
@@ -268,6 +269,7 @@ def run_agent_native_connector_probe(
         agent_id=app_probe.surface_binding.agent_id,
         project_name=str(project_name or "").strip(),
         task_name=str(task_name or "").strip(),
+        app_probe=app_probe,
     )
     return AgentNativeConnectorProbeReport(
         agent=str(agent or "").strip(),
@@ -552,6 +554,7 @@ def _discover_agent_native_bridge_endpoints(
     agent_id: str,
     project_name: str,
     task_name: str,
+    app_probe: AgentAppUiaProbeReport,
 ) -> tuple[NativeConnectorEndpoint, ...]:
     endpoints: list[NativeConnectorEndpoint] = []
     seen: set[str] = set()
@@ -568,6 +571,7 @@ def _discover_agent_native_bridge_endpoints(
                 agent_id=agent_id,
                 project_name=project_name,
                 task_name=task_name,
+                app_probe=app_probe,
             )
         )
     return tuple(endpoints)
@@ -581,6 +585,7 @@ def _probe_agent_native_bridge_endpoint(
     agent_id: str,
     project_name: str,
     task_name: str,
+    app_probe: AgentAppUiaProbeReport,
 ) -> NativeConnectorEndpoint:
     request = build_agent_native_bridge_request(
         bridge_url=bridge_url,
@@ -594,6 +599,9 @@ def _probe_agent_native_bridge_endpoint(
             f"Task: {task_name}\n\n"
             "Message:\nOPENWUKONG_AGENT_NATIVE_BRIDGE_PROBE"
         ),
+        expected_app_process_names=_agent_process_names(agent_id),
+        expected_app_pids=_app_probe_matched_pids(app_probe),
+        expected_app_hwnds=_app_probe_matched_hwnds(app_probe),
     )
     try:
         raw_report = agent_native_bridge_probe(request)
@@ -608,7 +616,8 @@ def _probe_agent_native_bridge_endpoint(
             task_name=task_name,
         )
         surface_ok = _agent_native_bridge_surface_ok(metadata)
-        ok = bool(data.get("ok", False) and surface_ok)
+        app_binding_ok = _agent_native_bridge_app_binding_ok(metadata)
+        ok = bool(data.get("ok", False) and surface_ok and app_binding_ok)
         return NativeConnectorEndpoint(
             debugger_url=bridge_url,
             bridge_url=bridge_url,
@@ -622,6 +631,7 @@ def _probe_agent_native_bridge_endpoint(
             error="" if ok else str(
                 data.get("error", "")
                 or ("" if surface_ok else "agent_native_bridge_surface_not_ready")
+                or ("" if app_binding_ok else "agent_native_bridge_app_binding_not_ready")
                 or data.get("decision", "")
                 or "agent_native_bridge_capability_failed"
             ),
@@ -743,6 +753,13 @@ def _agent_native_bridge_metadata(
     project_name: str,
     task_name: str,
 ) -> dict:
+    target = _dict_value(request_data.get("target"))
+    app_binding = _dict_value(
+        capability_report.get("app_binding")
+        or capability_report.get("desktop_app_binding")
+        or capability_report.get("target_app")
+        or target.get("app_binding")
+    )
     metadata = {
         "agent_id": str(
             request_data.get("agent_id", "")
@@ -770,6 +787,14 @@ def _agent_native_bridge_metadata(
             or ""
         ).strip(),
         "required_surface_kind": str(request_data.get("required_surface_kind", "") or "desktop_app").strip(),
+        "expected_app_process_names": list(request_data.get("expected_app_process_names", []) or []),
+        "expected_app_pids": list(request_data.get("expected_app_pids", []) or []),
+        "expected_app_hwnds": list(request_data.get("expected_app_hwnds", []) or []),
+        "app_binding": app_binding,
+        "app_binding_ready": bool(
+            request_data.get("app_binding_ready", False)
+            or target.get("app_binding_ready", False)
+        ),
         "capabilities": list(capability_report.get("capabilities", []) or []),
     }
     for key in ("agents", "projects", "tasks", "workspaces", "sessions"):
@@ -781,6 +806,36 @@ def _agent_native_bridge_metadata(
 
 def _agent_native_bridge_surface_ok(metadata: dict) -> bool:
     return _normalize_surface_kind(metadata.get("surface_kind", "")) == "desktop_app"
+
+
+def _agent_native_bridge_app_binding_ok(metadata: dict) -> bool:
+    binding = metadata.get("app_binding")
+    if not isinstance(binding, dict) or not binding:
+        return False
+    expected_names = {
+        _normalize_process_name(name)
+        for name in metadata.get("expected_app_process_names", []) or []
+        if _normalize_process_name(name)
+    }
+    actual_name = _binding_process_name(binding)
+    if expected_names and actual_name not in expected_names:
+        return False
+    expected_pids = _positive_int_set(metadata.get("expected_app_pids", []) or [])
+    if expected_pids:
+        pid = _int_value(binding.get("pid"))
+        if pid not in expected_pids:
+            return False
+    expected_hwnds = _positive_int_set(metadata.get("expected_app_hwnds", []) or [])
+    if expected_hwnds:
+        hwnd = _int_value(binding.get("hwnd"))
+        if hwnd not in expected_hwnds:
+            return False
+    return bool(
+        actual_name
+        or _int_value(binding.get("pid"))
+        or _int_value(binding.get("hwnd"))
+        or str(binding.get("window_title", "") or binding.get("title", "") or "").strip()
+    )
 
 
 def _normalize_surface_kind(value: object) -> str:
@@ -840,6 +895,71 @@ def _agent_process_names(agent_id: str) -> tuple[str, ...]:
     if normalized == "cursor":
         return ("cursor.exe",)
     return (normalized,)
+
+
+def _app_probe_matched_pids(app_probe: AgentAppUiaProbeReport) -> tuple[int, ...]:
+    values: list[int] = []
+    for window in _app_probe_matched_windows(app_probe):
+        value = _int_value(window.get("pid"))
+        if value > 0 and value not in values:
+            values.append(value)
+    return tuple(values)
+
+
+def _app_probe_matched_hwnds(app_probe: AgentAppUiaProbeReport) -> tuple[int, ...]:
+    values: list[int] = []
+    for window in _app_probe_matched_windows(app_probe):
+        value = _int_value(window.get("hwnd"))
+        if value > 0 and value not in values:
+            values.append(value)
+    return tuple(values)
+
+
+def _app_probe_matched_windows(app_probe: AgentAppUiaProbeReport) -> tuple[dict, ...]:
+    data = app_probe.to_dict()
+    windows = data.get("matched_windows")
+    if not isinstance(windows, list):
+        return ()
+    return tuple(dict(item) for item in windows if isinstance(item, dict))
+
+
+def _positive_int_set(values: object) -> set[int]:
+    try:
+        items = tuple(values)  # type: ignore[arg-type]
+    except TypeError:
+        items = (values,)
+    result: set[int] = set()
+    for item in items:
+        value = _int_value(item)
+        if value > 0:
+            result.add(value)
+    return result
+
+
+def _binding_process_name(binding: dict) -> str:
+    for key in ("process_name", "processName", "executable_name", "executableName"):
+        value = _normalize_process_name(binding.get(key, ""))
+        if value:
+            return value
+    for key in ("executable_path", "executablePath", "path"):
+        value = _normalize_process_name(binding.get(key, ""))
+        if value:
+            return value
+    return ""
+
+
+def _normalize_process_name(value: object) -> str:
+    text = str(value or "").strip().casefold().replace("\\", "/")
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    return text
+
+
+def _int_value(value: object) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
 
 
 def _parent_dir(path: str) -> str:
