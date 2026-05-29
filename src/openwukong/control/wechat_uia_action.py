@@ -9,6 +9,7 @@ call SetValue, Invoke, keyboard, mouse, or clipboard APIs.
 from __future__ import annotations
 
 import dataclasses
+import time
 import uuid
 from typing import Iterable
 
@@ -30,6 +31,8 @@ class WeChatUiaSemanticActionRequest:
     windows: tuple[AccessibilityWindowSnapshot, ...]
     background_screenshot_focus_stable: bool = True
     selected_transport: dict = dataclasses.field(default_factory=dict)
+    required_markers: tuple[str, ...] = ()
+    forbidden_markers: tuple[str, ...] = ()
     request_id: str = dataclasses.field(default_factory=lambda: f"wcuia-{uuid.uuid4().hex[:16]}")
 
     @property
@@ -145,6 +148,8 @@ class WeChatUiaSemanticActionRequest:
                 "action": "wechat.conversation.uia_semantic_send_message",
                 "target_name": self.target_name,
                 "message": self.message,
+                "required_markers": list(self.required_markers),
+                "forbidden_markers": list(self.forbidden_markers),
             },
         }
 
@@ -234,6 +239,192 @@ class WeChatUiaSemanticActionDryRunAdapter:
         )
 
 
+@dataclasses.dataclass(frozen=True)
+class WeChatUiaSemanticActionSendReport:
+    request: WeChatUiaSemanticActionRequest
+    dry_run_report: WeChatUiaSemanticActionDryRunReport
+    operation_result: dict = dataclasses.field(default_factory=dict)
+    uia_value_set_attempts: int = 0
+    uia_invoke_attempts: int = 0
+    foreground_hwnd_before: int = 0
+    foreground_hwnd_after: int = 0
+    error: str = ""
+    elapsed_ms: float = 0.0
+
+    @property
+    def mode(self) -> str:
+        return "wechat-uia-semantic-action-send"
+
+    @property
+    def safety_mode(self) -> str:
+        return "uia_semantic_execute"
+
+    @property
+    def control_allowed(self) -> bool:
+        return bool(self.dry_run_report.ok and not self.error)
+
+    @property
+    def control_attempts(self) -> int:
+        return 0
+
+    @property
+    def window_input_attempts(self) -> int:
+        return 0
+
+    @property
+    def keyboard_input_attempts(self) -> int:
+        return 0
+
+    @property
+    def clipboard_write_attempts(self) -> int:
+        return 0
+
+    @property
+    def send_attempts(self) -> int:
+        return 1 if self.uia_invoke_attempts else 0
+
+    @property
+    def foreground_focus_stable(self) -> bool:
+        if not self.foreground_hwnd_before or not self.foreground_hwnd_after:
+            return True
+        return int(self.foreground_hwnd_before) == int(self.foreground_hwnd_after)
+
+    @property
+    def readback_text(self) -> str:
+        return _first_text(
+            self.operation_result,
+            "readbackText",
+            "readback_text",
+            "pageText",
+            "page_text",
+            "text",
+            "post_value",
+        )
+
+    @property
+    def required_markers(self) -> tuple[str, ...]:
+        if self.request.required_markers:
+            return self.request.required_markers
+        return (self.request.message,) if self.request.message else ()
+
+    @property
+    def missing_required_markers(self) -> tuple[str, ...]:
+        text = self.readback_text
+        return tuple(marker for marker in self.required_markers if marker not in text)
+
+    @property
+    def present_forbidden_markers(self) -> tuple[str, ...]:
+        text = self.readback_text
+        return tuple(marker for marker in self.request.forbidden_markers if marker in text)
+
+    @property
+    def ok(self) -> bool:
+        return self.decision == "wechat_uia_semantic_action_send_accepted"
+
+    @property
+    def decision(self) -> str:
+        if not self.dry_run_report.ok:
+            return "wechat_uia_semantic_action_request_not_ready"
+        if self.error:
+            return "wechat_uia_semantic_action_send_failed"
+        if not self.operation_result.get("composer_found"):
+            return "wechat_uia_semantic_action_composer_not_found"
+        if not self.uia_value_set_attempts:
+            return "wechat_uia_semantic_action_value_not_attempted"
+        if not self.operation_result.get("value_set"):
+            return "wechat_uia_semantic_action_value_not_verified"
+        if not self.operation_result.get("submit_found"):
+            return "wechat_uia_semantic_action_submit_not_found"
+        if not self.uia_invoke_attempts:
+            return "wechat_uia_semantic_action_invoke_not_attempted"
+        if not self.operation_result.get("invoke_attempted"):
+            return "wechat_uia_semantic_action_invoke_not_verified"
+        if not self.operation_result.get("invoke_verified"):
+            return "wechat_uia_semantic_action_submit_not_verified"
+        if not self.foreground_focus_stable:
+            return "wechat_uia_semantic_action_foreground_changed"
+        if self.present_forbidden_markers:
+            return "wechat_uia_semantic_action_forbidden_marker_present"
+        if self.missing_required_markers:
+            return "wechat_uia_semantic_action_acceptance_pending"
+        return "wechat_uia_semantic_action_send_accepted"
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "safety_mode": self.safety_mode,
+            "ok": self.ok,
+            "decision": self.decision,
+            "control_allowed": self.control_allowed,
+            "control_attempts": self.control_attempts,
+            "send_attempts": self.send_attempts,
+            "window_input_attempts": self.window_input_attempts,
+            "keyboard_input_attempts": self.keyboard_input_attempts,
+            "clipboard_write_attempts": self.clipboard_write_attempts,
+            "uia_value_set_attempts": int(self.uia_value_set_attempts or 0),
+            "uia_invoke_attempts": int(self.uia_invoke_attempts or 0),
+            "foreground_hwnd_before": int(self.foreground_hwnd_before or 0),
+            "foreground_hwnd_after": int(self.foreground_hwnd_after or 0),
+            "foreground_focus_stable": self.foreground_focus_stable,
+            "missing_required_markers": list(self.missing_required_markers),
+            "present_forbidden_markers": list(self.present_forbidden_markers),
+            "operation_result": dict(self.operation_result),
+            "error": self.error,
+            "dry_run_report": self.dry_run_report.to_dict(),
+            "request": self.request.to_dict(),
+            "elapsed_ms": round(self.elapsed_ms, 3),
+        }
+
+
+class WeChatUiaSemanticActionSenderAdapter:
+    def __init__(self, *, operator: object | None = None, foreground_hwnd_provider: object | None = None):
+        self._operator = operator or PywinautoWeChatUiaSemanticActionOperator()
+        self._foreground_hwnd_provider = foreground_hwnd_provider or _foreground_hwnd
+
+    def send(self, request: WeChatUiaSemanticActionRequest) -> WeChatUiaSemanticActionSendReport:
+        started = time.perf_counter()
+        dry_run = WeChatUiaSemanticActionDryRunAdapter().prepare(request)
+        if not dry_run.ok:
+            return WeChatUiaSemanticActionSendReport(
+                request=request,
+                dry_run_report=dry_run,
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+        before = _call_int(self._foreground_hwnd_provider)
+        try:
+            execute = getattr(self._operator, "execute")
+            operation_result = execute(request)
+            if not isinstance(operation_result, dict):
+                operation_result = {}
+            error = ""
+        except Exception as exc:
+            operation_result = {}
+            error = str(exc) or exc.__class__.__name__
+        after = _call_int(self._foreground_hwnd_provider)
+        return WeChatUiaSemanticActionSendReport(
+            request=request,
+            dry_run_report=dry_run,
+            operation_result=dict(operation_result),
+            uia_value_set_attempts=1 if operation_result.get("value_set_attempted") or operation_result.get("value_set") else 0,
+            uia_invoke_attempts=1 if operation_result.get("invoke_attempted") else 0,
+            foreground_hwnd_before=before,
+            foreground_hwnd_after=after,
+            error=error,
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
+
+
+class PywinautoWeChatUiaSemanticActionOperator:
+    """Executes WeChat semantic send through UIA Value/Invoke patterns."""
+
+    def execute(self, request: WeChatUiaSemanticActionRequest) -> dict:
+        from openwukong.control.agent_app_uia_action import (
+            PywinautoUiaSemanticActionOperator,
+        )
+
+        return PywinautoUiaSemanticActionOperator().execute(request)  # type: ignore[arg-type]
+
+
 def build_wechat_uia_semantic_action_request(
     *,
     target_name: str,
@@ -241,6 +432,8 @@ def build_wechat_uia_semantic_action_request(
     windows: Iterable[AccessibilityWindowSnapshot],
     background_screenshot_focus_stable: bool = True,
     selected_transport: dict | object | None = None,
+    required_markers: tuple[str, ...] = (),
+    forbidden_markers: tuple[str, ...] = (),
 ) -> WeChatUiaSemanticActionRequest:
     return WeChatUiaSemanticActionRequest(
         target_name=str(target_name or "").strip(),
@@ -248,6 +441,8 @@ def build_wechat_uia_semantic_action_request(
         windows=tuple(windows),
         background_screenshot_focus_stable=bool(background_screenshot_focus_stable),
         selected_transport=_dict_from_report(selected_transport),
+        required_markers=_string_tuple(required_markers),
+        forbidden_markers=_string_tuple(forbidden_markers),
     )
 
 
@@ -356,10 +551,49 @@ def _dict_from_report(value: object) -> dict:
     return {}
 
 
+def _first_text(data: dict, *keys: str) -> str:
+    for key in keys:
+        value = data.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _string_tuple(values: object) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    if isinstance(values, str):
+        values = (values,)
+    try:
+        items = tuple(values)  # type: ignore[arg-type]
+    except TypeError:
+        items = (values,)
+    return tuple(str(item).strip() for item in items if str(item or "").strip())
+
+
+def _call_int(provider: object) -> int:
+    try:
+        return int(provider() or 0) if callable(provider) else 0
+    except Exception:
+        return 0
+
+
+def _foreground_hwnd() -> int:
+    try:
+        import ctypes
+
+        return int(ctypes.windll.user32.GetForegroundWindow() or 0)
+    except Exception:
+        return 0
+
+
 __all__ = [
     "WECHAT_UIA_ACTION_SCHEMA_VERSION",
     "WeChatUiaSemanticActionDryRunAdapter",
     "WeChatUiaSemanticActionDryRunReport",
     "WeChatUiaSemanticActionRequest",
+    "WeChatUiaSemanticActionSenderAdapter",
+    "WeChatUiaSemanticActionSendReport",
+    "PywinautoWeChatUiaSemanticActionOperator",
     "build_wechat_uia_semantic_action_request",
 ]

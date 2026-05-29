@@ -270,6 +270,10 @@ def run_major_scenario_real_no_loss(
     owned_browser_executable: str = "chrome.exe",
     owned_browser_url: str = "data:text/html,<title>OpenWukong Major No Loss</title><body>OpenWukong Major No Loss</body>",
     background_screenshot_dir: str | Path = "",
+    allow_wechat_uia_semantic_send: bool = False,
+    wechat_uia_message: str = "OPENWUKONG_WECHAT_UIA_SEMANTIC_SEND",
+    wechat_uia_required_markers: tuple[str, ...] = (),
+    wechat_uia_forbidden_markers: tuple[str, ...] = (),
     agent_apps: Iterable[str] = DEFAULT_AGENT_APPS,
     cli_agents: Iterable[str] = DEFAULT_CLI_AGENTS,
     project_name: str = "openwukong",
@@ -318,6 +322,10 @@ def run_major_scenario_real_no_loss(
                 background_screenshot_dir
                 or root / "background-screenshots" / "primary"
             ),
+            allow_wechat_uia_semantic_send=allow_wechat_uia_semantic_send,
+            wechat_uia_message=wechat_uia_message,
+            wechat_uia_required_markers=tuple(wechat_uia_required_markers or ()),
+            wechat_uia_forbidden_markers=tuple(wechat_uia_forbidden_markers or ()),
         )
     )
     helper = _disabled_owned_ide_bridge_helper_report()
@@ -519,7 +527,7 @@ def _primary_requirement(
 
 
 def _wechat_background_send_requirement(case: dict) -> MajorRequirement:
-    details = _details(case)
+    details = _details(case.get("details", {}))
     dry_run = _details(details.get("uia_semantic_action_dry_run", {}))
     if bool(details.get("background_send_verified", False)) or bool(
         case.get("background_send_verified", False)
@@ -1154,6 +1162,28 @@ def main(argv: Optional[list[str]] = None) -> int:
         default="data:text/html,<title>OpenWukong Major No Loss</title><body>OpenWukong Major No Loss</body>",
     )
     parser.add_argument("--background-screenshot-dir", default="")
+    parser.add_argument(
+        "--allow-wechat-uia-semantic-send",
+        action="store_true",
+        help="Allow explicit WeChat UIA ValuePattern/InvokePattern semantic send when the File Transfer Assistant contract is ready.",
+    )
+    parser.add_argument(
+        "--wechat-uia-message",
+        default="OPENWUKONG_WECHAT_UIA_SEMANTIC_SEND",
+        help="Message used for optional WeChat UIA semantic send.",
+    )
+    parser.add_argument(
+        "--wechat-uia-acceptance-marker",
+        action="append",
+        default=[],
+        help="Required WeChat UIA send readback marker. Repeat for multiple markers.",
+    )
+    parser.add_argument(
+        "--wechat-uia-forbid-marker",
+        action="append",
+        default=[],
+        help="Forbidden WeChat UIA send readback marker. Repeat for multiple markers.",
+    )
     parser.add_argument("--agent-app", action="append", default=None)
     parser.add_argument("--cli-agent", action="append", default=None)
     parser.add_argument("--project-name", default="openwukong")
@@ -1238,6 +1268,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         owned_browser_executable=args.owned_browser_executable,
         owned_browser_url=args.owned_browser_url,
         background_screenshot_dir=args.background_screenshot_dir,
+        allow_wechat_uia_semantic_send=args.allow_wechat_uia_semantic_send,
+        wechat_uia_message=args.wechat_uia_message,
+        wechat_uia_required_markers=tuple(args.wechat_uia_acceptance_marker or ()),
+        wechat_uia_forbidden_markers=tuple(args.wechat_uia_forbid_marker or ()),
         agent_apps=tuple(args.agent_app or DEFAULT_AGENT_APPS),
         cli_agents=tuple(args.cli_agent or DEFAULT_CLI_AGENTS),
         project_name=args.project_name,

@@ -5641,3 +5641,81 @@ When a new conversation starts in this repo:
       Claude CLI login/auth,
       Codex App native/app bridge,
       Claude Desktop native/app bridge
+- 2026-05-29 added an explicit WeChat UIA semantic send gate and verified the
+  real current-machine negative case:
+  - implementation:
+    - `wechat_uia_action` now has an explicit opt-in sender that consumes the
+      existing dry-run contract, uses only UIA `ValuePattern.SetValue` and
+      `InvokePattern.Invoke`, records UIA value/invoke attempts separately,
+      and reports zero keyboard, clipboard, mouse, or window input attempts
+    - the sender requires post-action readback markers and rejects the result
+      if foreground focus changes, a forbidden marker appears, or the required
+      marker is missing
+    - `primary_real_no_loss` can now run this WeChat sender behind
+      `allow_wechat_uia_semantic_send`; default behavior remains dry-run only
+    - `major_real_no_loss` exposes the same option through
+      `--allow-wechat-uia-semantic-send`,
+      `--wechat-uia-message`,
+      `--wechat-uia-acceptance-marker`, and
+      `--wechat-uia-forbid-marker`
+    - fixed the major requirement aggregation bug where
+      `wechat_background_send` read the wrong case layer; it now reads
+      `case.details.background_send_verified`
+  - official-doc basis:
+    - Microsoft UI Automation `ValuePattern.SetValue` docs were checked:
+      it sets a supported control value, but provider support/read-only state
+      must be validated
+    - Microsoft UI Automation `InvokePattern.Invoke` docs were checked:
+      it requests a control's single unambiguous action, but behavior depends
+      on the provider implementation
+    - Microsoft UI Automation control pattern overview was checked for the
+      pattern-based client/provider model
+  - safe/real validation:
+    - focused regression:
+      `python -m unittest tests.test_wechat_uia_action_contract tests.test_primary_real_no_loss tests.test_major_real_no_loss tests.test_agent_app_real_no_loss tests.test_agent_app_uia_action_contract`: `38 tests OK`
+    - focused real command:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r20-wechat-uia-send --output logs\runtime\major-real-no-loss-r20-wechat-uia-send\report.json --allow-wechat-uia-semantic-send --wechat-uia-message OPENWUKONG_WECHAT_UIA_R20_20260529 --wechat-uia-acceptance-marker OPENWUKONG_WECHAT_UIA_R20_20260529 --json`
+    - R20 result:
+      `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `external_communication_attempts=0`,
+      `background_screenshot_success_count=5/5`,
+      `background_screenshot_focus_stable=true`
+    - R20 WeChat evidence:
+      WeChat observation remained verified, but send stayed gated with
+      `wechat_uia_semantic_action_target_not_ready`; the real current window
+      exposed only one UIA `Pane`, no semantic input, no semantic submit
+      control, and therefore no send attempt was made
+    - full real command:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r21-wechat-uia-owned-ide-cli --output logs\runtime\major-real-no-loss-r21-wechat-uia-owned-ide-cli\report.json --allow-owned-browser-helper-launch --owned-browser-debug-port 9487 --owned-browser-url "data:text/html,<title>OpenWukong Major R21</title><body>OpenWukong Major R21</body>" --allow-wechat-uia-semantic-send --wechat-uia-message OPENWUKONG_WECHAT_UIA_R21_20260529 --wechat-uia-acceptance-marker OPENWUKONG_WECHAT_UIA_R21_20260529 --project-name openwukong --task-name major-wechat-uia-owned-ide-cli-r21 --allow-app-bridge-send --app-bridge-message OPENWUKONG_MAJOR_WECHAT_UIA_OWNED_IDE_CLI_R21 --allow-owned-ide-bridge-helper-launch --owned-ide-executable "E:\cursor\cursor\cursor\Cursor.exe" --owned-ide-bridge-port 8797 --owned-ide-capability-timeout-sec 45 --allow-agent-cli-execution --agent-cli-timeout-sec 120`
+    - R21 result:
+      `safe_run_ok=true`, `goal_complete=false`,
+      `unmet=4`, `control_attempts=0`,
+      `window_input_attempts=0`, `agent_command_attempts=2`,
+      `bridge_send_attempts=1`,
+      `background_screenshot_success_count=6/6`,
+      `background_screenshot_focus_stable=true`,
+      `owned_ide_bridge_cleanup_ok=true`
+    - R21 requirement result:
+      `wechat_background_observation=verified`,
+      `wechat_background_send=gated (wechat_uia_semantic_action_target_not_ready)`,
+      `word_background_document=verified`,
+      `browser_background_research=verified`,
+      `file_background_search=verified`,
+      `codex_cli_background_task=verified`,
+      `claude_cli_background_task=auth_required`,
+      `cursor_background_chat=verified`,
+      `codex_app_background_chat=gated_native_endpoint_missing`,
+      `claude_desktop_background_chat=unavailable`
+    - cleanup:
+      port `8797` reported `TcpTestSucceeded=false`, and no non-PowerShell
+      process command line still contained the R21 owned helper runtime root
+  - current conclusion:
+    - WeChat now has a strict background semantic sender path when the target
+      conversation and UIA Value/Invoke controls are actually exposed
+    - the current live WeChat state did not expose that surface, so the runner
+      correctly refused to send and recorded provider-negative evidence
+    - next concrete action is no longer "try harder with UIA"; it is to build
+      a WeChat native/semantic connector or a deterministic target-conversation
+      bridge that can expose the File Transfer Assistant composer without
+      foreground keyboard/clipboard takeover

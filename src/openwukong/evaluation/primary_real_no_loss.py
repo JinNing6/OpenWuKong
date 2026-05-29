@@ -22,6 +22,7 @@ from openwukong.control.session_readiness_plan import (
 )
 from openwukong.control.wechat_uia_action import (
     WeChatUiaSemanticActionDryRunAdapter,
+    WeChatUiaSemanticActionSenderAdapter,
     build_wechat_uia_semantic_action_request,
 )
 from openwukong.evaluation.accessibility_probe import (
@@ -164,6 +165,13 @@ class PrimaryRealNoLossReport:
                 )
                 or 0
             )
+            + int(
+                case.details.get("uia_semantic_action_send_report", {}).get(
+                    "uia_value_set_attempts",
+                    0,
+                )
+                or 0
+            )
             for case in self.cases
         )
 
@@ -172,6 +180,13 @@ class PrimaryRealNoLossReport:
         return sum(
             int(
                 case.details.get("uia_semantic_action_dry_run", {}).get(
+                    "uia_invoke_attempts",
+                    0,
+                )
+                or 0
+            )
+            + int(
+                case.details.get("uia_semantic_action_send_report", {}).get(
                     "uia_invoke_attempts",
                     0,
                 )
@@ -269,6 +284,11 @@ def run_primary_real_no_loss(
     word_background_probe_runner: WordBackgroundProbeRunner | None = None,
     background_screenshot_dir: str | Path = "",
     window_capture_provider: object | None = None,
+    allow_wechat_uia_semantic_send: bool = False,
+    wechat_uia_message: str = "OPENWUKONG_WECHAT_UIA_SEMANTIC_SEND",
+    wechat_uia_required_markers: tuple[str, ...] = (),
+    wechat_uia_forbidden_markers: tuple[str, ...] = (),
+    wechat_uia_sender: object | None = None,
 ) -> PrimaryRealNoLossReport:
     started = time.perf_counter()
     root = _resolve_output_root(output_root)
@@ -309,6 +329,11 @@ def run_primary_real_no_loss(
                 wechat_win32_observer,
                 background_screenshot_dir,
                 window_capture_provider,
+                allow_wechat_uia_semantic_send,
+                wechat_uia_message,
+                tuple(wechat_uia_required_markers or ()),
+                tuple(wechat_uia_forbidden_markers or ()),
+                wechat_uia_sender,
             )
         elif scenario_id == "files.search.find_candidate":
             case = _file_case(row, root)
@@ -516,6 +541,11 @@ def _wechat_case(
     wechat_win32_observer: object | None,
     background_screenshot_dir: str | Path,
     window_capture_provider: object | None,
+    allow_wechat_uia_semantic_send: bool,
+    wechat_uia_message: str,
+    wechat_uia_required_markers: tuple[str, ...],
+    wechat_uia_forbidden_markers: tuple[str, ...],
+    wechat_uia_sender: object | None,
 ) -> PrimaryRealNoLossCase:
     observer = accessibility_observer or PywinautoAccessibilityObserver(
         max_windows=40,
@@ -544,11 +574,24 @@ def _wechat_case(
     background_focus_stable = not any(
         item.foreground_changed for item in background_screenshots
     )
-    semantic_action_dry_run = _wechat_uia_semantic_action_dry_run(
+    semantic_request = _wechat_uia_semantic_action_request(
         row,
         matches,
         background_screenshot_focus_stable=background_focus_stable,
+        message_override=(
+            wechat_uia_message if allow_wechat_uia_semantic_send else ""
+        ),
+        required_markers=wechat_uia_required_markers,
+        forbidden_markers=wechat_uia_forbidden_markers,
     )
+    semantic_action_dry_run = WeChatUiaSemanticActionDryRunAdapter().prepare(
+        semantic_request
+    ).to_dict()
+    semantic_action_send_report: dict = {}
+    if allow_wechat_uia_semantic_send and bool(semantic_action_dry_run.get("ok", False)):
+        active_sender = wechat_uia_sender or WeChatUiaSemanticActionSenderAdapter()
+        semantic_action_send_report = _report_to_dict(active_sender.send(semantic_request))
+    background_send_verified = _wechat_uia_send_verified(semantic_action_send_report)
     details = {
         "matching_window_count": len(matches),
         "windows": [
@@ -566,6 +609,8 @@ def _wechat_case(
         ],
         "uia_semantic_action_ready": bool(semantic_action_dry_run.get("ok", False)),
         "uia_semantic_action_dry_run": semantic_action_dry_run,
+        "background_send_verified": background_send_verified,
+        "uia_semantic_action_send_report": semantic_action_send_report,
         "total_scanned_windows": report.window_count,
         "total_scanned_elements": report.total_elements,
     }
@@ -577,8 +622,41 @@ def _wechat_case(
         real_verified=bool(matches),
         real_probe_kind="wechat-uia-win32-read-only-locator",
         details=details,
-        send_attempts=0,
-        window_input_attempts=0,
+        send_attempts=_counter(semantic_action_send_report, "send_attempts"),
+        window_input_attempts=_counter(semantic_action_send_report, "window_input_attempts"),
+    )
+
+
+def _wechat_uia_semantic_action_request(
+    row: dict,
+    matches: list[object],
+    *,
+    background_screenshot_focus_stable: bool,
+    message_override: str = "",
+    required_markers: tuple[str, ...] = (),
+    forbidden_markers: tuple[str, ...] = (),
+):
+    plan = dict(row.get("plan", {}) or {})
+    intent = dict(plan.get("draft_action", {}).get("intent", {}) or {})
+    target_name = str(
+        intent.get("contact", "")
+        or intent.get("target_name", "")
+        or intent.get("recipient", "")
+        or ""
+    ).strip()
+    message = str(message_override or intent.get("message", "") or "").strip()
+    return build_wechat_uia_semantic_action_request(
+        target_name=target_name,
+        message=message,
+        windows=tuple(matches),
+        background_screenshot_focus_stable=background_screenshot_focus_stable,
+        selected_transport={
+            "transport_id": "wechat-uia-semantic",
+            "transport_channel": "uia",
+            "safety_mode": "dry_run_or_explicit_opt_in_execute",
+        },
+        required_markers=required_markers,
+        forbidden_markers=forbidden_markers,
     )
 
 
@@ -588,27 +666,28 @@ def _wechat_uia_semantic_action_dry_run(
     *,
     background_screenshot_focus_stable: bool,
 ) -> dict:
-    plan = dict(row.get("plan", {}) or {})
-    intent = dict(plan.get("draft_action", {}).get("intent", {}) or {})
-    target_name = str(
-        intent.get("contact", "")
-        or intent.get("target_name", "")
-        or intent.get("recipient", "")
-        or ""
-    ).strip()
-    message = str(intent.get("message", "") or "").strip()
-    request = build_wechat_uia_semantic_action_request(
-        target_name=target_name,
-        message=message,
-        windows=tuple(matches),
+    request = _wechat_uia_semantic_action_request(
+        row,
+        matches,
         background_screenshot_focus_stable=background_screenshot_focus_stable,
-        selected_transport={
-            "transport_id": "wechat-uia-semantic-dry-run",
-            "transport_channel": "uia",
-            "safety_mode": "dry_run",
-        },
     )
     return WeChatUiaSemanticActionDryRunAdapter().prepare(request).to_dict()
+
+
+def _wechat_uia_send_verified(report: dict) -> bool:
+    if not report:
+        return False
+    return bool(
+        report.get("ok", False)
+        and str(report.get("decision", "") or "") == "wechat_uia_semantic_action_send_accepted"
+        and _counter(report, "send_attempts") == 1
+        and _counter(report, "window_input_attempts") == 0
+        and _counter(report, "keyboard_input_attempts") == 0
+        and _counter(report, "clipboard_write_attempts") == 0
+        and bool(report.get("foreground_focus_stable", True))
+        and not report.get("missing_required_markers")
+        and not report.get("present_forbidden_markers")
+    )
 
 
 def _file_case(row: dict, output_root: Path) -> PrimaryRealNoLossCase:
@@ -900,6 +979,13 @@ def _report_to_dict(report: object) -> dict:
         if isinstance(data, dict):
             return dict(data)
     return {"ok": False, "error": "invalid_word_probe_report"}
+
+
+def _counter(data: dict, key: str) -> int:
+    try:
+        return int(data.get(key, 0) or 0)
+    except Exception:
+        return 0
 
 
 def main(argv: Optional[list[str]] = None) -> int:

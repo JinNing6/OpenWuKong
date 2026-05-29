@@ -568,6 +568,149 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             self.assertEqual(summary["background_screenshot_count"], 1)
             self.assertTrue(summary["background_screenshot_focus_stable"])
 
+    def test_runner_can_execute_opt_in_wechat_uia_semantic_send_without_window_input(self):
+        fixture = load_simulation_fixture(
+            Path("tests/fixtures/evaluation/l1_primary_user_scenarios.json")
+        )
+        observer = StaticAccessibilityObserver(
+            [
+                AccessibilityWindowSnapshot(
+                    pid=7001,
+                    process_name="Weixin.exe",
+                    window_title="文件传输助手 - 微信",
+                    hwnd=7001,
+                    elements=(
+                        _element("Text", name="文件传输助手"),
+                        _element("Edit", name="Type a message", patterns=("Value", "Text")),
+                        _element("Button", name="Send", patterns=("Invoke",)),
+                    ),
+                )
+            ]
+        )
+        sender_calls = []
+
+        class FakeWeChatUiaSender:
+            def send(self, request):
+                sender_calls.append(request)
+                return {
+                    "mode": "wechat-uia-semantic-action-send",
+                    "safety_mode": "uia_semantic_execute",
+                    "ok": True,
+                    "decision": "wechat_uia_semantic_action_send_accepted",
+                    "control_attempts": 0,
+                    "send_attempts": 1,
+                    "window_input_attempts": 0,
+                    "keyboard_input_attempts": 0,
+                    "clipboard_write_attempts": 0,
+                    "uia_value_set_attempts": 1,
+                    "uia_invoke_attempts": 1,
+                    "foreground_focus_stable": True,
+                    "missing_required_markers": [],
+                    "present_forbidden_markers": [],
+                    "request": request.to_dict(),
+                    "operation_result": {
+                        "readbackText": f"File Transfer Assistant\n{request.message}",
+                    },
+                }
+
+        def _fake_readiness_probe(debugger_url: str) -> dict:
+            return {
+                "mode": "browser-helper-readiness-probe",
+                "ok": True,
+                "debugger_url": debugger_url,
+                "target_count": 1,
+                "targets": [
+                    {
+                        "type": "page",
+                        "title": "OpenWukong Primary Smoke",
+                        "url": "about:blank#openwukong-primary-smoke",
+                    }
+                ],
+                "error": "",
+            }
+
+        def _fake_browser_action_runner(**kwargs) -> dict:
+            return {
+                "mode": "browser-devtools-action",
+                "ok": True,
+                "health_ok": True,
+                "control_attempts": 0,
+                "action": kwargs["action"],
+                "action_result": {
+                    "title": "OpenWukong Primary Smoke",
+                    "href": kwargs["resource_url"],
+                    "readyState": "complete",
+                    "textExcerpt": "OpenWukong Primary Smoke",
+                },
+            }
+
+        def _fake_word_background_probe(**kwargs) -> dict:
+            Path(kwargs["document_path"]).write_bytes(b"fake-docx")
+            return {
+                "ok": True,
+                "decision": "word_background_probe_verified",
+                "document_path": kwargs["document_path"],
+                "marker": kwargs["marker"],
+                "save_verified": True,
+                "readback_verified": True,
+                "word_started": True,
+                "visible_requested": False,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "office_com_attempts": 1,
+                "error": "",
+            }
+
+        def _fake_ide_bridge_probe(bridge_url: str) -> dict:
+            return {
+                "mode": "ide-bridge-capability-capture",
+                "ok": True,
+                "control_attempts": 0,
+                "bridge_url": bridge_url,
+                "command_count": 1,
+                "commands": ["openwukong.readState"],
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_primary_real_no_loss(
+                fixture,
+                output_root=tmp,
+                allow_owned_browser_helper_launch=True,
+                owned_browser_helper_launcher=_FakeReadinessLauncher(),
+                owned_browser_helper_terminator=_FakeReadinessTerminator(),
+                owned_browser_helper_readiness_probe=_fake_readiness_probe,
+                owned_browser_helper_action_runner=_fake_browser_action_runner,
+                owned_browser_debug_port=9452,
+                owned_browser_executable="chrome.exe",
+                owned_browser_url="about:blank#openwukong-primary-smoke",
+                browser_executable_resolver=lambda requested: requested,
+                accessibility_observer=observer,
+                wechat_win32_observer=StaticWin32WindowObserver({7001: ()}),
+                word_background_probe_runner=_fake_word_background_probe,
+                ide_bridge_probe=_fake_ide_bridge_probe,
+                allow_wechat_uia_semantic_send=True,
+                wechat_uia_message="OPENWUKONG_WECHAT_UIA_ACCEPTANCE: PASS",
+                wechat_uia_required_markers=("OPENWUKONG_WECHAT_UIA_ACCEPTANCE: PASS",),
+                wechat_uia_sender=FakeWeChatUiaSender(),
+            )
+            data = report.to_dict()
+
+        self.assertEqual(len(sender_calls), 1)
+        self.assertEqual(sender_calls[0].message, "OPENWUKONG_WECHAT_UIA_ACCEPTANCE: PASS")
+        self.assertEqual(data["external_communication_attempts"], 1)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(data["uia_value_set_attempts"], 1)
+        self.assertEqual(data["uia_invoke_attempts"], 1)
+        cases = {case["scenario_id"]: case for case in data["cases"]}
+        wechat = cases["wechat.chat.draft_reply"]
+        self.assertEqual(wechat["send_attempts"], 1)
+        self.assertEqual(wechat["window_input_attempts"], 0)
+        self.assertTrue(wechat["details"]["background_send_verified"])
+        self.assertEqual(
+            wechat["details"]["uia_semantic_action_send_report"]["decision"],
+            "wechat_uia_semantic_action_send_accepted",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
