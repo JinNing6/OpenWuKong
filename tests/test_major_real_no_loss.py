@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from openwukong.evaluation.major_real_no_loss import (
+    MajorScenarioRealNoLossReport,
     prepare_owned_ide_bridge_helper,
     run_major_scenario_real_no_loss,
 )
@@ -17,7 +18,83 @@ class _FakeReport:
         return dict(self._data)
 
 
+def _major_report(primary=None, app=None, cli=None, helper=None):
+    return MajorScenarioRealNoLossReport(
+        output_root="",
+        artifact_path="",
+        primary_report=dict(primary or {}),
+        owned_ide_bridge_helper_report=dict(helper or {}),
+        agent_app_report=dict(app or {}),
+        agent_cli_report=dict(cli or {}),
+        requirements=(),
+    )
+
+
 class MajorRealNoLossTests(unittest.TestCase):
+    def test_safe_run_allows_unrelated_focus_change_when_no_automation_attempts(self):
+        report = _major_report(
+            primary={
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "external_communication_attempts": 0,
+                "owned_app_launch_attempts": 0,
+            },
+            app={
+                "background_screenshot_focus_stable": False,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 0,
+                "agent_command_attempts": 0,
+            },
+            cli={
+                "foreground_focus_stable": False,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "agent_command_attempts": 0,
+            },
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["background_screenshot_focus_stable"])
+        self.assertTrue(data["automation_focus_safe"])
+        self.assertTrue(data["safe_run_ok"])
+
+    def test_safe_run_fails_focus_change_when_bridge_send_was_attempted(self):
+        report = _major_report(
+            primary={
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "external_communication_attempts": 0,
+                "owned_app_launch_attempts": 0,
+            },
+            app={
+                "background_screenshot_focus_stable": False,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 1,
+                "agent_command_attempts": 0,
+            },
+            cli={
+                "foreground_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "agent_command_attempts": 0,
+            },
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["background_screenshot_focus_stable"])
+        self.assertFalse(data["automation_focus_safe"])
+        self.assertFalse(data["safe_run_ok"])
+
     def test_runner_aggregates_main_surfaces_and_marks_unmet_background_actions(self):
         primary_calls = []
         app_calls = []

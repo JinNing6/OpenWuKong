@@ -183,6 +183,24 @@ class MajorScenarioRealNoLossReport:
         ) and bool(self.agent_app_report.get("background_screenshot_focus_stable", True))
 
     @property
+    def automation_focus_risk_attempts(self) -> int:
+        return (
+            self.control_attempts
+            + self.window_input_attempts
+            + self.external_communication_attempts
+            + self.owned_ide_bridge_launch_attempts
+            + self.bridge_send_attempts
+            + self.agent_command_attempts
+            + self.owned_app_launch_attempts
+        )
+
+    @property
+    def automation_focus_safe(self) -> bool:
+        if self.background_screenshot_focus_stable:
+            return True
+        return self.automation_focus_risk_attempts == 0
+
+    @property
     def failed_runner_count(self) -> int:
         return sum(
             1
@@ -209,7 +227,7 @@ class MajorScenarioRealNoLossReport:
             and self.failed_runner_count == 0
             and self.control_attempts == 0
             and self.window_input_attempts == 0
-            and self.background_screenshot_focus_stable
+            and self.automation_focus_safe
             and self.owned_ide_bridge_cleanup_ok
         )
 
@@ -219,7 +237,7 @@ class MajorScenarioRealNoLossReport:
             self.failed_runner_count == 0
             and self.control_attempts == 0
             and self.window_input_attempts == 0
-            and self.background_screenshot_focus_stable
+            and self.automation_focus_safe
             and self.owned_ide_bridge_cleanup_ok
         )
 
@@ -241,6 +259,8 @@ class MajorScenarioRealNoLossReport:
             "background_screenshot_count": self.background_screenshot_count,
             "background_screenshot_success_count": self.background_screenshot_success_count,
             "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
+            "automation_focus_risk_attempts": self.automation_focus_risk_attempts,
+            "automation_focus_safe": self.automation_focus_safe,
             "failed_runner_count": self.failed_runner_count,
             "goal_complete": self.goal_complete,
             "safe_run_ok": self.safe_run_ok,

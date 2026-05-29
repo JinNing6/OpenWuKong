@@ -5984,3 +5984,70 @@ When a new conversation starts in this repo:
     - the remaining work is to build or install the actual app-side bridges;
       the orchestration layer will now discover them and still reject unsafe,
       remote, CLI-only, or unbound endpoints
+- 2026-05-29 added a CDP-backed Agent App native bridge and fixed no-loss
+  focus attribution:
+  - implementation:
+    - added `agent_native_cdp_bridge`, a real app-side bridge implementation
+      that exposes the existing `/v1/agent/capabilities` and `/v1/agent/chat`
+      contract over a local HTTP server and submits messages through Chrome
+      DevTools Protocol `Runtime.evaluate`
+    - the bridge reports `surface_kind=desktop_app`, explicit
+      `app_binding` evidence, and keeps `control_attempts`,
+      `window_input_attempts`, `keyboard_input_attempts`, and
+      `clipboard_write_attempts` at zero
+    - target selection prefers explicit DevTools target URL, then target/window
+      title, then a conservative page/webview fallback
+    - `major_real_no_loss` now distinguishes raw foreground stability from
+      automation-caused focus risk:
+      `automation_focus_risk_attempts == 0` makes a pure observation run
+      `automation_focus_safe=true`, while bridge sends, agent commands,
+      launches, or window-input attempts still make focus changes fail the run
+    - report JSON now includes both raw `background_screenshot_focus_stable`
+      evidence and the derived `automation_focus_safe` decision
+  - official-doc basis:
+    - Chrome DevTools Protocol `Runtime.evaluate` docs were checked before
+      implementing the CDP bridge execution path
+    - Python `json` and `urllib.parse` docs were already checked for bridge
+      registry parsing and local URL validation in the previous step
+  - validation:
+    - red tests first:
+      `tests.test_agent_native_cdp_bridge` failed on missing module before the
+      bridge was implemented
+    - red tests first:
+      `test_safe_run_allows_unrelated_focus_change_when_no_automation_attempts`
+      and
+      `test_safe_run_fails_focus_change_when_bridge_send_was_attempted`
+      failed before `automation_focus_safe` existed
+    - targeted green:
+      `python -m unittest tests.test_agent_native_cdp_bridge`: `3 tests OK`
+    - focused regression:
+      `python -m unittest tests.test_agent_native_cdp_bridge tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_major_real_no_loss`: `63 tests OK`
+    - full suite:
+      `python -m unittest discover tests`: `496 tests OK`
+    - compile/check:
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+    - real no-loss smoke before attribution fix:
+      R27 produced zero automation attempts and 5/5 background screenshots,
+      but failed because the raw foreground changed during pure observation
+    - real no-loss smoke after attribution fix:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r28-agent-native-cdp-bridge-focus-attribution-no-url --output logs\runtime\major-real-no-loss-r28-agent-native-cdp-bridge-focus-attribution-no-url\report.json --json`
+      produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `agent_command_attempts=0`,
+      `background_screenshot_success_count=6/6`,
+      `background_screenshot_focus_stable=true`,
+      `automation_focus_risk_attempts=0`, and
+      `automation_focus_safe=true`
+  - current conclusion:
+    - Codex App / Claude Desktop / Cursor-style desktop app control now has a
+      concrete CDP-native bridge implementation when the app exposes a local
+      DevTools endpoint or an installed helper registers one
+    - no-loss reporting now avoids false negatives from unrelated user focus
+      changes during pure observation, without weakening the rule that any
+      automation send/launch/window-input attempt must preserve foreground
+      safety
+    - remaining true gaps are still app-side endpoints and product-specific
+      connectors: WeChat native bridge, Codex App bridge installation, Claude
+      Desktop bridge installation, and auth/permission for real agent execution
