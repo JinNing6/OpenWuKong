@@ -11,11 +11,25 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from openwukong.control.session_readiness_plan import (
+    SessionReadinessPlanOptions,
+    build_session_readiness_plan,
+    execute_session_readiness_plan,
+    stop_session_readiness_manifest,
+)
 from openwukong.evaluation.agent_app_real_no_loss import (
     run_agent_app_real_no_loss,
 )
 from openwukong.evaluation.agent_cli_real_no_loss import (
     run_agent_cli_real_no_loss,
+)
+from openwukong.evaluation.ide_bridge_capture import (
+    capture_ide_bridge_capabilities,
+)
+from openwukong.evaluation.ide_bridge_contract_probe import (
+    build_bridge_settings_from_probe_report,
+    probe_ide_command_contracts,
+    select_probe_command_ids,
 )
 from openwukong.evaluation.primary_real_no_loss import (
     _resolve_installed_browser_executable,
@@ -32,6 +46,7 @@ DEFAULT_CLI_AGENTS = ("codex", "claude")
 PrimaryRunner = Callable[..., object]
 AgentAppRunner = Callable[..., object]
 AgentCliRunner = Callable[..., object]
+OwnedIdeBridgeHelperRunner = Callable[..., object]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -66,6 +81,7 @@ class MajorScenarioRealNoLossReport:
     output_root: str
     artifact_path: str
     primary_report: dict
+    owned_ide_bridge_helper_report: dict
     agent_app_report: dict
     agent_cli_report: dict
     requirements: tuple[MajorRequirement, ...]
@@ -104,6 +120,29 @@ class MajorScenarioRealNoLossReport:
             self.agent_cli_report,
             key="window_input_attempts",
         )
+
+    @property
+    def owned_ide_bridge_launch_attempts(self) -> int:
+        return _counter(self.owned_ide_bridge_helper_report, "launch_attempts")
+
+    @property
+    def owned_ide_bridge_stop_attempts(self) -> int:
+        return _counter(self.owned_ide_bridge_helper_report, "stop_attempts")
+
+    @property
+    def isolated_ide_command_probe_attempts(self) -> int:
+        return _counter(
+            self.owned_ide_bridge_helper_report,
+            "isolated_command_probe_attempts",
+        )
+
+    @property
+    def owned_ide_bridge_cleanup_ok(self) -> bool:
+        if not self.owned_ide_bridge_helper_report:
+            return True
+        if not bool(self.owned_ide_bridge_helper_report.get("enabled", False)):
+            return True
+        return bool(self.owned_ide_bridge_helper_report.get("cleanup_ok", False))
 
     @property
     def bridge_send_attempts(self) -> int:
@@ -153,7 +192,7 @@ class MajorScenarioRealNoLossReport:
                 self.agent_cli_report,
             )
             if _counter(report, "failed_cases") > 0
-        )
+        ) + (0 if self.owned_ide_bridge_cleanup_ok else 1)
 
     @property
     def unmet_requirements(self) -> tuple[str, ...]:
@@ -171,6 +210,7 @@ class MajorScenarioRealNoLossReport:
             and self.control_attempts == 0
             and self.window_input_attempts == 0
             and self.background_screenshot_focus_stable
+            and self.owned_ide_bridge_cleanup_ok
         )
 
     @property
@@ -180,6 +220,7 @@ class MajorScenarioRealNoLossReport:
             and self.control_attempts == 0
             and self.window_input_attempts == 0
             and self.background_screenshot_focus_stable
+            and self.owned_ide_bridge_cleanup_ok
         )
 
     def to_dict(self) -> dict:
@@ -190,6 +231,10 @@ class MajorScenarioRealNoLossReport:
             "control_attempts": self.control_attempts,
             "external_communication_attempts": self.external_communication_attempts,
             "window_input_attempts": self.window_input_attempts,
+            "owned_ide_bridge_launch_attempts": self.owned_ide_bridge_launch_attempts,
+            "owned_ide_bridge_stop_attempts": self.owned_ide_bridge_stop_attempts,
+            "owned_ide_bridge_cleanup_ok": self.owned_ide_bridge_cleanup_ok,
+            "isolated_ide_command_probe_attempts": self.isolated_ide_command_probe_attempts,
             "bridge_send_attempts": self.bridge_send_attempts,
             "agent_command_attempts": self.agent_command_attempts,
             "owned_app_launch_attempts": self.owned_app_launch_attempts,
@@ -207,6 +252,7 @@ class MajorScenarioRealNoLossReport:
             "artifact_path": self.artifact_path,
             "subreports": {
                 "primary": dict(self.primary_report),
+                "owned_ide_bridge_helper": dict(self.owned_ide_bridge_helper_report),
                 "agent_app": dict(self.agent_app_report),
                 "agent_cli": dict(self.agent_cli_report),
             },
@@ -238,9 +284,19 @@ def run_major_scenario_real_no_loss(
     app_bridge_forbidden_markers: tuple[str, ...] = (),
     ide_bridge_urls: Iterable[str] = (),
     workspace_path: str = "",
+    allow_owned_ide_bridge_helper_launch: bool = False,
+    owned_ide_executable: str = "cursor.exe",
+    owned_ide_bridge_port: int = 8791,
+    owned_ide_user_data_dir: str = "",
+    owned_ide_extensions_dir: str = "",
+    owned_ide_extension_dir: str = "extensions/openwukong-vscode",
+    owned_ide_workspace_root: str = "",
+    owned_ide_chat_adapter_id: str = "cursor",
+    owned_ide_capability_timeout_sec: float = 30.0,
     allow_agent_cli_execution: bool = False,
     agent_cli_timeout_sec: float = 90.0,
     primary_runner: PrimaryRunner | None = None,
+    owned_ide_bridge_helper_runner: OwnedIdeBridgeHelperRunner | None = None,
     agent_app_runner: AgentAppRunner | None = None,
     agent_cli_runner: AgentCliRunner | None = None,
 ) -> MajorScenarioRealNoLossReport:
@@ -264,38 +320,68 @@ def run_major_scenario_real_no_loss(
             ),
         )
     )
-    app = _report_to_dict(
-        (agent_app_runner or run_agent_app_real_no_loss)(
-            agents=tuple(agent_apps),
-            project_name=project_name,
-            task_name=task_name,
-            output_root=root / "agent-app",
-            screenshot_dir=root / "background-screenshots" / "agent-app",
-            allow_uia_semantic_action=allow_uia_semantic_action,
-            uia_message=uia_message,
-            uia_required_markers=tuple(uia_required_markers or ()),
-            uia_forbidden_markers=tuple(uia_forbidden_markers or ()),
-            allow_app_bridge_send=allow_app_bridge_send,
-            bridge_message=app_bridge_message,
-            required_markers=tuple(app_bridge_required_markers or ()),
-            forbidden_markers=tuple(app_bridge_forbidden_markers or ()),
-            ide_bridge_urls=tuple(ide_bridge_urls or ()),
-            workspace_path=workspace_path,
+    helper = _disabled_owned_ide_bridge_helper_report()
+    app: dict = {}
+    cli: dict = {}
+    try:
+        if allow_owned_ide_bridge_helper_launch:
+            helper = _report_to_dict(
+                (owned_ide_bridge_helper_runner or prepare_owned_ide_bridge_helper)(
+                    output_root=root / "owned-ide-bridge",
+                    project_name=project_name,
+                    task_name=task_name,
+                    ide_executable=owned_ide_executable,
+                    ide_bridge_port=owned_ide_bridge_port,
+                    ide_user_data_dir=owned_ide_user_data_dir,
+                    ide_extensions_dir=owned_ide_extensions_dir,
+                    ide_extension_dir=owned_ide_extension_dir,
+                    workspace_root=owned_ide_workspace_root,
+                    adapter_id=owned_ide_chat_adapter_id,
+                    capability_timeout_sec=owned_ide_capability_timeout_sec,
+                )
+            )
+        effective_ide_bridge_urls = _effective_ide_bridge_urls(
+            ide_bridge_urls,
+            helper,
         )
-    )
-    cli = _report_to_dict(
-        (agent_cli_runner or run_agent_cli_real_no_loss)(
-            agents=tuple(cli_agents),
-            output_root=root / "agent-cli",
-            allow_cli_execution=allow_agent_cli_execution,
-            timeout_sec=agent_cli_timeout_sec,
+        effective_workspace_path = workspace_path or str(
+            helper.get("workspace_path", "") or ""
         )
-    )
+        app = _report_to_dict(
+            (agent_app_runner or run_agent_app_real_no_loss)(
+                agents=tuple(agent_apps),
+                project_name=project_name,
+                task_name=task_name,
+                output_root=root / "agent-app",
+                screenshot_dir=root / "background-screenshots" / "agent-app",
+                allow_uia_semantic_action=allow_uia_semantic_action,
+                uia_message=uia_message,
+                uia_required_markers=tuple(uia_required_markers or ()),
+                uia_forbidden_markers=tuple(uia_forbidden_markers or ()),
+                allow_app_bridge_send=allow_app_bridge_send,
+                bridge_message=app_bridge_message,
+                required_markers=tuple(app_bridge_required_markers or ()),
+                forbidden_markers=tuple(app_bridge_forbidden_markers or ()),
+                ide_bridge_urls=effective_ide_bridge_urls,
+                workspace_path=effective_workspace_path,
+            )
+        )
+        cli = _report_to_dict(
+            (agent_cli_runner or run_agent_cli_real_no_loss)(
+                agents=tuple(cli_agents),
+                output_root=root / "agent-cli",
+                allow_cli_execution=allow_agent_cli_execution,
+                timeout_sec=agent_cli_timeout_sec,
+            )
+        )
+    finally:
+        helper = _stop_owned_ide_bridge_helper_if_needed(helper)
 
     report = MajorScenarioRealNoLossReport(
         output_root=str(root),
         artifact_path="",
         primary_report=primary,
+        owned_ide_bridge_helper_report=helper,
         agent_app_report=app,
         agent_cli_report=cli,
         requirements=_build_requirements(primary, app, cli),
@@ -323,6 +409,12 @@ def format_major_scenario_real_no_loss_report(
             f"Screenshots: {report.background_screenshot_success_count}/"
             f"{report.background_screenshot_count}  "
             f"Focus stable: {str(report.background_screenshot_focus_stable).lower()}"
+        ),
+        (
+            f"Owned IDE bridge: launches={report.owned_ide_bridge_launch_attempts}  "
+            f"stops={report.owned_ide_bridge_stop_attempts}  "
+            f"isolated probes={report.isolated_ide_command_probe_attempts}  "
+            f"cleanup={str(report.owned_ide_bridge_cleanup_ok).lower()}"
         ),
     ]
     for requirement in report.requirements:
@@ -570,8 +662,420 @@ def _compact_case_evidence(case: dict) -> dict:
     return evidence
 
 
+@dataclasses.dataclass(frozen=True)
+class OwnedIdeBridgeHelperReport:
+    enabled: bool
+    output_root: str
+    bridge_url: str = ""
+    workspace_path: str = ""
+    adapter_id: str = "cursor"
+    manifest_path: str = ""
+    settings_path: str = ""
+    ready: bool = False
+    cleanup_ok: bool = True
+    launch_report: dict = dataclasses.field(default_factory=dict)
+    initial_capability_report: dict = dataclasses.field(default_factory=dict)
+    pre_probe_settings: dict = dataclasses.field(default_factory=dict)
+    contract_probe_report: dict = dataclasses.field(default_factory=dict)
+    validated_settings: dict = dataclasses.field(default_factory=dict)
+    validated_capability_report: dict = dataclasses.field(default_factory=dict)
+    stop_report: dict = dataclasses.field(default_factory=dict)
+    error: str = ""
+    elapsed_ms: float = 0.0
+
+    @property
+    def mode(self) -> str:
+        return "owned-ide-bridge-helper"
+
+    @property
+    def safety_mode(self) -> str:
+        return "isolated_helper_launch"
+
+    @property
+    def control_allowed(self) -> bool:
+        return False
+
+    @property
+    def control_attempts(self) -> int:
+        return 0
+
+    @property
+    def window_input_attempts(self) -> int:
+        return 0
+
+    @property
+    def launch_attempts(self) -> int:
+        return _counter(self.launch_report, "launch_attempts")
+
+    @property
+    def stop_attempts(self) -> int:
+        return _counter(self.stop_report, "stop_attempts")
+
+    @property
+    def isolated_command_probe_attempts(self) -> int:
+        return _counter(self.contract_probe_report, "control_attempts")
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "safety_mode": self.safety_mode,
+            "control_allowed": self.control_allowed,
+            "control_attempts": self.control_attempts,
+            "window_input_attempts": self.window_input_attempts,
+            "enabled": self.enabled,
+            "ready": self.ready,
+            "cleanup_ok": self.cleanup_ok,
+            "bridge_url": self.bridge_url,
+            "workspace_path": self.workspace_path,
+            "adapter_id": self.adapter_id,
+            "manifest_path": self.manifest_path,
+            "settings_path": self.settings_path,
+            "launch_attempts": self.launch_attempts,
+            "stop_attempts": self.stop_attempts,
+            "isolated_command_probe_attempts": self.isolated_command_probe_attempts,
+            "launch_report": dict(self.launch_report),
+            "initial_capability_report": dict(self.initial_capability_report),
+            "pre_probe_settings": dict(self.pre_probe_settings),
+            "contract_probe_report": dict(self.contract_probe_report),
+            "validated_settings": dict(self.validated_settings),
+            "validated_capability_report": dict(self.validated_capability_report),
+            "stop_report": dict(self.stop_report),
+            "error": self.error,
+            "elapsed_ms": round(self.elapsed_ms, 3),
+        }
+
+
+def prepare_owned_ide_bridge_helper(
+    *,
+    output_root: str | Path,
+    project_name: str = "openwukong",
+    task_name: str = "major-real-no-loss",
+    ide_executable: str = "cursor.exe",
+    ide_bridge_port: int = 8791,
+    ide_user_data_dir: str = "",
+    ide_extensions_dir: str = "",
+    ide_extension_dir: str = "extensions/openwukong-vscode",
+    workspace_root: str = "",
+    adapter_id: str = "cursor",
+    capability_timeout_sec: float = 30.0,
+    request_timeout_sec: float = 5.0,
+    plan_executor: Callable[..., object] | None = None,
+    capability_capture: Callable[..., object] | None = None,
+    command_contract_probe: Callable[..., object] | None = None,
+    bridge_settings_builder: Callable[..., dict] | None = None,
+) -> OwnedIdeBridgeHelperReport:
+    del task_name
+    started = time.perf_counter()
+    root = Path(output_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    host = "127.0.0.1"
+    bridge_url = f"http://{host}:{int(ide_bridge_port)}"
+    user_data_dir = _owned_helper_path(
+        ide_user_data_dir,
+        root / "user-data",
+    )
+    extensions_dir = _owned_helper_path(
+        ide_extensions_dir,
+        root / "extensions",
+    )
+    workspace = _owned_helper_path(
+        workspace_root,
+        root / "workspace" / _safe_path_component(project_name or "workspace"),
+    )
+    extension_dir = str(Path(ide_extension_dir).expanduser().resolve())
+    manifest_path = root / "manifest.json"
+    settings_path = Path(user_data_dir) / "User" / "settings.json"
+    Path(workspace).mkdir(parents=True, exist_ok=True)
+
+    launch_report: dict = {}
+    initial_capability: dict = {}
+    pre_probe_settings: dict = {}
+    contract_probe: dict = {}
+    validated_settings: dict = {}
+    validated_capability: dict = {}
+    error = ""
+    ready = False
+    active_plan_executor = plan_executor or execute_session_readiness_plan
+    active_capability_capture = capability_capture or capture_ide_bridge_capabilities
+    active_contract_probe = command_contract_probe or probe_ide_command_contracts
+    active_settings_builder = (
+        bridge_settings_builder or build_bridge_settings_from_probe_report
+    )
+
+    try:
+        plan = build_session_readiness_plan(
+            routes=("ide-extension-connector",),
+            options=SessionReadinessPlanOptions(
+                ide_executable=ide_executable,
+                ide_user_data_dir=user_data_dir,
+                ide_extensions_dir=extensions_dir,
+                ide_extension_dir=extension_dir,
+                ide_bridge_host=host,
+                ide_bridge_port=int(ide_bridge_port),
+                workspace_root=workspace,
+            ),
+        )
+        launch_report = _report_to_dict(
+            active_plan_executor(
+                plan,
+                manifest_path=str(manifest_path),
+            )
+        )
+        if _counter(launch_report, "launch_attempts") <= 0:
+            error = "ide_bridge_helper_not_started"
+            raise RuntimeError(error)
+
+        initial_capability = _wait_for_ide_bridge_capabilities(
+            bridge_url,
+            workspace_path=workspace,
+            timeout_sec=capability_timeout_sec,
+            request_timeout_sec=request_timeout_sec,
+            capability_capture=active_capability_capture,
+        )
+        if not bool(initial_capability.get("ok", False)):
+            error = str(
+                initial_capability.get("error", "")
+                or "ide_bridge_capability_not_ready"
+            )
+            raise RuntimeError(error)
+
+        command_ids = select_probe_command_ids(
+            initial_capability,
+            adapter_id=adapter_id,
+            max_commands=1,
+        )
+        if not command_ids:
+            error = "ide_bridge_no_probe_candidates"
+            raise RuntimeError(error)
+
+        pre_probe_settings = {
+            "openwukong.bridge.autoStart": True,
+            "openwukong.bridge.host": host,
+            "openwukong.bridge.port": int(ide_bridge_port),
+            "openwukong.bridge.allowedCommands": command_ids,
+        }
+        _merge_settings_file(settings_path, pre_probe_settings)
+
+        contract_probe = _report_to_dict(
+            active_contract_probe(
+                bridge_url,
+                workspace_path=workspace,
+                command_ids=command_ids,
+                adapter_id=adapter_id,
+                message="OPENWUKONG_IDE_BRIDGE_CONTRACT_PROBE_NO_EDIT",
+                request_timeout=request_timeout_sec,
+            )
+        )
+        validated_settings = active_settings_builder(
+            contract_probe,
+            host=host,
+            port=int(ide_bridge_port),
+            auto_start=True,
+        )
+        _merge_settings_file(settings_path, validated_settings)
+
+        validated_capability = _wait_for_ide_bridge_capabilities(
+            bridge_url,
+            workspace_path=workspace,
+            timeout_sec=capability_timeout_sec,
+            request_timeout_sec=request_timeout_sec,
+            adapter_id=adapter_id,
+            capability_capture=active_capability_capture,
+        )
+        ready = bool(
+            validated_capability.get("ok", False)
+            and _adapter_available(validated_capability, adapter_id)
+        )
+        if not ready:
+            error = str(
+                validated_capability.get("error", "")
+                or "ide_bridge_adapter_not_validated"
+            )
+    except Exception as exc:
+        if not error:
+            error = str(exc) or exc.__class__.__name__
+
+    return OwnedIdeBridgeHelperReport(
+        enabled=True,
+        output_root=str(root),
+        bridge_url=bridge_url,
+        workspace_path=workspace,
+        adapter_id=adapter_id,
+        manifest_path=str(manifest_path),
+        settings_path=str(settings_path),
+        ready=ready,
+        cleanup_ok=False,
+        launch_report=launch_report,
+        initial_capability_report=initial_capability,
+        pre_probe_settings=pre_probe_settings,
+        contract_probe_report=contract_probe,
+        validated_settings=validated_settings,
+        validated_capability_report=validated_capability,
+        error=error,
+        elapsed_ms=(time.perf_counter() - started) * 1000,
+    )
+
+
 def _details(value: object) -> dict:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _disabled_owned_ide_bridge_helper_report() -> dict:
+    return {
+        "mode": "owned-ide-bridge-helper",
+        "safety_mode": "isolated_helper_launch",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "enabled": False,
+        "ready": False,
+        "cleanup_ok": True,
+        "bridge_url": "",
+        "workspace_path": "",
+        "adapter_id": "",
+        "manifest_path": "",
+        "launch_attempts": 0,
+        "stop_attempts": 0,
+        "isolated_command_probe_attempts": 0,
+    }
+
+
+def _effective_ide_bridge_urls(
+    explicit_urls: Iterable[str],
+    helper_report: dict,
+) -> tuple[str, ...]:
+    urls: list[str] = []
+    for value in explicit_urls or ():
+        text = str(value or "").strip()
+        if text and text not in urls:
+            urls.append(text)
+    if bool(helper_report.get("ready", False)):
+        bridge_url = str(helper_report.get("bridge_url", "") or "").strip()
+        if bridge_url and bridge_url not in urls:
+            urls.append(bridge_url)
+    return tuple(urls)
+
+
+def _stop_owned_ide_bridge_helper_if_needed(helper_report: dict) -> dict:
+    if not bool(helper_report.get("enabled", False)):
+        return helper_report
+    manifest_path = str(helper_report.get("manifest_path", "") or "").strip()
+    if not manifest_path:
+        return dict(helper_report)
+    existing_stop = helper_report.get("stop_report")
+    if isinstance(existing_stop, dict) and existing_stop:
+        return dict(helper_report)
+    stop_report = stop_session_readiness_manifest(manifest_path).to_dict()
+    updated = dict(helper_report)
+    updated["stop_report"] = stop_report
+    updated["stop_attempts"] = _counter(stop_report, "stop_attempts")
+    updated["cleanup_ok"] = _stop_report_cleanup_ok(stop_report)
+    return updated
+
+
+def _stop_report_cleanup_ok(stop_report: dict) -> bool:
+    results = stop_report.get("results")
+    if not isinstance(results, list):
+        return False
+    if not results:
+        return True
+    allowed = {"stopped", "skipped"}
+    return all(
+        isinstance(result, dict)
+        and str(result.get("status", "") or "") in allowed
+        and not str(result.get("error", "") or "").strip()
+        for result in results
+    )
+
+
+def _owned_helper_path(value: str, default_path: Path) -> str:
+    text = str(value or "").strip()
+    path = Path(text).expanduser() if text else default_path
+    if not path.is_absolute():
+        path = path.resolve()
+    return path.as_posix()
+
+
+def _safe_path_component(value: str) -> str:
+    text = str(value or "").strip() or "workspace"
+    safe = "".join(
+        char if char.isalnum() or char in {"-", "_", "."} else "-"
+        for char in text
+    )
+    return safe.strip(".-") or "workspace"
+
+
+def _merge_settings_file(settings_path: Path, settings: dict) -> None:
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict = {}
+    if settings_path.exists():
+        try:
+            parsed = json.loads(settings_path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                existing = parsed
+        except Exception:
+            existing = {}
+    merged = dict(existing)
+    merged.update(dict(settings))
+    settings_path.write_text(
+        json.dumps(merged, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _wait_for_ide_bridge_capabilities(
+    bridge_url: str,
+    *,
+    workspace_path: str,
+    timeout_sec: float,
+    request_timeout_sec: float,
+    adapter_id: str = "",
+    capability_capture: Callable[..., object] | None = None,
+) -> dict:
+    deadline = time.monotonic() + max(0.1, float(timeout_sec or 0.1))
+    last: dict = {}
+    active_capture = capability_capture or capture_ide_bridge_capabilities
+    while True:
+        last = _report_to_dict(
+            active_capture(
+                bridge_url,
+                workspace_path=workspace_path,
+                request_timeout=request_timeout_sec,
+            )
+        )
+        if bool(last.get("ok", False)) and (
+            not adapter_id or _adapter_available(last, adapter_id)
+        ):
+            return last
+        if time.monotonic() >= deadline:
+            if not last.get("error"):
+                last["error"] = "ide_bridge_capability_timeout"
+            return last
+        time.sleep(0.5)
+
+
+def _adapter_available(capability_report: dict, adapter_id: str) -> bool:
+    adapter = {}
+    mapping = capability_report.get("adapter_mapping")
+    if isinstance(mapping, dict):
+        value = mapping.get(adapter_id)
+        if isinstance(value, dict):
+            adapter = value
+    if not adapter:
+        active = capability_report.get("active_mapping")
+        if isinstance(active, dict):
+            value = active.get(adapter_id)
+            if isinstance(value, dict):
+                adapter = value
+    return bool(
+        adapter
+        and adapter.get("available", False)
+        and str(
+            adapter.get("commandId", "")
+            or adapter.get("command_id", "")
+            or ""
+        ).strip()
+    )
 
 
 def _write_report_artifact(
@@ -709,6 +1213,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         default="",
         help="Optional workspace path included in IDE bridge capability probes.",
     )
+    parser.add_argument(
+        "--allow-owned-ide-bridge-helper-launch",
+        action="store_true",
+        help="Launch an isolated VS Code-compatible IDE extension host, validate an IDE bridge chat adapter, and forward it to app probes.",
+    )
+    parser.add_argument("--owned-ide-executable", default="cursor.exe")
+    parser.add_argument("--owned-ide-bridge-port", type=int, default=8791)
+    parser.add_argument("--owned-ide-user-data-dir", default="")
+    parser.add_argument("--owned-ide-extensions-dir", default="")
+    parser.add_argument("--owned-ide-extension-dir", default="extensions/openwukong-vscode")
+    parser.add_argument("--owned-ide-workspace-root", default="")
+    parser.add_argument("--owned-ide-chat-adapter-id", default="cursor")
+    parser.add_argument("--owned-ide-capability-timeout-sec", type=float, default=30.0)
     parser.add_argument("--allow-agent-cli-execution", action="store_true")
     parser.add_argument("--agent-cli-timeout-sec", type=float, default=90.0)
     args = parser.parse_args(argv)
@@ -735,6 +1252,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         app_bridge_forbidden_markers=tuple(args.app_forbid_marker or ()),
         ide_bridge_urls=tuple(args.ide_bridge_url or ()),
         workspace_path=args.workspace_path,
+        allow_owned_ide_bridge_helper_launch=args.allow_owned_ide_bridge_helper_launch,
+        owned_ide_executable=args.owned_ide_executable,
+        owned_ide_bridge_port=args.owned_ide_bridge_port,
+        owned_ide_user_data_dir=args.owned_ide_user_data_dir,
+        owned_ide_extensions_dir=args.owned_ide_extensions_dir,
+        owned_ide_extension_dir=args.owned_ide_extension_dir,
+        owned_ide_workspace_root=args.owned_ide_workspace_root,
+        owned_ide_chat_adapter_id=args.owned_ide_chat_adapter_id,
+        owned_ide_capability_timeout_sec=args.owned_ide_capability_timeout_sec,
         allow_agent_cli_execution=args.allow_agent_cli_execution,
         agent_cli_timeout_sec=args.agent_cli_timeout_sec,
     )

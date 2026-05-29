@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from openwukong.evaluation.major_real_no_loss import (
+    prepare_owned_ide_bridge_helper,
     run_major_scenario_real_no_loss,
 )
 
@@ -385,6 +386,249 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(data["window_input_attempts"], 0)
         requirements = {item["requirement_id"]: item for item in data["requirements"]}
         self.assertEqual(requirements["cursor_background_chat"]["status"], "verified")
+
+    def test_runner_prepares_owned_ide_bridge_and_forwards_endpoint_to_agent_app(self):
+        app_calls = []
+        helper_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _owned_ide_bridge_helper_runner(**kwargs):
+            helper_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "owned-ide-bridge-helper",
+                    "safety_mode": "isolated_helper_launch",
+                    "enabled": True,
+                    "ready": True,
+                    "bridge_url": "http://127.0.0.1:8792",
+                    "workspace_path": "E:/tmp/openwukong-owned-ide-workspace",
+                    "launch_attempts": 1,
+                    "stop_attempts": 1,
+                    "isolated_command_probe_attempts": 3,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "cleanup_ok": True,
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 1,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "passed_cases": 1,
+                    "failed_cases": 0,
+                    "app_bridge_send_verified_cases": 1,
+                    "cases": [
+                        {
+                            "agent": "cursor",
+                            "status": "app_bridge_send_accepted",
+                            "real_verified": True,
+                            "native_ready": True,
+                            "app_bridge_send_verified": True,
+                        }
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("cursor",),
+                cli_agents=(),
+                project_name="openwukong",
+                task_name="cursor-owned-bridge",
+                allow_app_bridge_send=True,
+                allow_owned_ide_bridge_helper_launch=True,
+                owned_ide_executable="C:/Program Files/Cursor/Cursor.exe",
+                owned_ide_bridge_port=8792,
+                owned_ide_workspace_root="E:/tmp/openwukong-owned-ide-workspace",
+                owned_ide_chat_adapter_id="cursor",
+                primary_runner=_primary_runner,
+                owned_ide_bridge_helper_runner=_owned_ide_bridge_helper_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+            artifact = json.loads(Path(data["artifact_path"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(len(helper_calls), 1)
+        self.assertEqual(helper_calls[0]["ide_executable"], "C:/Program Files/Cursor/Cursor.exe")
+        self.assertEqual(helper_calls[0]["ide_bridge_port"], 8792)
+        self.assertEqual(helper_calls[0]["workspace_root"], "E:/tmp/openwukong-owned-ide-workspace")
+        self.assertEqual(helper_calls[0]["adapter_id"], "cursor")
+        self.assertEqual(app_calls[0]["ide_bridge_urls"], ("http://127.0.0.1:8792",))
+        self.assertEqual(app_calls[0]["workspace_path"], "E:/tmp/openwukong-owned-ide-workspace")
+        self.assertEqual(data["owned_ide_bridge_launch_attempts"], 1)
+        self.assertEqual(data["owned_ide_bridge_stop_attempts"], 1)
+        self.assertEqual(data["isolated_ide_command_probe_attempts"], 3)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertTrue(data["subreports"]["owned_ide_bridge_helper"]["cleanup_ok"])
+        self.assertEqual(
+            artifact["subreports"]["owned_ide_bridge_helper"]["bridge_url"],
+            "http://127.0.0.1:8792",
+        )
+        requirements = {item["requirement_id"]: item for item in data["requirements"]}
+        self.assertEqual(requirements["cursor_background_chat"]["status"], "verified")
+
+    def test_prepare_owned_ide_bridge_helper_validates_adapter_with_injected_safe_steps(self):
+        calls = {
+            "execute": [],
+            "capture": [],
+            "probe": [],
+            "settings": [],
+        }
+
+        def _execute_plan(plan, **kwargs):
+            calls["execute"].append({"plan": plan.to_dict(), "kwargs": dict(kwargs)})
+            return _FakeReport(
+                {
+                    "mode": "session-readiness-execution",
+                    "safety_mode": "isolated_helper_launch",
+                    "control_attempts": 0,
+                    "launch_attempts": 1,
+                    "manifest_path": kwargs["manifest_path"],
+                    "results": [
+                        {
+                            "status": "started",
+                            "pid": 4242,
+                            "readiness_url": "http://127.0.0.1:8793",
+                        }
+                    ],
+                }
+            )
+
+        def _capture(bridge_url, **kwargs):
+            calls["capture"].append({"bridge_url": bridge_url, "kwargs": dict(kwargs)})
+            if len(calls["capture"]) == 1:
+                return _FakeReport(
+                    {
+                        "mode": "ide-bridge-capability-capture",
+                        "ok": True,
+                        "bridge_url": bridge_url,
+                        "active_mapping": {
+                            "cursor": {
+                                "available": False,
+                                "commandId": "",
+                                "commandCandidates": ["composer.startComposerPrompt"],
+                            }
+                        },
+                        "adapter_mapping": {},
+                        "cursor_review_candidates": ["composer.startComposerPrompt"],
+                    }
+                )
+            return _FakeReport(
+                {
+                    "mode": "ide-bridge-capability-capture",
+                    "ok": True,
+                    "bridge_url": bridge_url,
+                    "adapter_mapping": {
+                        "cursor": {
+                            "available": True,
+                            "commandId": "composer.startComposerPrompt",
+                            "commandCandidates": ["composer.startComposerPrompt"],
+                        }
+                    },
+                }
+            )
+
+        def _probe(bridge_url, **kwargs):
+            calls["probe"].append({"bridge_url": bridge_url, "kwargs": dict(kwargs)})
+            return _FakeReport(
+                {
+                    "mode": "ide-bridge-contract-probe",
+                    "control_attempts": 3,
+                    "validated_mapping": {
+                        "cursor": {
+                            "label": "cursor",
+                            "commandId": "composer.startComposerPrompt",
+                            "commandCandidates": ["composer.startComposerPrompt"],
+                            "available": True,
+                        }
+                    },
+                }
+            )
+
+        def _settings_builder(report, **kwargs):
+            calls["settings"].append({"report": dict(report), "kwargs": dict(kwargs)})
+            return {
+                "openwukong.bridge.autoStart": True,
+                "openwukong.bridge.host": kwargs["host"],
+                "openwukong.bridge.port": kwargs["port"],
+                "openwukong.bridge.allowedCommands": ["composer.startComposerPrompt"],
+                "openwukong.bridge.chatAdapters": {
+                    "cursor": {
+                        "label": "cursor",
+                        "commandId": "composer.startComposerPrompt",
+                        "commandCandidates": ["composer.startComposerPrompt"],
+                    }
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = prepare_owned_ide_bridge_helper(
+                output_root=Path(tmp) / "owned-ide",
+                project_name="openwukong",
+                ide_executable="cursor.exe",
+                ide_bridge_port=8793,
+                adapter_id="cursor",
+                plan_executor=_execute_plan,
+                capability_capture=_capture,
+                command_contract_probe=_probe,
+                bridge_settings_builder=_settings_builder,
+            )
+            data = report.to_dict()
+            settings = json.loads(Path(data["settings_path"]).read_text(encoding="utf-8"))
+
+        self.assertTrue(data["ready"])
+        self.assertEqual(data["launch_attempts"], 1)
+        self.assertEqual(data["isolated_command_probe_attempts"], 3)
+        self.assertEqual(data["bridge_url"], "http://127.0.0.1:8793")
+        self.assertEqual(calls["probe"][0]["kwargs"]["command_ids"], ["composer.startComposerPrompt"])
+        self.assertEqual(
+            data["pre_probe_settings"]["openwukong.bridge.allowedCommands"],
+            ["composer.startComposerPrompt"],
+        )
+        self.assertEqual(
+            settings["openwukong.bridge.chatAdapters"]["cursor"]["commandId"],
+            "composer.startComposerPrompt",
+        )
 
 
 if __name__ == "__main__":

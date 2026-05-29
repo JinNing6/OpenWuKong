@@ -5503,3 +5503,70 @@ When a new conversation starts in this repo:
     - this does not yet mean every Cursor/Codex/Claude app window is solved;
       normal user-profile Cursor bridge installation, Codex app bridge, and
       Claude Desktop bridge/auth remain separate surfaces
+- 2026-05-29 promoted the isolated Cursor IDE bridge validation into the
+  unified major no-loss runner:
+  - implementation:
+    - `major_real_no_loss` now has an explicit owned IDE bridge helper path
+      behind `--allow-owned-ide-bridge-helper-launch`
+    - the helper starts an isolated VS Code-compatible IDE extension host with
+      separate `--user-data-dir`, `--extensions-dir`, workspace root, bridge
+      host/port, and manifest
+    - the runner now performs the full Cursor bridge preparation sequence
+      automatically:
+      launch isolated host -> read capabilities -> select candidate command ->
+      write narrow temporary allowlist -> run command contract probe -> write
+      validated chat adapter settings -> re-read validated capabilities
+    - only a ready validated endpoint is forwarded to
+      `agent_app_real_no_loss`; the actual app bridge send still uses the
+      existing opt-in native bridge gate and keeps `control_attempts=0` and
+      `window_input_attempts=0`
+    - helper launch, stop, cleanup, and isolated command-probe counters are
+      recorded separately from real app control counters:
+      `owned_ide_bridge_launch_attempts`,
+      `owned_ide_bridge_stop_attempts`,
+      `owned_ide_bridge_cleanup_ok`, and
+      `isolated_ide_command_probe_attempts`
+    - the runner stops the owned IDE helper from the manifest after the app
+      validation finishes, so the bridge remains alive during validation but
+      does not leak after the run
+  - official-doc basis:
+    - VS Code CLI docs were checked for isolated launch options such as
+      `--user-data-dir` and `--extensions-dir`
+    - VS Code settings docs were checked for `settings.json` behavior
+    - Python `dataclasses` and `argparse` docs were checked before extending
+      the report model and CLI
+  - safe/real validation:
+    - unified command:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r15-owned-ide-bridge-unified --output logs\runtime\major-real-no-loss-r15-owned-ide-bridge-unified\report.json --allow-owned-browser-helper-launch --owned-browser-debug-port 9484 --owned-browser-url "data:text/html,<title>OpenWukong Major Owned IDE Bridge R15</title><body>OpenWukong Major Owned IDE Bridge R15</body>" --agent-app cursor --project-name openwukong --task-name major-owned-ide-bridge-r15 --allow-app-bridge-send --app-bridge-message "OPENWUKONG_MAJOR_OWNED_IDE_BRIDGE_R15" --allow-owned-ide-bridge-helper-launch --owned-ide-executable "E:\cursor\cursor\cursor\Cursor.exe" --owned-ide-bridge-port 8794 --owned-ide-capability-timeout-sec 45 --json`
+    - result summary:
+      `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=1`, `owned_ide_bridge_launch_attempts=1`,
+      `owned_ide_bridge_stop_attempts=1`,
+      `owned_ide_bridge_cleanup_ok=true`,
+      `isolated_ide_command_probe_attempts=3`,
+      `background_screenshot_success_count=5/5`,
+      `background_screenshot_focus_stable=true`
+    - requirement result:
+      `cursor_background_chat=verified` through
+      `app_bridge_send_accepted`; WeChat observation, Word hidden COM,
+      browser CDP, and file search were also verified in the same run
+    - cleanup check:
+      port `8794` reported `TcpTestSucceeded=false`, and no process command
+      line still contained the owned IDE bridge runtime root
+  - verification:
+    - red test:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_prepares_owned_ide_bridge_and_forwards_endpoint_to_agent_app`: failed before implementation, then OK
+    - red test:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_prepare_owned_ide_bridge_helper_validates_adapter_with_injected_safe_steps`: failed before injection support, then OK
+    - targeted suite:
+      `python -m unittest tests.test_major_real_no_loss tests.test_ide_bridge_capture tests.test_ide_bridge_contract_probe tests.test_session_readiness_plan tests.test_agent_app_real_no_loss tests.test_agent_app_bridge tests.test_agent_native_connector_probe`: `61 tests OK`
+  - current conclusion:
+    - the main unified acceptance path can now one-command verify Cursor
+      background app-surface chat through a connector-first owned bridge,
+      without keyboard/mouse/window input and without leaving helper processes
+    - the remaining unmet major requirements in this run are not Cursor:
+      WeChat background send still requires a deterministic native bridge or
+      stronger semantic surface, Codex/Claude CLI were intentionally skipped
+      without execution opt-in, and Codex App / Claude Desktop still need
+      their own native/app bridge paths
