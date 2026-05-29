@@ -741,6 +741,159 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(data["control_attempts"], 0)
         self.assertEqual(data["window_input_attempts"], 0)
 
+    def test_runner_prepares_agent_native_cdp_bridge_helper_fleet(self):
+        app_calls = []
+        helper_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _helper_runner(**kwargs):
+            helper_calls.append(dict(kwargs))
+            root = Path(kwargs["output_root"])
+            return _FakeReport(
+                {
+                    "mode": "agent-native-cdp-bridge-helper",
+                    "safety_mode": "managed_background_helper_launch",
+                    "enabled": True,
+                    "ready": True,
+                    "cleanup_ok": True,
+                    "bridge_url": f"http://127.0.0.1:{kwargs['bridge_port']}",
+                    "registry_path": str(root / "native-bridges.json"),
+                    "manifest_path": str(root / "manifest.json"),
+                    "launch_attempts": 1,
+                    "stop_attempts": 1,
+                    "stop_report": {
+                        "mode": "session-readiness-stop",
+                        "stop_attempts": 1,
+                        "results": [{"status": "stopped"}],
+                    },
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent": kwargs["agent"],
+                    "agent_id": kwargs["agent_id"],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 3,
+                    "background_screenshot_success_count": 3,
+                    "background_screenshot_focus_stable": True,
+                    "passed_cases": 3,
+                    "failed_cases": 0,
+                    "native_ready_cases": 3,
+                    "cases": [
+                        {
+                            "agent": "codex app",
+                            "status": "native_connector_ready",
+                            "real_verified": True,
+                            "native_ready": True,
+                        },
+                        {
+                            "agent": "claude desktop",
+                            "status": "native_connector_ready",
+                            "real_verified": True,
+                            "native_ready": True,
+                        },
+                        {
+                            "agent": "cursor",
+                            "status": "native_connector_ready",
+                            "real_verified": True,
+                            "native_ready": True,
+                        },
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        specs = (
+            {
+                "agent": "codex app",
+                "agent_id": "codex",
+                "bridge_port": 18890,
+                "debugger_url": "http://127.0.0.1:9333",
+                "process_name": "Codex.exe",
+            },
+            {
+                "agent": "claude desktop",
+                "agent_id": "claude",
+                "bridge_port": 18891,
+                "debugger_url": "http://127.0.0.1:9444",
+                "process_name": "Claude.exe",
+            },
+            {
+                "agent": "cursor",
+                "agent_id": "cursor",
+                "bridge_port": 18892,
+                "debugger_url": "http://127.0.0.1:9555",
+                "process_name": "Cursor.exe",
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("codex app", "claude desktop", "cursor"),
+                cli_agents=(),
+                project_name="openwukong",
+                task_name="agent-native-fleet",
+                allow_agent_native_cdp_bridge_helper_launch=True,
+                agent_native_cdp_bridge_helper_specs=specs,
+                agent_native_cdp_bridge_helper_runner=_helper_runner,
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual([call["agent_id"] for call in helper_calls], ["codex", "claude", "cursor"])
+        self.assertEqual(data["agent_native_cdp_bridge_launch_attempts"], 3)
+        self.assertEqual(data["agent_native_cdp_bridge_stop_attempts"], 3)
+        self.assertTrue(data["agent_native_cdp_bridge_cleanup_ok"])
+        forwarded = tuple(
+            Path(path).name for path in app_calls[0]["agent_native_bridge_registry_paths"]
+        )
+        self.assertEqual(forwarded, ("native-bridges.json",) * 3)
+        helper_report = data["subreports"]["agent_native_cdp_bridge_helper"]
+        self.assertEqual(helper_report["mode"], "agent-native-cdp-bridge-helper-fleet")
+        self.assertEqual(len(helper_report["helpers"]), 3)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+
     def test_prepare_agent_native_cdp_bridge_helper_launches_and_waits_for_registry(self):
         calls = []
 
@@ -863,6 +1016,66 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(
             calls[0]["agent_native_cdp_bridge_helper_process_name"],
             "Codex.exe",
+        )
+
+    def test_cli_forwards_agent_native_cdp_bridge_helper_specs(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        specs = [
+            {
+                "agent": "codex app",
+                "agent_id": "codex",
+                "bridge_port": 18890,
+                "debugger_url": "http://127.0.0.1:9333",
+                "process_name": "Codex.exe",
+            },
+            {
+                "agent": "claude desktop",
+                "agent_id": "claude",
+                "bridge_port": 18891,
+                "debugger_url": "http://127.0.0.1:9444",
+                "process_name": "Claude.exe",
+            },
+        ]
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--allow-agent-native-cdp-bridge-helper-launch",
+                    "--agent-native-cdp-bridge-helper-spec",
+                    json.dumps(specs[0]),
+                    "--agent-native-cdp-bridge-helper-spec",
+                    json.dumps(specs[1]),
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0]["allow_agent_native_cdp_bridge_helper_launch"])
+        self.assertEqual(
+            tuple(spec["agent_id"] for spec in calls[0]["agent_native_cdp_bridge_helper_specs"]),
+            ("codex", "claude"),
+        )
+        self.assertEqual(
+            calls[0]["agent_native_cdp_bridge_helper_specs"][1]["process_name"],
+            "Claude.exe",
         )
 
     def test_runner_passes_uia_semantic_options_and_marks_app_requirement_verified(self):

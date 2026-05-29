@@ -367,6 +367,7 @@ def run_major_scenario_real_no_loss(
     agent_native_cdp_bridge_helper_target_title: str = "",
     agent_native_cdp_bridge_helper_target_url: str = "",
     agent_native_cdp_bridge_registry_wait_timeout_sec: float = 5.0,
+    agent_native_cdp_bridge_helper_specs: Iterable[dict] = (),
     allow_agent_cli_execution: bool = False,
     agent_cli_timeout_sec: float = 90.0,
     primary_runner: PrimaryRunner | None = None,
@@ -430,27 +431,43 @@ def run_major_scenario_real_no_loss(
                 )
             )
         if allow_agent_native_cdp_bridge_helper_launch:
-            native_helper = _report_to_dict(
-                (
-                    agent_native_cdp_bridge_helper_runner
-                    or prepare_agent_native_cdp_bridge_helper
-                )(
-                    output_root=root / "agent-native-cdp-bridge",
-                    agent=agent_native_cdp_bridge_helper_agent,
-                    agent_id=agent_native_cdp_bridge_helper_agent_id,
-                    bridge_port=agent_native_cdp_bridge_helper_port,
-                    debugger_url=agent_native_cdp_bridge_helper_debugger_url,
-                    process_name=agent_native_cdp_bridge_helper_process_name,
-                    pid=agent_native_cdp_bridge_helper_pid,
-                    hwnd=agent_native_cdp_bridge_helper_hwnd,
-                    window_title=agent_native_cdp_bridge_helper_window_title,
-                    project_name=project_name,
-                    task_name=task_name,
-                    target_title=agent_native_cdp_bridge_helper_target_title,
-                    target_url=agent_native_cdp_bridge_helper_target_url,
-                    registry_wait_timeout_sec=agent_native_cdp_bridge_registry_wait_timeout_sec,
+            helper_specs = tuple(agent_native_cdp_bridge_helper_specs or ())
+            if helper_specs:
+                native_helper = _report_to_dict(
+                    prepare_agent_native_cdp_bridge_helper_fleet(
+                        output_root=root / "agent-native-cdp-bridge",
+                        specs=helper_specs,
+                        project_name=project_name,
+                        task_name=task_name,
+                        registry_wait_timeout_sec=agent_native_cdp_bridge_registry_wait_timeout_sec,
+                        helper_runner=(
+                            agent_native_cdp_bridge_helper_runner
+                            or prepare_agent_native_cdp_bridge_helper
+                        ),
+                    )
                 )
-            )
+            else:
+                native_helper = _report_to_dict(
+                    (
+                        agent_native_cdp_bridge_helper_runner
+                        or prepare_agent_native_cdp_bridge_helper
+                    )(
+                        output_root=root / "agent-native-cdp-bridge",
+                        agent=agent_native_cdp_bridge_helper_agent,
+                        agent_id=agent_native_cdp_bridge_helper_agent_id,
+                        bridge_port=agent_native_cdp_bridge_helper_port,
+                        debugger_url=agent_native_cdp_bridge_helper_debugger_url,
+                        process_name=agent_native_cdp_bridge_helper_process_name,
+                        pid=agent_native_cdp_bridge_helper_pid,
+                        hwnd=agent_native_cdp_bridge_helper_hwnd,
+                        window_title=agent_native_cdp_bridge_helper_window_title,
+                        project_name=project_name,
+                        task_name=task_name,
+                        target_title=agent_native_cdp_bridge_helper_target_title,
+                        target_url=agent_native_cdp_bridge_helper_target_url,
+                        registry_wait_timeout_sec=agent_native_cdp_bridge_registry_wait_timeout_sec,
+                    )
+                )
         effective_ide_bridge_urls = _effective_ide_bridge_urls(
             ide_bridge_urls,
             helper,
@@ -1047,6 +1064,49 @@ def prepare_agent_native_cdp_bridge_helper(
     )
 
 
+def prepare_agent_native_cdp_bridge_helper_fleet(
+    *,
+    output_root: str | Path,
+    specs: Iterable[dict],
+    project_name: str = "openwukong",
+    task_name: str = "major-real-no-loss",
+    registry_wait_timeout_sec: float = 5.0,
+    helper_runner: Callable[..., object] | None = None,
+) -> dict:
+    started = time.perf_counter()
+    root = Path(output_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    active_runner = helper_runner or prepare_agent_native_cdp_bridge_helper
+    helpers: list[dict] = []
+    for index, spec in enumerate(_normalize_agent_native_cdp_bridge_helper_specs(specs), start=1):
+        helper_root = root / f"{index:02d}-{_safe_path_component(spec['agent_id'] or spec['agent'])}"
+        helpers.append(
+            _report_to_dict(
+                active_runner(
+                    output_root=helper_root,
+                    agent=spec["agent"],
+                    agent_id=spec["agent_id"],
+                    bridge_port=spec["bridge_port"],
+                    debugger_url=spec["debugger_url"],
+                    process_name=spec["process_name"],
+                    pid=spec["pid"],
+                    hwnd=spec["hwnd"],
+                    window_title=spec["window_title"],
+                    project_name=project_name,
+                    task_name=task_name,
+                    target_title=spec["target_title"],
+                    target_url=spec["target_url"],
+                    registry_wait_timeout_sec=registry_wait_timeout_sec,
+                )
+            )
+        )
+    return _agent_native_cdp_bridge_helper_fleet_report(
+        output_root=str(root),
+        helpers=helpers,
+        elapsed_ms=(time.perf_counter() - started) * 1000,
+    )
+
+
 def prepare_owned_ide_bridge_helper(
     *,
     output_root: str | Path,
@@ -1262,6 +1322,76 @@ def _disabled_agent_native_cdp_bridge_helper_report() -> dict:
     }
 
 
+def _normalize_agent_native_cdp_bridge_helper_specs(
+    specs: Iterable[dict],
+) -> tuple[dict, ...]:
+    normalized: list[dict] = []
+    for raw in specs or ():
+        if not isinstance(raw, dict):
+            continue
+        agent = str(raw.get("agent", "") or "").strip()
+        agent_id = str(raw.get("agent_id", "") or raw.get("agentId", "") or "").strip()
+        debugger_url = str(raw.get("debugger_url", "") or raw.get("debuggerUrl", "") or "").strip()
+        process_name = str(raw.get("process_name", "") or raw.get("processName", "") or "").strip()
+        bridge_port = _counter({"value": raw.get("bridge_port", raw.get("port", 0))}, "value")
+        if not agent or not agent_id or not debugger_url or not process_name or bridge_port <= 0:
+            continue
+        normalized.append(
+            {
+                "agent": agent,
+                "agent_id": agent_id,
+                "bridge_port": bridge_port,
+                "debugger_url": debugger_url,
+                "process_name": process_name,
+                "pid": _counter({"value": raw.get("pid", 0)}, "value"),
+                "hwnd": _counter({"value": raw.get("hwnd", 0)}, "value"),
+                "window_title": str(raw.get("window_title", "") or raw.get("windowTitle", "") or "").strip(),
+                "target_title": str(raw.get("target_title", "") or raw.get("targetTitle", "") or "").strip(),
+                "target_url": str(raw.get("target_url", "") or raw.get("targetUrl", "") or "").strip(),
+            }
+        )
+    return tuple(normalized)
+
+
+def _agent_native_cdp_bridge_helper_fleet_report(
+    *,
+    output_root: str,
+    helpers: list[dict],
+    elapsed_ms: float,
+) -> dict:
+    registry_paths = [
+        str(helper.get("registry_path", "") or "").strip()
+        for helper in helpers
+        if str(helper.get("registry_path", "") or "").strip()
+    ]
+    launch_attempts = sum(_counter(helper, "launch_attempts") for helper in helpers)
+    stop_attempts = sum(_counter(helper, "stop_attempts") for helper in helpers)
+    enabled = bool(helpers)
+    ready = bool(helpers) and all(bool(helper.get("ready", False)) for helper in helpers)
+    cleanup_ok = all(
+        (not bool(helper.get("enabled", False)))
+        or bool(helper.get("cleanup_ok", False))
+        for helper in helpers
+    )
+    return {
+        "mode": "agent-native-cdp-bridge-helper-fleet",
+        "safety_mode": "managed_background_helper_launch",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "enabled": enabled,
+        "ready": ready,
+        "cleanup_ok": cleanup_ok,
+        "output_root": output_root,
+        "helper_count": len(helpers),
+        "launch_attempts": launch_attempts,
+        "stop_attempts": stop_attempts,
+        "registry_paths": registry_paths,
+        "helpers": [dict(helper) for helper in helpers],
+        "elapsed_ms": round(elapsed_ms, 3),
+    }
+
+
 def _effective_ide_bridge_urls(
     explicit_urls: Iterable[str],
     helper_report: dict,
@@ -1292,6 +1422,19 @@ def _effective_agent_native_bridge_registry_paths(
     if bool(helper_report.get("ready", False)):
         registry_path = str(helper_report.get("registry_path", "") or "").strip()
         if registry_path and registry_path not in seen:
+            seen.add(registry_path)
+            paths.append(Path(registry_path))
+        for registry_value in helper_report.get("registry_paths", []) or []:
+            registry_text = str(registry_value or "").strip()
+            if registry_text and registry_text not in seen:
+                seen.add(registry_text)
+                paths.append(Path(registry_text))
+    for helper in helper_report.get("helpers", []) or []:
+        if not isinstance(helper, dict) or not bool(helper.get("ready", False)):
+            continue
+        registry_path = str(helper.get("registry_path", "") or "").strip()
+        if registry_path and registry_path not in seen:
+            seen.add(registry_path)
             paths.append(Path(registry_path))
     return tuple(paths)
 
@@ -1316,6 +1459,18 @@ def _stop_owned_ide_bridge_helper_if_needed(helper_report: dict) -> dict:
 def _stop_agent_native_cdp_bridge_helper_if_needed(helper_report: dict) -> dict:
     if not bool(helper_report.get("enabled", False)):
         return helper_report
+    if str(helper_report.get("mode", "") or "") == "agent-native-cdp-bridge-helper-fleet":
+        helpers = [
+            _stop_agent_native_cdp_bridge_helper_if_needed(dict(helper))
+            for helper in helper_report.get("helpers", []) or []
+            if isinstance(helper, dict)
+        ]
+        updated = _agent_native_cdp_bridge_helper_fleet_report(
+            output_root=str(helper_report.get("output_root", "") or ""),
+            helpers=helpers,
+            elapsed_ms=float(helper_report.get("elapsed_ms", 0.0) or 0.0),
+        )
+        return updated
     manifest_path = str(helper_report.get("manifest_path", "") or "").strip()
     if not manifest_path:
         return dict(helper_report)
@@ -1514,6 +1669,20 @@ def _json_dumps(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=True, indent=2)
 
 
+def _parse_agent_native_cdp_bridge_helper_specs(values: Iterable[str]) -> tuple[dict, ...]:
+    specs: list[dict] = []
+    for value in values or ():
+        text = str(value or "").strip()
+        if not text:
+            continue
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            specs.append(dict(parsed))
+        elif isinstance(parsed, list):
+            specs.extend(dict(item) for item in parsed if isinstance(item, dict))
+    return tuple(specs)
+
+
 def _write_stdout(text: str) -> None:
     output = text + "\n"
     try:
@@ -1708,6 +1877,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         type=float,
         default=5.0,
     )
+    parser.add_argument(
+        "--agent-native-cdp-bridge-helper-spec",
+        action="append",
+        default=[],
+        help="JSON object describing one agent native CDP helper. Repeat for Codex/Claude/Cursor helpers.",
+    )
     parser.add_argument("--allow-agent-cli-execution", action="store_true")
     parser.add_argument("--agent-cli-timeout-sec", type=float, default=90.0)
     args = parser.parse_args(argv)
@@ -1794,6 +1969,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
         agent_native_cdp_bridge_registry_wait_timeout_sec=(
             args.agent_native_cdp_bridge_registry_wait_timeout_sec
+        ),
+        agent_native_cdp_bridge_helper_specs=(
+            _parse_agent_native_cdp_bridge_helper_specs(
+                args.agent_native_cdp_bridge_helper_spec or ()
+            )
         ),
         allow_agent_cli_execution=args.allow_agent_cli_execution,
         agent_cli_timeout_sec=args.agent_cli_timeout_sec,

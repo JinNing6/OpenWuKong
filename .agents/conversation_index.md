@@ -6338,3 +6338,56 @@ When a new conversation starts in this repo:
       Codex App / Claude Desktop / Cursor app chat to move from gated to
       verified send; the runner now has the correct no-focus lifecycle once
       such an endpoint exists
+- 2026-05-29 extended the agent native CDP helper path into a multi-app helper
+  fleet:
+  - implementation:
+    - `major_real_no_loss` now accepts
+      `agent_native_cdp_bridge_helper_specs`, allowing one run to prepare
+      multiple background CDP bridge helpers for Codex App / Claude Desktop /
+      Cursor-style app surfaces
+    - added `prepare_agent_native_cdp_bridge_helper_fleet`, which launches each
+      helper in an isolated output subdirectory, aggregates launch/stop/cleanup
+      counts, and forwards every ready helper registry to agent app probes
+    - added CLI support through repeated
+      `--agent-native-cdp-bridge-helper-spec` JSON objects, so a real no-loss
+      run can configure several app-side helpers without a new flag family per
+      product
+    - helper fleet reports now expose
+      `mode=agent-native-cdp-bridge-helper-fleet`, per-helper subreports,
+      `registry_paths`, aggregate `launch_attempts`, aggregate
+      `stop_attempts`, and aggregate `cleanup_ok`
+  - official-doc basis:
+    - Python `argparse` docs were checked before adding repeated JSON helper
+      spec CLI arguments
+  - validation:
+    - red test first:
+      `test_runner_prepares_agent_native_cdp_bridge_helper_fleet` failed
+      because `run_major_scenario_real_no_loss` did not accept helper specs
+    - red test first:
+      `test_cli_forwards_agent_native_cdp_bridge_helper_specs` failed because
+      the CLI did not accept repeated helper spec arguments
+    - focused green:
+      `python -m unittest tests.test_major_real_no_loss tests.test_agent_native_cdp_bridge tests.test_session_readiness_plan tests.test_agent_app_real_no_loss`: `61 tests OK`
+    - R38 real no-loss smoke:
+      `run_major_scenario_real_no_loss(... agent_apps=("codex app", "claude desktop", "cursor"), cli_agents=(), allow_agent_native_cdp_bridge_helper_launch=True, agent_native_cdp_bridge_helper_specs=(codex, claude, cursor fake-debugger specs))`
+      produced `safe_run_ok=true`, `goal_complete=false`,
+      `agent_native_cdp_bridge_launch_attempts=3`,
+      `agent_native_cdp_bridge_stop_attempts=3`,
+      `agent_native_cdp_bridge_cleanup_ok=true`,
+      `control_attempts=0`, `window_input_attempts=0`, and
+      `bridge_send_attempts=0`
+    - R38 intentionally used fake debugger URLs, so all three app chat
+      surfaces stayed gated with `agent_native_connector_endpoint_unhealthy`
+      rather than sending anything
+    - R38 helper PIDs `93828`, `92968`, and `14804` were confirmed gone after
+      cleanup
+    - full verification:
+      `python -m unittest discover tests`: `517 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - the acceptance runner can now exercise Codex App / Claude Desktop /
+      Cursor helper lifecycle together in one no-focus run
+    - this is the correct infrastructure for the final real-send step; the
+      remaining gap is still actual owned app-side endpoints for those products
+      instead of fake debugger URLs
