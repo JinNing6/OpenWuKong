@@ -5838,3 +5838,48 @@ When a new conversation starts in this repo:
     - the next concrete action is to implement or install real Windows-side
       app bridges for Codex App / Claude Desktop, then run an opt-in bridge
       send test with required readback markers
+- 2026-05-29 hardened Agent App native bridge surface identity:
+  - implementation:
+    - `agent_native_bridge` requests now require a declared
+      `required_surface_kind=desktop_app`
+    - capability reports must expose a matching `surface_kind` /
+      `surface_type` / `bridge_surface`; a CLI-only bridge now fails with
+      `agent_native_bridge_surface_not_ready`
+    - `agent_native_connector_probe` carries `surface_kind` into endpoint
+      metadata and refuses to mark `endpoint_type=agent_native_bridge` ready
+      unless the endpoint is explicitly a `desktop_app` bridge
+    - `agent_app_bridge` now checks the endpoint metadata before treating an
+      agent native bridge as target-ready, so CLI bridges cannot satisfy
+      Codex App / Claude Desktop background-chat requirements
+  - official-doc basis:
+    - Python `dataclasses` docs were checked before changing the request
+      dataclass contract
+    - Python `http.server` docs were checked for the local bridge test server
+      pattern
+  - validation:
+    - red tests first:
+      `test_sender_refuses_cli_only_bridge_for_desktop_app_request`,
+      `test_agent_native_bridge_endpoint_does_not_accept_cli_surface_for_app`,
+      and `test_agent_native_bridge_cli_surface_cannot_satisfy_app_request`
+      failed before implementation
+    - targeted green:
+      `python -m unittest tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_agent_app_bridge`: `29 tests OK`
+    - full suite:
+      `python -m unittest discover tests`: `483 tests OK`
+    - compile/check:
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+    - real no-loss smoke without app bridge URLs:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r24-agent-native-bridge-surface-gate-no-url --output logs\runtime\major-real-no-loss-r24-agent-native-bridge-surface-gate-no-url\report.json --json`
+      produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `agent_command_attempts=0`,
+      `background_screenshot_success_count=5/5`, and
+      `background_screenshot_focus_stable=true`
+  - current conclusion:
+    - the generic app bridge contract is now harder to misuse: background app
+      control cannot be marked verified by a CLI-only endpoint
+    - the next implementation target remains a real desktop-app bridge
+      endpoint for Codex App / Claude Desktop, or a WeChat native connector
+      that exposes File Transfer Assistant without foreground takeover

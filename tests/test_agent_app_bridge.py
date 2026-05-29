@@ -217,6 +217,33 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertEqual(data["request"]["endpoint"]["endpoint_type"], "agent_native_bridge")
         self.assertEqual(data["request"]["endpoint"]["preferred_chat_adapter"], "codex")
 
+    def test_agent_native_bridge_cli_surface_cannot_satisfy_app_request(self):
+        probe = _ready_agent_native_bridge_probe()
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "target_matched": False,
+            "semantic_composer_count": 0,
+        }
+        probe["endpoints"][0]["metadata"]["surface_kind"] = "cli"
+        request = build_agent_app_bridge_request(
+            agent="codex app",
+            agent_id="codex",
+            project_name="openwukong",
+            task_name="desktop-message",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: desktop-message",
+            selected_transport={"transport_id": "codex-desktop-shell"},
+            app_surface_probe=probe,
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_target_not_ready")
+        self.assertFalse(data["request"]["target_ready"])
+        self.assertTrue(data["request"]["native_endpoint_ready"])
+
     def test_native_adapter_sends_agent_native_bridge_without_cdp_or_window_input(self):
         bridge = _FakeAgentNativeBridgeClient(
             {
@@ -454,6 +481,7 @@ class _FakeAgentNativeBridgeClient:
         return {
             "ok": True,
             "background_safe": True,
+            "surface_kind": "desktop_app",
             "capabilities": ["agent_app_conversation.native_bridge_send_message"],
             "agents": [{"agent_id": request.agent_id, "available": True}],
             "projects": [{"name": request.project_name, "available": True}],
@@ -553,6 +581,7 @@ def _ready_agent_native_bridge_probe():
             "send_command_id": "agent_app_conversation.native_bridge_send_message",
             "metadata": {
                 "agent_id": "codex",
+                "surface_kind": "desktop_app",
                 "projects": [{"name": "openwukong", "available": True}],
                 "tasks": [{"name": "desktop-message", "available": True}],
             },

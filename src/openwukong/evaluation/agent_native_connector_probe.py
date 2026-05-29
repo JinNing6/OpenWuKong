@@ -104,6 +104,7 @@ class NativeConnectorEndpoint:
                 and self.bridge_url
                 and self.preferred_chat_adapter
                 and self.send_command_id
+                and _agent_native_bridge_surface_ok(dict(self.metadata or {}))
             )
         return bool(not self.error and self.version and any(target.ready for target in self.targets))
 
@@ -606,7 +607,8 @@ def _probe_agent_native_bridge_endpoint(
             project_name=project_name,
             task_name=task_name,
         )
-        ok = bool(data.get("ok", False))
+        surface_ok = _agent_native_bridge_surface_ok(metadata)
+        ok = bool(data.get("ok", False) and surface_ok)
         return NativeConnectorEndpoint(
             debugger_url=bridge_url,
             bridge_url=bridge_url,
@@ -619,6 +621,7 @@ def _probe_agent_native_bridge_endpoint(
             capability_ok=ok,
             error="" if ok else str(
                 data.get("error", "")
+                or ("" if surface_ok else "agent_native_bridge_surface_not_ready")
                 or data.get("decision", "")
                 or "agent_native_bridge_capability_failed"
             ),
@@ -760,6 +763,13 @@ def _agent_native_bridge_metadata(
             or ""
         ).strip(),
         "background_safe": bool(capability_report.get("background_safe", True)),
+        "surface_kind": str(
+            capability_report.get("surface_kind", "")
+            or capability_report.get("surface_type", "")
+            or capability_report.get("bridge_surface", "")
+            or ""
+        ).strip(),
+        "required_surface_kind": str(request_data.get("required_surface_kind", "") or "desktop_app").strip(),
         "capabilities": list(capability_report.get("capabilities", []) or []),
     }
     for key in ("agents", "projects", "tasks", "workspaces", "sessions"):
@@ -767,6 +777,14 @@ def _agent_native_bridge_metadata(
         if isinstance(value, list):
             metadata[key] = [dict(item) for item in value if isinstance(item, dict)]
     return metadata
+
+
+def _agent_native_bridge_surface_ok(metadata: dict) -> bool:
+    return _normalize_surface_kind(metadata.get("surface_kind", "")) == "desktop_app"
+
+
+def _normalize_surface_kind(value: object) -> str:
+    return str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
 
 
 def _dict_value(value: object) -> dict:

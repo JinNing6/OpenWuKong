@@ -71,6 +71,7 @@ class AgentNativeBridgeTests(unittest.TestCase):
             "ok": True,
             "bridge": {"name": "OpenWukong Agent Native Bridge"},
             "background_safe": True,
+            "surface_kind": "desktop_app",
             "requires_foreground": False,
             "window_input_required": False,
             "capabilities": ["agent_app_conversation.native_bridge_send_message"],
@@ -113,6 +114,7 @@ class AgentNativeBridgeTests(unittest.TestCase):
         self.assertEqual(data["window_input_attempts"], 0)
         self.assertEqual(data["capability_probe_attempts"], 1)
         self.assertTrue(data["request"]["agent_ready"])
+        self.assertTrue(data["request"]["surface_ready"])
         self.assertTrue(data["request"]["project_ready"])
         self.assertTrue(data["request"]["task_ready"])
         self.assertEqual(len(_AgentBridgeHandler.requests), 1)
@@ -178,6 +180,29 @@ class AgentNativeBridgeTests(unittest.TestCase):
 
         self.assertFalse(dry_run.ok)
         self.assertEqual(dry_run.decision, "agent_native_bridge_agent_not_ready")
+        self.assertFalse(send.ok)
+        self.assertEqual(send.decision, "agent_native_bridge_request_not_ready")
+        self.assertEqual(send.bridge_send_attempts, 0)
+        self.assertNotIn("/v1/agent/chat", [item[0] for item in _AgentBridgeHandler.requests])
+
+    def test_sender_refuses_cli_only_bridge_for_desktop_app_request(self):
+        _AgentBridgeHandler.capabilities_payload["surface_kind"] = "cli"
+        request = build_agent_native_bridge_request(
+            bridge_url=self.bridge_url,
+            agent="codex app",
+            agent_id="codex",
+            project_name="openwukong",
+            task_name="desktop-message",
+            message="OPENWUKONG_AGENT_NATIVE_SEND: PASS",
+            composed_message="Project: openwukong\nTask: desktop-message",
+            required_markers=("OPENWUKONG_AGENT_NATIVE_SEND: PASS",),
+        )
+
+        dry_run = AgentNativeBridgeDryRunAdapter(request_timeout=2.0).prepare(request)
+        send = AgentNativeBridgeSenderAdapter(request_timeout=2.0).send(request)
+
+        self.assertFalse(dry_run.ok)
+        self.assertEqual(dry_run.decision, "agent_native_bridge_surface_not_ready")
         self.assertFalse(send.ok)
         self.assertEqual(send.decision, "agent_native_bridge_request_not_ready")
         self.assertEqual(send.bridge_send_attempts, 0)

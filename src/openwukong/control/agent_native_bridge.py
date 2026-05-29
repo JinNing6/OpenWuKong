@@ -36,6 +36,7 @@ class AgentNativeBridgeRequest:
     task_name: str
     message: str
     composed_message: str
+    required_surface_kind: str = "desktop_app"
     selected_transport: dict = dataclasses.field(default_factory=dict)
     required_markers: tuple[str, ...] = ()
     forbidden_markers: tuple[str, ...] = ()
@@ -61,6 +62,7 @@ class AgentNativeBridgeRequest:
             "task_name": self.task_name,
             "message": self.message,
             "composed_message": self.composed_message,
+            "required_surface_kind": self.required_surface_kind,
             "required_markers": list(self.required_markers),
             "forbidden_markers": list(self.forbidden_markers),
         }
@@ -74,12 +76,14 @@ class AgentNativeBridgeRequest:
             "bridge_url": self.bridge_url,
             "native_endpoint_ready": _native_endpoint_ready(self, capabilities),
             "agent_ready": _agent_ready(capabilities, self.agent_id),
+            "surface_ready": _surface_ready(capabilities, self.required_surface_kind),
             "project_ready": _project_ready(capabilities, self.project_name),
             "task_ready": _task_ready(capabilities, self.task_name),
             "send_action_ready": _send_action_ready(capabilities),
             "background_safe": _background_safe(capabilities),
             "agent": self.agent,
             "agent_id": self.agent_id,
+            "required_surface_kind": self.required_surface_kind,
             "project_name": self.project_name,
             "task_name": self.task_name,
             "selected_transport": dict(self.selected_transport),
@@ -134,6 +138,10 @@ class AgentNativeBridgeDryRunReport:
         return _project_ready(self.capability_report, self.request.project_name)
 
     @property
+    def surface_ready(self) -> bool:
+        return _surface_ready(self.capability_report, self.request.required_surface_kind)
+
+    @property
     def task_ready(self) -> bool:
         return _task_ready(self.capability_report, self.request.task_name)
 
@@ -161,6 +169,8 @@ class AgentNativeBridgeDryRunReport:
             return "agent_native_bridge_not_ready"
         if not self.agent_ready:
             return "agent_native_bridge_agent_not_ready"
+        if not self.surface_ready:
+            return "agent_native_bridge_surface_not_ready"
         if not self.project_ready:
             return "agent_native_bridge_project_not_ready"
         if not self.task_ready:
@@ -186,6 +196,7 @@ class AgentNativeBridgeDryRunReport:
             "capability_probe_attempts": self.capability_probe_attempts,
             "native_endpoint_ready": self.native_endpoint_ready,
             "agent_ready": self.agent_ready,
+            "surface_ready": self.surface_ready,
             "project_ready": self.project_ready,
             "task_ready": self.task_ready,
             "send_action_ready": self.send_action_ready,
@@ -456,6 +467,7 @@ def build_agent_native_bridge_request(
     task_name: str,
     message: str,
     composed_message: str,
+    required_surface_kind: str = "desktop_app",
     selected_transport: dict | object | None = None,
     required_markers: tuple[str, ...] = (),
     forbidden_markers: tuple[str, ...] = (),
@@ -468,6 +480,7 @@ def build_agent_native_bridge_request(
         task_name=str(task_name or "").strip(),
         message=str(message or "").strip(),
         composed_message=str(composed_message or "").strip(),
+        required_surface_kind=str(required_surface_kind or "").strip() or "desktop_app",
         selected_transport=_dict_from_report(selected_transport),
         required_markers=_string_tuple(required_markers),
         forbidden_markers=_string_tuple(forbidden_markers),
@@ -491,6 +504,8 @@ def _validate_request(
         errors.append("native_endpoint_not_ready")
     if not _agent_ready(capability_report, request.agent_id):
         errors.append("agent_not_ready")
+    if not _surface_ready(capability_report, request.required_surface_kind):
+        errors.append("surface_not_ready")
     if not _project_ready(capability_report, request.project_name):
         errors.append("project_not_ready")
     if not _task_ready(capability_report, request.task_name):
@@ -521,6 +536,38 @@ def _agent_ready(capability_report: dict, agent_id: str) -> bool:
         if value and agent in value:
             return True
     return False
+
+
+def _surface_ready(capability_report: dict, required_surface_kind: str) -> bool:
+    required = _normalize_kind(required_surface_kind)
+    if not required:
+        return True
+    actual_values: list[str] = []
+    for key in (
+        "surface_kind",
+        "surface_type",
+        "bridge_surface",
+        "transport_surface",
+        "target_surface",
+    ):
+        value = _normalize_kind(capability_report.get(key, ""))
+        if value:
+            actual_values.append(value)
+    surfaces = capability_report.get("surfaces")
+    if isinstance(surfaces, list):
+        for item in surfaces:
+            if isinstance(item, dict):
+                actual_values.append(
+                    _normalize_kind(
+                        item.get("surface_kind", "")
+                        or item.get("surface_type", "")
+                        or item.get("kind", "")
+                        or item.get("name", "")
+                    )
+                )
+            else:
+                actual_values.append(_normalize_kind(item))
+    return required in {value for value in actual_values if value}
 
 
 def _project_ready(capability_report: dict, project_name: str) -> bool:
@@ -561,6 +608,8 @@ def _target_summary(capability_report: dict, request: AgentNativeBridgeRequest) 
     return {
         "agent_id": request.agent_id,
         "agent_ready": _agent_ready(capability_report, request.agent_id),
+        "required_surface_kind": request.required_surface_kind,
+        "surface_ready": _surface_ready(capability_report, request.required_surface_kind),
         "project_name": request.project_name,
         "project_ready": _project_ready(capability_report, request.project_name),
         "task_name": request.task_name,
@@ -691,6 +740,10 @@ def _int_value(data: dict, key: str) -> int:
 
 def _normalize(value: object) -> str:
     return str(value or "").strip().casefold()
+
+
+def _normalize_kind(value: object) -> str:
+    return _normalize(value).replace("-", "_").replace(" ", "_")
 
 
 __all__ = [

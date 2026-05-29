@@ -1009,16 +1009,19 @@ def _endpoint_supports_agent_native_bridge(endpoint: dict, agent_id: str = "") -
         return False
     if not bool(endpoint.get("ready", False)):
         return False
+    metadata = endpoint.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    if _normalize_surface_kind(metadata.get("surface_kind", "")) != "desktop_app":
+        return False
     normalized_agent = str(agent_id or "").strip().lower()
     preferred = str(endpoint.get("preferred_chat_adapter", "") or "").strip().lower()
     if normalized_agent and preferred and preferred != normalized_agent:
         return False
     if normalized_agent:
-        metadata = endpoint.get("metadata")
-        if isinstance(metadata, dict):
-            metadata_agent = str(metadata.get("agent_id", "") or "").strip().lower()
-            if metadata_agent and metadata_agent != normalized_agent:
-                return False
+        metadata_agent = str(metadata.get("agent_id", "") or "").strip().lower()
+        if metadata_agent and metadata_agent != normalized_agent:
+            return False
     return bool(str(endpoint.get("send_command_id", "") or "").strip() == AGENT_NATIVE_SEND_ACTION)
 
 
@@ -1245,6 +1248,10 @@ def _int_value(data: dict, key: str) -> int:
         return int(data.get(key, 0) or 0)
     except Exception:
         return 0
+
+
+def _normalize_surface_kind(value: object) -> str:
+    return str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
 
 
 def json_dumps_ascii(value: str) -> str:
