@@ -6612,3 +6612,27 @@ When a new conversation starts in this repo:
     - the next gap is a real opt-in background launch test on this machine,
       then endpoint probing and native bridge send/readback verification
       against the launched owned endpoints
+- 2026-05-29 completed the first real opt-in owned agent-app DevTools launch
+  smoke on this machine:
+  - validation:
+    - R43 real owned launch smoke:
+      `run_major_scenario_real_no_loss(... agent_apps=("codex app", "claude desktop", "cursor"), cli_agents=(), allow_agent_app_devtools_owned_launch=True)`
+      wrote
+      `logs/runtime/major-real-no-loss-r43-agent-app-devtools-owned-real-launch/major-real-no-loss-report.json`
+      and produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_app_devtools_launch_attempts=3`,
+      `agent_app_devtools_stop_attempts=3`,
+      `agent_app_devtools_cleanup_ok=true`, and owned debugger URLs:
+      `http://127.0.0.1:19555`, `http://127.0.0.1:19556`,
+      `http://127.0.0.1:19557`
+    - residual process scan for tokens `19555`, `19556`, `19557`, and
+      `major-real-no-loss-r43-agent-app-devtools-owned-real-launch` found only
+      the scanning PowerShell process itself, so no owned app/profile process
+      remained after cleanup
+  - current conclusion:
+    - the system can now really launch and clean up owned Codex App / Claude
+      Desktop / Cursor DevTools endpoints without keyboard, mouse, clipboard,
+      bridge send, or window-input attempts
+    - the next gap is endpoint health probing plus native bridge send/readback
+      verification against those owned endpoints
