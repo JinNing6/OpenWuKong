@@ -6636,3 +6636,61 @@ When a new conversation starts in this repo:
       bridge send, or window-input attempts
     - the next gap is endpoint health probing plus native bridge send/readback
       verification against those owned endpoints
+- 2026-05-29 added real endpoint health gating for owned agent-app DevTools:
+  - implementation:
+    - `prepare_agent_app_devtools_owned_launch_fleet` now waits for each owned
+      DevTools endpoint through read-only `/json/version` and `/json/list`
+      probes before marking the helper `ready`
+    - helper reports now include `endpoint_health`, `healthy_endpoint_count`,
+      the launched PID, and command evidence
+    - `agent_app_real_no_loss` can now receive `debugger_urls_by_agent`, so
+      Codex / Claude / Cursor probes only receive their own owned DevTools URL
+      instead of every launched endpoint
+    - `major_real_no_loss` now forwards synthetic owned process evidence into
+      the agent app probe process provider, binding each owned DevTools port to
+      the exact launched executable/PID/port tuple before any native probe
+      treats it as usable
+  - official-doc basis:
+    - Chrome DevTools Protocol documentation was checked before treating
+      `/json/version` and `/json/list` as the health gate for a usable local
+      DevTools target
+  - validation:
+    - red tests first:
+      `test_filters_debugger_urls_by_agent_before_native_probe`,
+      `test_prepare_agent_app_devtools_owned_launch_fleet_waits_for_endpoint_health`,
+      and `test_runner_forwards_owned_devtools_process_provider_and_urls_by_agent`
+      failed before per-agent URL routing, endpoint health wait, and owned
+      process evidence forwarding existed
+    - focused green:
+      `python -m unittest tests.test_major_real_no_loss tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe tests.test_session_readiness_plan`: `85 tests OK`
+    - R44 real owned endpoint health smoke:
+      `run_major_scenario_real_no_loss(... agent_apps=("codex app", "claude desktop", "cursor"), cli_agents=(), allow_agent_app_devtools_owned_launch=True)`
+      wrote
+      `logs/runtime/major-real-no-loss-r44-agent-app-devtools-health-real-launch/major-real-no-loss-report.json`
+      and produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_app_devtools_launch_attempts=3`,
+      `agent_app_devtools_stop_attempts=3`,
+      `agent_app_devtools_cleanup_ok=true`, `healthy_endpoint_count=0`, and
+      no forwarded ready debugger URLs
+    - R44 evidence:
+      Codex App and Claude Desktop did not expose HTTP DevTools at the requested
+      ports within the health timeout; Cursor exposed `/json/version` with a
+      browser-level websocket but `/json/list` returned no page targets, so it
+      was correctly classified as `devtools_targets_not_ready`
+    - residual process scan for tokens `19555`, `19556`, `19557`, and
+      `major-real-no-loss-r44-agent-app-devtools-health-real-launch` found only
+      the scanning PowerShell process itself
+    - full verification:
+      `python -m unittest discover tests`: `531 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - the controlled endpoint health gate is now honest: owned app launch is
+      real and safely cleaned up, but Codex App / Claude Desktop do not expose
+      usable DevTools through this CLI flag route on this machine, and Cursor
+      exposes only a browser-level endpoint without a page target
+    - the next engineering route should stop assuming plain
+      `--remote-debugging-port` unlocks all desktop agent apps; the next useful
+      work is either Browser-level CDP `Target` domain probing for Cursor, or a
+      product-specific native/extension bridge for Codex and Claude Desktop

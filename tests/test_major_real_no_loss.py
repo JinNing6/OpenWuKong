@@ -1060,11 +1060,15 @@ class MajorRealNoLossTests(unittest.TestCase):
         )
         self.assertEqual(
             app_calls[0]["debugger_urls"],
-            (
-                "http://127.0.0.1:19444",
-                "http://127.0.0.1:19555",
-                "http://127.0.0.1:19556",
-            ),
+            ("http://127.0.0.1:19444",),
+        )
+        self.assertEqual(
+            app_calls[0]["debugger_urls_by_agent"]["codex"],
+            ("http://127.0.0.1:19555",),
+        )
+        self.assertEqual(
+            app_calls[0]["debugger_urls_by_agent"]["claude"],
+            ("http://127.0.0.1:19556",),
         )
         self.assertEqual(data["agent_app_devtools_launch_attempts"], 2)
         self.assertEqual(data["agent_app_devtools_stop_attempts"], 2)
@@ -1127,11 +1131,28 @@ class MajorRealNoLossTests(unittest.TestCase):
             ],
         }
 
+        class _HTTPProbe:
+            def get_json(self, url, timeout=0.2):
+                if url.endswith("/json/version"):
+                    return {"Browser": "Agent/1.0", "Protocol-Version": "1.3"}
+                if url.endswith("/json/list"):
+                    port = "19556" if ":19556" in url else "19555"
+                    return [
+                        {
+                            "id": f"page-{port}",
+                            "type": "page",
+                            "webSocketDebuggerUrl": f"ws://127.0.0.1:{port}/devtools/page/page-{port}",
+                        }
+                    ]
+                raise AssertionError(url)
+
         with tempfile.TemporaryDirectory() as tmp:
             report = major_real_no_loss.prepare_agent_app_devtools_owned_launch_fleet(
                 output_root=Path(tmp) / "agent-app-devtools",
                 resolution_report=resolution_report,
                 plan_executor=_execute_plan,
+                http_probe=_HTTPProbe(),
+                endpoint_wait_timeout_sec=0.2,
             )
             data = report.to_dict()
 
@@ -1148,6 +1169,208 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertIn("--remote-debugging-port=19555", calls[0]["action"]["argv"])
         self.assertIn("--user-data-dir", " ".join(calls[0]["action"]["argv"]))
         self.assertEqual(data["helpers"][0]["agent_id"], "codex")
+
+    def test_prepare_agent_app_devtools_owned_launch_fleet_waits_for_endpoint_health(self):
+        http_calls = []
+
+        class _HTTPProbe:
+            def get_json(self, url, timeout=0.2):
+                http_calls.append((url, timeout))
+                if url.endswith("/json/version"):
+                    return {"Browser": "Codex/1.0", "Protocol-Version": "1.3"}
+                if url.endswith("/json/list"):
+                    return [
+                        {
+                            "id": "page-1",
+                            "type": "page",
+                            "title": "Codex",
+                            "url": "app://codex/index.html",
+                            "webSocketDebuggerUrl": "ws://127.0.0.1:19555/devtools/page/page-1",
+                        }
+                    ]
+                raise AssertionError(url)
+
+        def _execute_plan(plan, **kwargs):
+            action = plan.to_dict()["actions"][0]
+            return _FakeReport(
+                {
+                    "mode": "session-readiness-execution",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "launch_attempts": 1,
+                    "manifest_path": kwargs["manifest_path"],
+                    "results": [
+                        {
+                            "status": "started",
+                            "pid": 77524,
+                            "readiness_url": action["readiness_url"],
+                        }
+                    ],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = major_real_no_loss.prepare_agent_app_devtools_owned_launch_fleet(
+                output_root=Path(tmp) / "agent-app-devtools",
+                resolution_report={
+                    "mode": "agent-app-devtools-resolution",
+                    "cases": [
+                        {
+                            "agent": "codex app",
+                            "agent_id": "codex",
+                            "status": "resolved",
+                            "executable_ready": True,
+                            "executable_path": "C:/Apps/Codex.exe",
+                        }
+                    ],
+                },
+                plan_executor=_execute_plan,
+                http_probe=_HTTPProbe(),
+                endpoint_wait_timeout_sec=0.2,
+            )
+            data = report.to_dict()
+
+        self.assertTrue(data["ready"])
+        self.assertEqual(data["healthy_endpoint_count"], 1)
+        self.assertEqual(data["debugger_urls"], ["http://127.0.0.1:19555"])
+        health = data["helpers"][0]["endpoint_health"]
+        self.assertTrue(health["ready"])
+        self.assertEqual(health["target_count"], 1)
+        self.assertEqual(health["targets"][0]["target_id"], "page-1")
+        self.assertEqual(data["helpers"][0]["pid"], 77524)
+        self.assertEqual(http_calls[0][0], "http://127.0.0.1:19555/json/version")
+        self.assertEqual(http_calls[1][0], "http://127.0.0.1:19555/json/list")
+
+    def test_runner_forwards_owned_devtools_process_provider_and_urls_by_agent(self):
+        app_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _devtools_launch_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-app-devtools-owned-launch-fleet",
+                    "enabled": True,
+                    "ready": True,
+                    "cleanup_ok": True,
+                    "launch_attempts": 2,
+                    "stop_attempts": 2,
+                    "debugger_urls": [
+                        "http://127.0.0.1:19555",
+                        "http://127.0.0.1:19556",
+                    ],
+                    "helpers": [
+                        {
+                            "agent": "codex app",
+                            "agent_id": "codex",
+                            "ready": True,
+                            "cleanup_ok": True,
+                            "debugger_url": "http://127.0.0.1:19555",
+                            "debug_port": 19555,
+                            "executable_path": "C:/Apps/Codex.exe",
+                            "pid": 77524,
+                            "launch_attempts": 1,
+                            "stop_attempts": 1,
+                        },
+                        {
+                            "agent": "claude desktop",
+                            "agent_id": "claude",
+                            "ready": True,
+                            "cleanup_ok": True,
+                            "debugger_url": "http://127.0.0.1:19556",
+                            "debug_port": 19556,
+                            "executable_path": "C:/Apps/Claude.exe",
+                            "pid": 93796,
+                            "launch_attempts": 1,
+                            "stop_attempts": 1,
+                        },
+                    ],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            owned_processes = tuple(kwargs["process_provider"]())
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [
+                        {
+                            "agent": "codex app",
+                            "status": "native_connector_ready",
+                            "real_verified": True,
+                            "native_ready": True,
+                            "owned_processes": [process.to_dict() for process in owned_processes],
+                        }
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("codex app", "claude desktop"),
+                cli_agents=(),
+                debugger_urls=("http://127.0.0.1:19444",),
+                allow_agent_app_devtools_owned_launch=True,
+                agent_app_devtools_owned_launch_runner=_devtools_launch_runner,
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+                agent_app_process_provider=lambda: (),
+            )
+            data = report.to_dict()
+
+        self.assertEqual(
+            app_calls[0]["debugger_urls"],
+            ("http://127.0.0.1:19444",),
+        )
+        self.assertEqual(
+            app_calls[0]["debugger_urls_by_agent"]["codex"],
+            ("http://127.0.0.1:19555",),
+        )
+        self.assertEqual(
+            app_calls[0]["debugger_urls_by_agent"]["claude"],
+            ("http://127.0.0.1:19556",),
+        )
+        owned_processes = data["subreports"]["agent_app"]["cases"][0]["owned_processes"]
+        self.assertEqual(
+            [(item["process_name"], item["pid"], item["listening_ports"]) for item in owned_processes],
+            [("Codex.exe", 77524, [19555]), ("Claude.exe", 93796, [19556])],
+        )
 
     def test_report_exposes_agent_app_endpoint_acceptance_package(self):
         report = _major_report(

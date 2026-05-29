@@ -353,6 +353,7 @@ def run_agent_app_real_no_loss(
     process_provider: object | None = None,
     http_probe: object | None = None,
     debugger_urls: Iterable[str] = (),
+    debugger_urls_by_agent: dict | None = None,
     ide_bridge_urls: Iterable[str] = (),
     ide_bridge_probe: object | None = None,
     agent_native_bridge_urls: Iterable[str] = (),
@@ -398,7 +399,11 @@ def run_agent_app_real_no_loss(
             resolver=resolver,
             process_provider=process_provider,
             http_probe=http_probe,
-            debugger_urls=tuple(debugger_urls or ()),
+            debugger_urls=_debugger_urls_for_agent(
+                debugger_urls,
+                debugger_urls_by_agent,
+                agent,
+            ),
             ide_bridge_urls=tuple(ide_bridge_urls or ()),
             ide_bridge_probe=ide_bridge_probe,
             agent_native_bridge_urls=tuple(agent_native_bridge_urls or ()),
@@ -1088,6 +1093,36 @@ def _normalize_agents(agents: Iterable[str]) -> tuple[str, ...]:
         seen.add(key)
         normalized.append(text)
     return tuple(normalized or DEFAULT_AGENT_APP_SURFACES)
+
+
+def _debugger_urls_for_agent(
+    explicit_urls: Iterable[str],
+    debugger_urls_by_agent: dict | None,
+    agent: str,
+) -> tuple[str, ...]:
+    urls: list[str] = []
+    for value in explicit_urls or ():
+        text = str(value or "").strip()
+        if text and text not in urls:
+            urls.append(text)
+    mapping = debugger_urls_by_agent if isinstance(debugger_urls_by_agent, dict) else {}
+    keys = (
+        str(agent or "").strip().lower(),
+        _agent_id_from_name(agent).lower(),
+    )
+    for key in keys:
+        value = mapping.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            candidates = (value,)
+        else:
+            candidates = tuple(value or ())
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text and text not in urls:
+                urls.append(text)
+    return tuple(urls)
 
 
 def _resolve_output_root(output_root: str | Path) -> Path:

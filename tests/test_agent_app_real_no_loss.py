@@ -366,6 +366,56 @@ class AgentAppRealNoLossTests(unittest.TestCase):
         self.assertEqual(data["control_attempts"], 0)
         self.assertEqual(data["cases"][0]["status"], "native_connector_ready")
 
+    def test_filters_debugger_urls_by_agent_before_native_probe(self):
+        calls = []
+
+        def fake_probe_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=False,
+                decision="agent_native_connector_endpoint_unhealthy",
+                agent=kwargs["agent"],
+                agent_id="codex" if kwargs["agent"] == "codex app" else "claude",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=0,
+                bridge_send_attempts=0,
+                app_uia_probe={
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_app_real_no_loss(
+                agents=("codex app", "claude desktop"),
+                project_name="openwukong",
+                task_name="owned-devtools",
+                output_root=Path(td),
+                debugger_urls=("http://127.0.0.1:19444",),
+                debugger_urls_by_agent={
+                    "codex": ("http://127.0.0.1:19555",),
+                    "claude desktop": ("http://127.0.0.1:19556",),
+                },
+                probe_runner=fake_probe_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(
+            calls[0]["debugger_urls"],
+            ("http://127.0.0.1:19444", "http://127.0.0.1:19555"),
+        )
+        self.assertEqual(
+            calls[1]["debugger_urls"],
+            ("http://127.0.0.1:19444", "http://127.0.0.1:19556"),
+        )
+
     def test_passes_explicit_agent_native_bridge_urls_to_native_probe(self):
         calls = []
 

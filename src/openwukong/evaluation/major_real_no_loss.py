@@ -21,6 +21,11 @@ from openwukong.control.session_readiness_plan import (
 from openwukong.evaluation.agent_app_real_no_loss import (
     run_agent_app_real_no_loss,
 )
+from openwukong.evaluation.agent_native_connector_probe import (
+    NativeProcessSnapshot,
+    RequestsNativeConnectorHTTPProbe,
+    list_native_processes,
+)
 from openwukong.evaluation.agent_cli_real_no_loss import (
     run_agent_cli_real_no_loss,
 )
@@ -426,6 +431,7 @@ def run_major_scenario_real_no_loss(
     agent_app_runner: AgentAppRunner | None = None,
     agent_app_devtools_resolver: AgentAppDevToolsResolver | None = None,
     agent_app_devtools_owned_launch_runner: AgentAppDevToolsOwnedLaunchRunner | None = None,
+    agent_app_process_provider: Callable[[], Iterable[NativeProcessSnapshot]] | None = None,
     agent_cli_runner: AgentCliRunner | None = None,
 ) -> MajorScenarioRealNoLossReport:
     started = time.perf_counter()
@@ -548,10 +554,6 @@ def run_major_scenario_real_no_loss(
         effective_workspace_path = workspace_path or str(
             helper.get("workspace_path", "") or ""
         )
-        effective_debugger_urls = _effective_agent_app_devtools_debugger_urls(
-            debugger_urls,
-            agent_app_devtools_launch,
-        )
         app = _report_to_dict(
             (agent_app_runner or run_agent_app_real_no_loss)(
                 agents=tuple(agent_apps),
@@ -567,11 +569,18 @@ def run_major_scenario_real_no_loss(
                 bridge_message=app_bridge_message,
                 required_markers=tuple(app_bridge_required_markers or ()),
                 forbidden_markers=tuple(app_bridge_forbidden_markers or ()),
-                debugger_urls=effective_debugger_urls,
+                debugger_urls=tuple(debugger_urls or ()),
+                debugger_urls_by_agent=_agent_app_devtools_debugger_urls_by_agent(
+                    agent_app_devtools_launch
+                ),
                 ide_bridge_urls=effective_ide_bridge_urls,
                 agent_native_bridge_urls=tuple(agent_native_bridge_urls or ()),
                 agent_native_bridge_registry_paths=effective_agent_native_bridge_registry_paths,
                 workspace_path=effective_workspace_path,
+                process_provider=_combined_agent_app_process_provider(
+                    agent_app_process_provider,
+                    agent_app_devtools_launch,
+                ),
             )
         )
         cli = _report_to_dict(
@@ -1478,6 +1487,14 @@ class AgentAppDevToolsOwnedLaunchReport:
         return sum(_counter(helper, "stop_attempts") for helper in self.helpers)
 
     @property
+    def healthy_endpoint_count(self) -> int:
+        return sum(
+            1
+            for helper in self.helpers
+            if bool(_details(helper.get("endpoint_health")).get("ready", False))
+        )
+
+    @property
     def debugger_urls(self) -> tuple[str, ...]:
         urls: list[str] = []
         for helper in self.helpers:
@@ -1502,6 +1519,7 @@ class AgentAppDevToolsOwnedLaunchReport:
             "helper_count": len(self.helpers),
             "launch_attempts": self.launch_attempts,
             "stop_attempts": self.stop_attempts,
+            "healthy_endpoint_count": self.healthy_endpoint_count,
             "debugger_urls": list(self.debugger_urls),
             "helpers": [dict(helper) for helper in self.helpers],
             "elapsed_ms": round(self.elapsed_ms, 3),
@@ -1513,12 +1531,16 @@ def prepare_agent_app_devtools_owned_launch_fleet(
     output_root: str | Path,
     resolution_report: dict,
     plan_executor: Callable[..., object] | None = None,
+    http_probe: object | None = None,
+    endpoint_wait_timeout_sec: float = 10.0,
+    request_timeout: float = 0.2,
 ) -> AgentAppDevToolsOwnedLaunchReport:
     started = time.perf_counter()
     root = Path(output_root).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     helpers: list[dict] = []
     active_plan_executor = plan_executor or execute_session_readiness_plan
+    active_http_probe = http_probe or RequestsNativeConnectorHTTPProbe()
 
     for index, case in enumerate(_agent_app_devtools_launchable_cases(resolution_report), start=1):
         agent = str(case.get("agent", "") or "").strip()
@@ -1532,6 +1554,9 @@ def prepare_agent_app_devtools_owned_launch_fleet(
         manifest_path = helper_root / "manifest.json"
         readiness_url = f"http://127.0.0.1:{debug_port}"
         launch_report: dict = {}
+        endpoint_health: dict = {}
+        pid = 0
+        command = ""
         ready = False
         error = ""
         try:
@@ -1554,8 +1579,20 @@ def prepare_agent_app_devtools_owned_launch_fleet(
                 launch_report,
                 default=readiness_url,
             )
+            pid = _pid_from_launch_report(launch_report)
+            command = _command_from_launch_report(launch_report)
+            if ready:
+                endpoint_health = _wait_for_agent_app_devtools_endpoint_health(
+                    readiness_url,
+                    http_probe=active_http_probe,
+                    timeout_sec=endpoint_wait_timeout_sec,
+                    request_timeout=request_timeout,
+                )
+                ready = bool(endpoint_health.get("ready", False))
             if not ready:
                 error = "agent_app_devtools_owned_not_started"
+                if endpoint_health.get("error"):
+                    error = str(endpoint_health.get("error") or error)
         except Exception as exc:
             error = str(exc) or exc.__class__.__name__
         helpers.append(
@@ -1571,12 +1608,15 @@ def prepare_agent_app_devtools_owned_launch_fleet(
                 "agent": agent or defaults["agent"],
                 "agent_id": effective_agent_id,
                 "executable_path": executable,
+                "pid": pid,
                 "debug_port": debug_port,
                 "debugger_url": readiness_url,
                 "user_data_dir": str(user_data_dir),
                 "manifest_path": str(manifest_path),
+                "command": command,
                 "launch_attempts": _counter(launch_report, "launch_attempts"),
                 "stop_attempts": 0,
+                "endpoint_health": endpoint_health,
                 "launch_report": launch_report,
                 "error": error,
             }
@@ -1983,6 +2023,110 @@ def _readiness_url_from_launch_report(launch_report: dict, *, default: str) -> s
     return default
 
 
+def _pid_from_launch_report(launch_report: dict) -> int:
+    for result in launch_report.get("results", []) or []:
+        if not isinstance(result, dict):
+            continue
+        pid = _counter(result, "pid")
+        if pid > 0:
+            return pid
+    return 0
+
+
+def _command_from_launch_report(launch_report: dict) -> str:
+    for result in launch_report.get("results", []) or []:
+        if not isinstance(result, dict):
+            continue
+        command = str(result.get("command", "") or "").strip()
+        if command:
+            return command
+        argv = result.get("argv")
+        if isinstance(argv, list):
+            text = " ".join(str(part) for part in argv if str(part or "").strip())
+            if text:
+                return text
+    return ""
+
+
+def _wait_for_agent_app_devtools_endpoint_health(
+    debugger_url: str,
+    *,
+    http_probe: object,
+    timeout_sec: float,
+    request_timeout: float,
+) -> dict:
+    started = time.perf_counter()
+    base = str(debugger_url or "").strip().rstrip("/")
+    attempts = 0
+    last_error = ""
+    while True:
+        attempts += 1
+        try:
+            version = http_probe.get_json(
+                f"{base}/json/version",
+                timeout=max(0.05, float(request_timeout)),
+            )
+            if not isinstance(version, dict):
+                raise ValueError("devtools_version_not_object")
+            targets_raw = http_probe.get_json(
+                f"{base}/json/list",
+                timeout=max(0.05, float(request_timeout)),
+            )
+            if not isinstance(targets_raw, list):
+                raise ValueError("devtools_targets_not_list")
+            targets = [
+                _devtools_target_summary(item)
+                for item in targets_raw
+                if isinstance(item, dict)
+            ]
+            ready = any(bool(item.get("webSocketDebuggerUrl", "")) for item in targets)
+            return {
+                "mode": "agent-app-devtools-endpoint-health",
+                "safety_mode": "read_only",
+                "control_allowed": False,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "debugger_url": base,
+                "ready": ready,
+                "attempts": attempts,
+                "version": version,
+                "target_count": len(targets),
+                "targets": targets,
+                "error": "" if ready else "devtools_targets_not_ready",
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+        except Exception as exc:
+            last_error = str(exc) or exc.__class__.__name__
+        if time.perf_counter() - started >= max(0.0, float(timeout_sec)):
+            return {
+                "mode": "agent-app-devtools-endpoint-health",
+                "safety_mode": "read_only",
+                "control_allowed": False,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "debugger_url": base,
+                "ready": False,
+                "attempts": attempts,
+                "version": {},
+                "target_count": 0,
+                "targets": [],
+                "error": last_error or "devtools_endpoint_not_ready",
+                "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+            }
+        time.sleep(min(0.2, max(0.01, float(request_timeout))))
+
+
+def _devtools_target_summary(data: dict) -> dict:
+    return {
+        "target_id": str(data.get("id", "") or data.get("targetId", "") or ""),
+        "type": str(data.get("type", "") or ""),
+        "title": str(data.get("title", "") or ""),
+        "url": str(data.get("url", "") or ""),
+        "webSocketDebuggerUrl": str(data.get("webSocketDebuggerUrl", "") or ""),
+        "ready": bool(data.get("webSocketDebuggerUrl", "")),
+    }
+
+
 def _agent_app_devtools_owned_launch_fleet_report(
     *,
     output_root: str,
@@ -2092,27 +2236,100 @@ def _effective_ide_bridge_urls(
     return tuple(urls)
 
 
-def _effective_agent_app_devtools_debugger_urls(
-    explicit_urls: Iterable[str],
+def _agent_app_devtools_debugger_urls_by_agent(
     owned_launch_report: dict,
-) -> tuple[str, ...]:
-    urls: list[str] = []
-    for value in explicit_urls or ():
-        text = str(value or "").strip()
-        if text and text not in urls:
-            urls.append(text)
-    if bool(owned_launch_report.get("ready", False)):
-        for value in owned_launch_report.get("debugger_urls", []) or []:
-            text = str(value or "").strip()
-            if text and text not in urls:
-                urls.append(text)
+) -> dict[str, tuple[str, ...]]:
+    mapping: dict[str, list[str]] = {}
     for helper in owned_launch_report.get("helpers", []) or []:
         if not isinstance(helper, dict) or not bool(helper.get("ready", False)):
             continue
-        text = str(helper.get("debugger_url", "") or "").strip()
-        if text and text not in urls:
-            urls.append(text)
-    return tuple(urls)
+        url = str(helper.get("debugger_url", "") or "").strip()
+        if not url:
+            continue
+        for key in (
+            str(helper.get("agent", "") or "").strip().lower(),
+            str(helper.get("agent_id", "") or "").strip().lower(),
+        ):
+            if not key:
+                continue
+            values = mapping.setdefault(key, [])
+            if url not in values:
+                values.append(url)
+    return {key: tuple(values) for key, values in mapping.items()}
+
+
+def _combined_agent_app_process_provider(
+    base_provider: Callable[[], Iterable[NativeProcessSnapshot]] | None,
+    owned_launch_report: dict,
+) -> Callable[[], tuple[NativeProcessSnapshot, ...]] | None:
+    owned = _agent_app_devtools_process_snapshots(owned_launch_report)
+    if not owned:
+        return base_provider
+
+    def _provider() -> tuple[NativeProcessSnapshot, ...]:
+        base = tuple((base_provider or list_native_processes)() or ())
+        seen: set[tuple[int, str, tuple[int, ...]]] = set()
+        combined: list[NativeProcessSnapshot] = []
+        for process in base + owned:
+            key = (
+                int(process.pid or 0),
+                str(process.process_name or "").lower(),
+                tuple(int(port) for port in process.listening_ports),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            combined.append(process)
+        return tuple(combined)
+
+    return _provider
+
+
+def _agent_app_devtools_process_snapshots(
+    owned_launch_report: dict,
+) -> tuple[NativeProcessSnapshot, ...]:
+    snapshots: list[NativeProcessSnapshot] = []
+    for helper in owned_launch_report.get("helpers", []) or []:
+        if not isinstance(helper, dict) or not bool(helper.get("ready", False)):
+            continue
+        port = _counter(helper, "debug_port")
+        if port <= 0:
+            port = _port_from_debugger_url(str(helper.get("debugger_url", "") or ""))
+        executable_path = str(helper.get("executable_path", "") or "").strip()
+        process_name = _process_name_from_path(executable_path)
+        if not process_name:
+            process_name = str(helper.get("process_name", "") or "").strip()
+        if not process_name or port <= 0:
+            continue
+        snapshots.append(
+            NativeProcessSnapshot(
+                pid=_counter(helper, "pid"),
+                process_name=process_name,
+                executable_path=executable_path,
+                command_line=str(helper.get("command", "") or "").strip(),
+                listening_ports=(port,),
+            )
+        )
+    return tuple(snapshots)
+
+
+def _process_name_from_path(path: str) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    normalized = text.replace("\\", "/").rstrip("/")
+    return normalized.rsplit("/", 1)[-1]
+
+
+def _port_from_debugger_url(url: str) -> int:
+    text = str(url or "").strip().rstrip("/")
+    if ":" not in text:
+        return 0
+    try:
+        value = int(text.rsplit(":", 1)[-1])
+    except ValueError:
+        return 0
+    return value if 0 < value <= 65535 else 0
 
 
 def _effective_agent_native_bridge_registry_paths(
