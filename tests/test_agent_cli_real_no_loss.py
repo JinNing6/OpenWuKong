@@ -110,6 +110,35 @@ class AgentCliRealNoLossTests(unittest.TestCase):
         self.assertEqual(case["agent_command_attempts"], 1)
         self.assertEqual(case["window_input_attempts"], 0)
 
+    def test_cli_probe_records_foreground_change_without_failing_when_no_window_input_happened(self):
+        executor = _FakeCommandExecutor(
+            _FakeExecutionResult(
+                ok=False,
+                stderr="Not logged in - Please run /login",
+                error="exit_code=1",
+                exit_code=1,
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_cli_real_no_loss(
+                agents=("claude",),
+                output_root=Path(td),
+                allow_cli_execution=True,
+                resolver=_resolver_with_claude_cli(),
+                command_executor=executor,
+                foreground_observer=StaticForegroundObserver(before=77, after=99),
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+
+        self.assertEqual(case["status"], "cli_auth_required")
+        self.assertTrue(case["passed"])
+        self.assertFalse(case["foreground_focus_stable"])
+        self.assertFalse(data["foreground_focus_stable"])
+        self.assertEqual(data["failed_cases"], 0)
+        self.assertEqual(case["window_input_attempts"], 0)
+
     def test_access_denied_is_classified_for_unrunnable_codex_cli_alias(self):
         executor = _FakeCommandExecutor(
             _FakeExecutionResult(

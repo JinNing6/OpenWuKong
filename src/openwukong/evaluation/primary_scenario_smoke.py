@@ -15,7 +15,9 @@ import hashlib
 import http.server
 import json
 import re
+import shutil
 import socketserver
+import stat
 import struct
 import tempfile
 import threading
@@ -534,12 +536,21 @@ def _write_owned_browser_helper_artifact(
         terminator=terminator,
     )
     stop_data = stop_report.to_dict()
+    profile_cleanup = _cleanup_owned_browser_helper_profile(
+        profile_path,
+        output_root=output_root,
+    )
     helper_errors = _owned_browser_helper_errors(
         execution_data=execution_data,
         probe_data=probe_data,
         action_data=action_data,
         stop_data=stop_data,
     )
+    if not bool(profile_cleanup.get("deleted", False)):
+        helper_errors = tuple(helper_errors) + (
+            "owned_browser_helper_profile_cleanup_failed:"
+            + str(profile_cleanup.get("error", "") or "profile_still_exists"),
+        )
     status = "started_and_stopped" if not helper_errors else "failed"
     artifact = {
         "mode": "primary-scenario-owned-browser-helper",
@@ -564,6 +575,7 @@ def _write_owned_browser_helper_artifact(
         ),
         "owned_browser_action": action_data,
         "readiness_stop": stop_data,
+        "profile_cleanup": profile_cleanup,
         "errors": helper_errors,
         "isolation": {
             **_isolation_payload(output_root),
@@ -579,6 +591,56 @@ def _write_owned_browser_helper_artifact(
         encoding="utf-8",
     )
     return helper_id, artifact_path, tuple(helper_errors)
+
+
+def _cleanup_owned_browser_helper_profile(
+    profile_path: Path,
+    *,
+    output_root: Path,
+) -> dict:
+    path = Path(profile_path).resolve()
+    root = Path(output_root).resolve()
+    result = {
+        "attempted": False,
+        "deleted": False,
+        "path": str(path),
+        "safety_root": str(root),
+        "error": "",
+    }
+    if not _is_relative_to(path, root):
+        result["error"] = "profile_path_outside_output_root"
+        return result
+    result["attempted"] = True
+    if not path.exists():
+        result["deleted"] = True
+        return result
+    try:
+        shutil.rmtree(path, onerror=_rmtree_remove_readonly)
+    except Exception as exc:
+        result["error"] = str(exc) or exc.__class__.__name__
+        result["deleted"] = not path.exists()
+        return result
+    result["deleted"] = not path.exists()
+    if not result["deleted"]:
+        result["error"] = "profile_still_exists"
+    return result
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _rmtree_remove_readonly(func: Callable, path: str, exc_info: object) -> None:
+    del exc_info
+    try:
+        Path(path).chmod(stat.S_IWRITE)
+    except Exception:
+        pass
+    func(path)
 
 
 def _owned_browser_helper_id(scenario_id: str) -> str:

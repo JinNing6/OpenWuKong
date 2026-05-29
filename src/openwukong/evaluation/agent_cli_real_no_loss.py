@@ -271,7 +271,7 @@ def _run_case(
         allow_cli_execution=allow_cli_execution,
         workspace_file_delta=delta,
     )
-    focus_stable = _focus_stable(foreground_before, foreground_after)
+    window_input_attempts = _window_input_attempts(data)
     workspace_clean = not delta
     passed = bool(
         status
@@ -285,7 +285,7 @@ def _run_case(
             "cli_execution_failed",
         }
         and workspace_clean
-        and focus_stable
+        and window_input_attempts == 0
     )
     case = AgentCliNoLossCase(
         agent=agent,
@@ -298,7 +298,7 @@ def _run_case(
         foreground_hwnd_before=foreground_before,
         foreground_hwnd_after=foreground_after,
         agent_command_attempts=int(data.get("agent_command_attempts", 0) or 0),
-        window_input_attempts=_window_input_attempts(data),
+        window_input_attempts=window_input_attempts,
         workspace_clean=workspace_clean,
         workspace_file_delta=delta,
         conversation_report=data,

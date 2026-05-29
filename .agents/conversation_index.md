@@ -1,6 +1,6 @@
 # Conversation Index
 
-Last updated: 2026-05-28
+Last updated: 2026-05-29
 
 ## North Star
 
@@ -5101,3 +5101,66 @@ When a new conversation starts in this repo:
     - this advances the target state for agent products without weakening the
       rule that explicit app/desktop requests must not silently fall back to
       CLI
+- 2026-05-29 added a unified major-scenario real no-loss acceptance runner:
+  - implementation:
+    - added `openwukong.evaluation.major_real_no_loss`, which aggregates the
+      primary scenario runner, agent desktop app runner, and agent CLI runner
+      into one auditable requirement matrix
+    - requirements now explicitly separate:
+      WeChat background observation vs WeChat background send,
+      Word hidden COM document work,
+      owned browser CDP research/read,
+      owned file search,
+      Codex/Claude CLI background tasks,
+      and Codex App/Claude Desktop/Cursor app background chat
+    - `goal_complete` is now deliberately strict: all named requirements must
+      be verified, runner failures must be zero, control/window-input attempts
+      must be zero, and background screenshot focus must remain stable
+    - fixed `agent_cli_real_no_loss` so a user-driven foreground change during
+      a non-interactive CLI probe is recorded but no longer misclassified as an
+      automation failure when `window_input_attempts=0`
+    - fixed owned browser helper cleanup so `browser-profile-real-helper` is
+      deleted after manifest-based process stop, with boundary-checked
+      `profile_cleanup` evidence written into `helper.json`
+  - safe real validation:
+    - command:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r3 --output logs\runtime\major-real-no-loss-r3\report.json --allow-owned-browser-helper-launch --owned-browser-debug-port 9478 --owned-browser-url "data:text/html,<title>OpenWukong Major No Loss R3</title><body>OpenWukong Major No Loss R3</body>" --background-screenshot-dir logs\runtime\major-real-no-loss-r3\background-screenshots --allow-agent-cli-execution --agent-cli-timeout-sec 45`
+    - result:
+      `safe_run_ok=true`, `goal_complete=false`, `unmet_requirements=5`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=2`,
+      `background_screenshot_success_count=5/5`,
+      `background_screenshot_focus_stable=true`
+    - verified requirements:
+      `wechat_background_observation`,
+      `word_background_document`,
+      `browser_background_research`,
+      `file_background_search`,
+      `codex_cli_background_task`
+    - remaining unmet requirements:
+      `wechat_background_send` is still gated because current WeChat UIA
+      exposure lacks a target/composer/submit semantic control;
+      `claude_cli_background_task` is blocked by local Claude login;
+      `codex_app_background_chat`, `claude_desktop_background_chat`, and
+      `cursor_background_chat` still require a deterministic native bridge or
+      exposed semantic app control before background sending is safe
+    - cleanup verification:
+      PowerShell parsed `logs\runtime\major-real-no-loss-r3\report.json`;
+      helper metadata showed
+      `profile_cleanup.attempted=true`,
+      `profile_cleanup.deleted=true`,
+      `profile_cleanup.error=""`, and
+      `profile_exists=false`
+  - verification:
+    - `python -m unittest discover tests`: `434 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - the main safe/background scenarios now have one repeatable acceptance
+      command and a strict requirement-by-requirement status report
+    - the system can already perform verified background/no-loss work for
+      Word, owned browser research/read, owned file search, WeChat background
+      observation, and Codex CLI task execution
+    - the full objective is not complete until background write/send is
+      verified for WeChat and app-surface Codex/Claude/Cursor, and Claude CLI
+      is authenticated or otherwise bypassed by a native app bridge
