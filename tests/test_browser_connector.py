@@ -54,6 +54,29 @@ class _DevToolsListHandler(http.server.BaseHTTPRequestHandler):
         return
 
 
+class _DevToolsVersionHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != "/json/version":
+            self.send_response(404)
+            self.end_headers()
+            return
+        body = json.dumps(
+            {
+                "Browser": "Cursor/1.0",
+                "Protocol-Version": "1.3",
+                "webSocketDebuggerUrl": self.server.browser_websocket_url,
+            }
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        return
+
+
 class _FakeCdpWebSocketHandler(socketserver.StreamRequestHandler):
     def handle(self):
         key = ""
@@ -115,6 +138,48 @@ class _FakeCdpWebSocketHandler(socketserver.StreamRequestHandler):
             header.append(127)
             header.extend(struct.pack("!Q", len(payload)))
         self.wfile.write(bytes(header) + payload)
+
+
+class _FakeBrowserTargetWebSocketHandler(_FakeCdpWebSocketHandler):
+    def handle(self):
+        key = ""
+        while True:
+            line = self.rfile.readline().decode("ascii").strip()
+            if not line:
+                break
+            if line.lower().startswith("sec-websocket-key:"):
+                key = line.split(":", 1)[1].strip()
+
+        accept = base64.b64encode(
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+        ).decode("ascii")
+        self.wfile.write(
+            (
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Accept: {accept}\r\n"
+                "\r\n"
+            ).encode("ascii")
+        )
+        message = self._read_client_json()
+        self.server.last_request = message
+        self._send_server_json(
+            {
+                "id": message["id"],
+                "result": {
+                    "targetInfos": [
+                        {
+                            "targetId": "cursor-browser-page",
+                            "type": "page",
+                            "title": "Cursor",
+                            "url": "app://cursor/workbench.html",
+                            "attached": False,
+                        }
+                    ]
+                },
+            }
+        )
 
 
 class _FakeDevToolsClient:
@@ -224,6 +289,34 @@ class BrowserConnectorTests(unittest.TestCase):
             server.last_request["params"]["url"],
             "https://example.test/search?q=openwukong",
         )
+
+    def test_devtools_client_calls_browser_level_cdp_method_from_version_websocket(self):
+        ws_server = socketserver.TCPServer(("127.0.0.1", 0), _FakeBrowserTargetWebSocketHandler)
+        ws_server.last_request = {}
+        ws_thread = threading.Thread(target=ws_server.serve_forever, daemon=True)
+        ws_thread.start()
+        http_server = socketserver.TCPServer(("127.0.0.1", 0), _DevToolsVersionHandler)
+        http_server.browser_websocket_url = (
+            f"ws://127.0.0.1:{ws_server.server_address[1]}/devtools/browser/browser-1"
+        )
+        http_thread = threading.Thread(target=http_server.serve_forever, daemon=True)
+        http_thread.start()
+        try:
+            debugger_url = f"http://127.0.0.1:{http_server.server_address[1]}"
+            result = BrowserDevToolsClient().call_browser_method(
+                debugger_url,
+                "Target.getTargets",
+            )
+        finally:
+            http_server.shutdown()
+            http_server.server_close()
+            http_thread.join(timeout=2)
+            ws_server.shutdown()
+            ws_server.server_close()
+            ws_thread.join(timeout=2)
+
+        self.assertEqual(ws_server.last_request["method"], "Target.getTargets")
+        self.assertEqual(result["targetInfos"][0]["targetId"], "cursor-browser-page")
 
     def test_browser_connector_supports_browser_process(self):
         connector = BrowserSessionConnector()

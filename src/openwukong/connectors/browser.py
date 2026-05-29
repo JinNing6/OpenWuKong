@@ -133,6 +133,34 @@ class BrowserDevToolsClient:
             raise BrowserDevToolsError("devtools_invalid_method_result")
         return result
 
+    def call_browser_method(
+        self,
+        debugger_url: str,
+        method: str,
+        params: dict | None = None,
+    ) -> dict:
+        endpoint = self._debugger_http_endpoint(debugger_url, "/json/version")
+        response = requests.get(endpoint, timeout=self.request_timeout)
+        response.raise_for_status()
+        version = response.json()
+        if not isinstance(version, dict):
+            raise BrowserDevToolsError("devtools_version_not_object")
+        websocket_url = str(version.get("webSocketDebuggerUrl", "") or "")
+        if not websocket_url:
+            raise BrowserDevToolsError("devtools_browser_missing_websocket")
+        method_name = str(method or "").strip()
+        if not method_name:
+            raise BrowserDevToolsError("missing_devtools_method")
+        message = self._send_cdp_command(
+            websocket_url,
+            method_name,
+            dict(params or {}),
+        )
+        result = message.get("result", {})
+        if not isinstance(result, dict):
+            raise BrowserDevToolsError("devtools_invalid_method_result")
+        return result
+
     @staticmethod
     def _debugger_http_endpoint(debugger_url: str, path: str) -> str:
         base = (debugger_url or "").strip()

@@ -6694,3 +6694,68 @@ When a new conversation starts in this repo:
       `--remote-debugging-port` unlocks all desktop agent apps; the next useful
       work is either Browser-level CDP `Target` domain probing for Cursor, or a
       product-specific native/extension bridge for Codex and Claude Desktop
+- 2026-05-29 added Browser-level CDP `Target` probing for owned agent-app
+  DevTools endpoints:
+  - implementation:
+    - `BrowserDevToolsClient` can now call a browser-level CDP method by
+      reading `/json/version.webSocketDebuggerUrl` and sending the command over
+      that websocket
+    - `prepare_agent_app_devtools_owned_launch_fleet` now injects that client
+      into endpoint health checks and calls `Target.getTargets` whenever
+      `/json/version` exposes a browser websocket
+    - endpoint health now records `browser_websocket_url`,
+      `browser_level_ready`, `browser_target_count`, `browser_targets`, and
+      `browser_level_error`
+    - readiness remains conservative: a successful browser-level probe does
+      not mark the endpoint ready unless `/json/list` exposes a target websocket
+      that the current bridge can control
+  - official-doc basis:
+    - Chrome DevTools Protocol `Target` domain documentation was checked before
+      using `Target.getTargets` as the browser-level discovery method
+  - validation:
+    - red tests first:
+      `test_devtools_client_calls_browser_level_cdp_method_from_version_websocket`
+      failed before browser-level CDP calls existed, and
+      `test_prepare_agent_app_devtools_owned_launch_fleet_probes_browser_level_targets_without_ready`
+      failed before the owned endpoint health report could run and record the
+      browser-level target probe
+    - focused green:
+      `python -m unittest tests.test_browser_connector.BrowserConnectorTests.test_devtools_client_calls_browser_level_cdp_method_from_version_websocket tests.test_major_real_no_loss.MajorRealNoLossTests.test_prepare_agent_app_devtools_owned_launch_fleet_probes_browser_level_targets_without_ready tests.test_major_real_no_loss tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe tests.test_session_readiness_plan`:
+      `88 tests OK`
+    - R45 real owned Browser-level CDP smoke:
+      `run_major_scenario_real_no_loss(... agent_apps=("codex app", "claude desktop", "cursor"), cli_agents=(), allow_agent_app_devtools_owned_launch=True)`
+      wrote
+      `logs/runtime/major-real-no-loss-r45-cursor-browser-target-probe-real-launch/major-real-no-loss-report.json`
+      and produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_app_devtools_launch_attempts=3`,
+      `agent_app_devtools_stop_attempts=3`,
+      `agent_app_devtools_cleanup_ok=true`, `healthy_endpoint_count=0`, and
+      no forwarded ready debugger URLs
+    - R45 evidence:
+      Codex App and Claude Desktop still did not expose HTTP DevTools on the
+      requested owned ports; Cursor did expose a browser-level websocket and
+      `Target.getTargets` succeeded with `browser_level_ready=true`, but it
+      returned `browser_target_count=0`, so the system correctly kept Cursor
+      `ready=false` for message submission
+    - residual process scan for tokens `19555`, `19556`, `19557`, and
+      `major-real-no-loss-r45-cursor-browser-target-probe-real-launch` found
+      only the scanning PowerShell process itself
+    - full verification:
+      `python -m unittest discover tests`: `533 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - Cursor is one layer closer: the owned endpoint can be reached at the
+      browser CDP layer, but this specific launch shape still exposes no
+      controllable page target, so it cannot yet be used for app-chat send or
+      readback
+    - Codex App and Claude Desktop continue to require product-specific
+      native/extension connectors or another officially supported automation
+      transport; plain Electron `--remote-debugging-port` is not sufficient on
+      this machine
+    - next concrete action: build the app-agent transport matrix that separates
+      browser-level CDP discovery, page-target CDP control, UIA semantic draft
+      probes, extension/native bridges, and CLI transports, then implement the
+      first product-specific bridge where a no-focus send/readback path is
+      actually available

@@ -1241,6 +1241,97 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(http_calls[0][0], "http://127.0.0.1:19555/json/version")
         self.assertEqual(http_calls[1][0], "http://127.0.0.1:19555/json/list")
 
+    def test_prepare_agent_app_devtools_owned_launch_fleet_probes_browser_level_targets_without_ready(self):
+        class _HTTPProbe:
+            def get_json(self, url, timeout=0.2):
+                if url.endswith("/json/version"):
+                    return {
+                        "Browser": "Cursor/1.0",
+                        "Protocol-Version": "1.3",
+                        "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/browser/browser-1",
+                    }
+                if url.endswith("/json/list"):
+                    return []
+                raise AssertionError(url)
+
+        class _DevToolsClient:
+            def __init__(self):
+                self.calls = []
+
+            def call_browser_method(self, debugger_url, method, params=None):
+                self.calls.append((debugger_url, method, dict(params or {})))
+                return {
+                    "targetInfos": [
+                        {
+                            "targetId": "cursor-browser-page",
+                            "type": "page",
+                            "title": "Cursor",
+                            "url": "app://cursor/workbench.html",
+                            "attached": False,
+                        }
+                    ]
+                }
+
+        def _execute_plan(plan, **kwargs):
+            action = plan.to_dict()["actions"][0]
+            return _FakeReport(
+                {
+                    "mode": "session-readiness-execution",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "launch_attempts": 1,
+                    "manifest_path": kwargs["manifest_path"],
+                    "results": [
+                        {
+                            "status": "started",
+                            "pid": 88457,
+                            "readiness_url": action["readiness_url"],
+                        }
+                    ],
+                }
+            )
+
+        devtools_client = _DevToolsClient()
+        with tempfile.TemporaryDirectory() as tmp:
+            report = major_real_no_loss.prepare_agent_app_devtools_owned_launch_fleet(
+                output_root=Path(tmp) / "agent-app-devtools",
+                resolution_report={
+                    "mode": "agent-app-devtools-resolution",
+                    "cases": [
+                        {
+                            "agent": "cursor",
+                            "agent_id": "cursor",
+                            "status": "resolved",
+                            "executable_ready": True,
+                            "executable_path": "C:/Apps/Cursor.exe",
+                        }
+                    ],
+                },
+                plan_executor=_execute_plan,
+                http_probe=_HTTPProbe(),
+                devtools_client=devtools_client,
+                endpoint_wait_timeout_sec=0.2,
+            )
+            data = report.to_dict()
+
+        self.assertFalse(data["ready"])
+        self.assertEqual(data["healthy_endpoint_count"], 0)
+        self.assertEqual(data["debugger_urls"], [])
+        helper = data["helpers"][0]
+        self.assertFalse(helper["ready"])
+        self.assertEqual(helper["error"], "devtools_targets_not_ready")
+        health = helper["endpoint_health"]
+        self.assertFalse(health["ready"])
+        self.assertEqual(health["error"], "devtools_targets_not_ready")
+        self.assertTrue(health["browser_level_ready"])
+        self.assertEqual(health["browser_websocket_url"], "ws://127.0.0.1:19557/devtools/browser/browser-1")
+        self.assertEqual(health["browser_target_count"], 1)
+        self.assertEqual(health["browser_targets"][0]["target_id"], "cursor-browser-page")
+        self.assertEqual(
+            devtools_client.calls,
+            [("http://127.0.0.1:19557", "Target.getTargets", {})],
+        )
+
     def test_runner_forwards_owned_devtools_process_provider_and_urls_by_agent(self):
         app_calls = []
 

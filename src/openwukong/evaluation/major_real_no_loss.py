@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from openwukong.connectors.browser import BrowserDevToolsClient
 from openwukong.control.app_resolution import WindowsAppResolver
 from openwukong.control.session_readiness_plan import (
     SessionReadinessPlanOptions,
@@ -1532,6 +1533,7 @@ def prepare_agent_app_devtools_owned_launch_fleet(
     resolution_report: dict,
     plan_executor: Callable[..., object] | None = None,
     http_probe: object | None = None,
+    devtools_client: object | None = None,
     endpoint_wait_timeout_sec: float = 10.0,
     request_timeout: float = 0.2,
 ) -> AgentAppDevToolsOwnedLaunchReport:
@@ -1541,6 +1543,9 @@ def prepare_agent_app_devtools_owned_launch_fleet(
     helpers: list[dict] = []
     active_plan_executor = plan_executor or execute_session_readiness_plan
     active_http_probe = http_probe or RequestsNativeConnectorHTTPProbe()
+    active_devtools_client = devtools_client or BrowserDevToolsClient(
+        request_timeout=max(0.05, float(request_timeout))
+    )
 
     for index, case in enumerate(_agent_app_devtools_launchable_cases(resolution_report), start=1):
         agent = str(case.get("agent", "") or "").strip()
@@ -1585,6 +1590,7 @@ def prepare_agent_app_devtools_owned_launch_fleet(
                 endpoint_health = _wait_for_agent_app_devtools_endpoint_health(
                     readiness_url,
                     http_probe=active_http_probe,
+                    devtools_client=active_devtools_client,
                     timeout_sec=endpoint_wait_timeout_sec,
                     request_timeout=request_timeout,
                 )
@@ -2052,6 +2058,7 @@ def _wait_for_agent_app_devtools_endpoint_health(
     debugger_url: str,
     *,
     http_probe: object,
+    devtools_client: object | None,
     timeout_sec: float,
     request_timeout: float,
 ) -> dict:
@@ -2080,6 +2087,11 @@ def _wait_for_agent_app_devtools_endpoint_health(
                 if isinstance(item, dict)
             ]
             ready = any(bool(item.get("webSocketDebuggerUrl", "")) for item in targets)
+            browser_probe = _probe_browser_level_devtools_targets(
+                base,
+                version=version,
+                devtools_client=devtools_client,
+            )
             return {
                 "mode": "agent-app-devtools-endpoint-health",
                 "safety_mode": "read_only",
@@ -2092,6 +2104,7 @@ def _wait_for_agent_app_devtools_endpoint_health(
                 "version": version,
                 "target_count": len(targets),
                 "targets": targets,
+                **browser_probe,
                 "error": "" if ready else "devtools_targets_not_ready",
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             }
@@ -2125,6 +2138,47 @@ def _devtools_target_summary(data: dict) -> dict:
         "webSocketDebuggerUrl": str(data.get("webSocketDebuggerUrl", "") or ""),
         "ready": bool(data.get("webSocketDebuggerUrl", "")),
     }
+
+
+def _probe_browser_level_devtools_targets(
+    debugger_url: str,
+    *,
+    version: dict,
+    devtools_client: object | None,
+) -> dict:
+    browser_websocket_url = str(version.get("webSocketDebuggerUrl", "") or "")
+    probe = {
+        "browser_websocket_url": browser_websocket_url,
+        "browser_level_ready": False,
+        "browser_target_count": 0,
+        "browser_targets": [],
+        "browser_level_error": "",
+    }
+    if not browser_websocket_url:
+        return probe
+    if devtools_client is None or not hasattr(devtools_client, "call_browser_method"):
+        probe["browser_level_error"] = "devtools_browser_probe_unavailable"
+        return probe
+    try:
+        result = devtools_client.call_browser_method(
+            debugger_url,
+            "Target.getTargets",
+            {},
+        )
+        target_infos = result.get("targetInfos", [])
+        if not isinstance(target_infos, list):
+            raise ValueError("devtools_browser_targets_not_list")
+        browser_targets = [
+            _devtools_target_summary(item)
+            for item in target_infos
+            if isinstance(item, dict)
+        ]
+        probe["browser_level_ready"] = True
+        probe["browser_target_count"] = len(browser_targets)
+        probe["browser_targets"] = browser_targets
+    except Exception as exc:
+        probe["browser_level_error"] = str(exc) or exc.__class__.__name__
+    return probe
 
 
 def _agent_app_devtools_owned_launch_fleet_report(
