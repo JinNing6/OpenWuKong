@@ -132,6 +132,14 @@ class AgentAppRealNoLossTests(unittest.TestCase):
         self.assertEqual(data["cases"][0]["status"], "gated_native_endpoint_missing")
         self.assertEqual(data["cases"][1]["status"], "native_connector_ready")
         self.assertEqual(
+            data["transport_matrix_summary"]["background_send_ready_cases"],
+            1,
+        )
+        self.assertEqual(
+            data["cases"][1]["transport_matrix"]["selected_send_transport"]["transport_id"],
+            "uia-semantic-send",
+        )
+        self.assertEqual(
             data["cases"][1]["uia_semantic_action_dry_run"]["decision"],
             "uia_semantic_action_dry_run_ready",
         )

@@ -195,6 +195,52 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(data["endpoints"][0]["error"], "devtools_endpoint_not_bound_to_agent_process")
         self.assertEqual(http_probe.calls, [])
 
+    def test_explicit_debugger_url_accepts_owned_remote_debugging_process_outside_selected_app_dir(self):
+        http_probe = _FakeHTTPProbe(
+            {
+                "http://127.0.0.1:9444/json/version": {
+                    "Browser": "Chrome/126.0 Electron",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:9444/devtools/browser/abc",
+                },
+                "http://127.0.0.1:9444/json/list": [],
+            }
+        )
+
+        report = run_agent_native_connector_probe(
+            agent="codex app",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_codex_target(task_name="desktop-message"),
+            resolver=_resolver_with_codex_desktop(),
+            process_provider=lambda: (
+                NativeProcessSnapshot(
+                    pid=4242,
+                    process_name="Codex.exe",
+                    executable_path="C:/Owned/Codex.exe",
+                    command_line=(
+                        "Codex.exe --remote-debugging-port=9444 "
+                        "--user-data-dir=E:/ideaProjects/agent/openwukong/logs/runtime/owned-codex/profile"
+                    ),
+                    listening_ports=(9444,),
+                ),
+            ),
+            http_probe=http_probe,
+            debugger_urls=("http://127.0.0.1:9444",),
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["endpoint_count"], 1)
+        self.assertEqual(data["endpoints"][0]["source"], "explicit-devtools-url")
+        self.assertEqual(data["endpoints"][0]["process"]["pid"], 4242)
+        self.assertEqual(data["endpoints"][0]["version"]["webSocketDebuggerUrl"], "ws://127.0.0.1:9444/devtools/browser/abc")
+        self.assertEqual(data["endpoints"][0]["target_count"], 0)
+        self.assertNotEqual(
+            data["endpoints"][0]["error"],
+            "devtools_endpoint_not_bound_to_agent_process",
+        )
+        self.assertEqual(http_probe.calls[0], "http://127.0.0.1:9444/json/version")
+
     def test_auto_discovers_devtools_from_matching_process_listening_port(self):
         http_probe = _FakeHTTPProbe(
             {

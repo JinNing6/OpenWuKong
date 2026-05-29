@@ -6759,3 +6759,81 @@ When a new conversation starts in this repo:
       probes, extension/native bridges, and CLI transports, then implement the
       first product-specific bridge where a no-focus send/readback path is
       actually available
+- 2026-05-29 added the app-agent transport matrix and corrected owned
+  DevTools diagnostic binding:
+  - implementation:
+    - added `agent_app_transport_matrix`, a plan-only per-agent matrix that
+      separates `agent-native-bridge`, `ide-extension-bridge`,
+      `app-devtools-page-target`, `app-devtools-browser-target`,
+      `uia-semantic-send`, `uia-semantic-draft`, and foreground fallback
+    - `agent_app_real_no_loss` now embeds a `transport_matrix` on every case
+      and emits a `transport_matrix_summary`
+    - `major_real_no_loss` now exposes `agent_app_transport_matrix_summary`
+      at top level
+    - owned DevTools helpers that launched but did not become send-ready are
+      now still forwarded as read-only diagnostic debugger URLs, and their
+      synthetic process/port evidence is forwarded to the native app probe
+    - `agent_native_connector_probe` now accepts a matching agent process with
+      an explicit `--remote-debugging-port` in its command line even when it is
+      an owned helper outside the currently selected app instance directory
+    - page-target CDP is no longer marked `send_ready` unless the target
+      context is verified by UIA project/task visibility or by target
+      title/URL containing the requested project/task context
+  - official-doc basis:
+    - Chrome DevTools Protocol `Target` documentation was checked again for the
+      browser/page target distinction
+    - Microsoft UI Automation control pattern documentation was checked before
+      treating `ValuePattern.SetValue` and `InvokePattern.Invoke` as separate
+      UIA draft/send candidates rather than guaranteed background send proof
+  - validation:
+    - red tests first:
+      `test_browser_level_devtools_is_read_only_not_send_ready`,
+      `test_agent_native_bridge_is_selected_before_page_target_and_uia`,
+      `test_page_target_cdp_without_verified_target_context_is_not_send_ready`,
+      `test_runner_forwards_probeable_unready_owned_devtools_for_read_only_matrix`,
+      `test_explicit_debugger_url_accepts_owned_remote_debugging_process_outside_selected_app_dir`,
+      and `test_major_report_exposes_agent_app_transport_matrix_summary`
+      failed before the matrix, diagnostic forwarding, owned helper binding,
+      and target-context gating existed
+    - focused green:
+      `python -m unittest tests.test_agent_native_connector_probe tests.test_agent_app_transport_matrix tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract`:
+      `89 tests OK`
+    - R47 real smoke initially proved why the target-context gate was needed:
+      Cursor exposed an owned page-target DevTools endpoint, but the app probe
+      reported `agent_app_target_not_visible`; the first matrix version
+      incorrectly counted this as `background_send_ready_cases=1`
+    - R48 real owned DevTools matrix smoke:
+      `run_major_scenario_real_no_loss(... agent_apps=("codex app", "claude desktop", "cursor"), cli_agents=(), allow_agent_app_devtools_owned_launch=True)`
+      wrote
+      `logs/runtime/major-real-no-loss-r48-target-context-gated-matrix-real-launch/major-real-no-loss-report.json`
+      and produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_app_devtools_launch_attempts=3`,
+      `agent_app_devtools_stop_attempts=3`,
+      `agent_app_devtools_cleanup_ok=true`
+    - R48 evidence:
+      Codex App and Claude Desktop owned DevTools ports still timed out on
+      `/json/version`; Cursor exposed an owned DevTools page target and
+      browser websocket, but because the requested project/task context was not
+      visible or present in the target title/URL, the matrix reported
+      `background_send_ready_cases=0`, `background_read_only_cases=1`,
+      and `selected_send_transport_counts.none=3`
+    - residual process scan for tokens `19555`, `19556`, `19557`, and
+      `major-real-no-loss-r48-target-context-gated-matrix-real-launch` found
+      only the scanning PowerShell process itself
+    - full verification:
+      `python -m unittest discover tests`: `539 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - the system now has an honest app-agent transport matrix: it can tell
+      transport-online, browser/page target discovery, UIA draft/send
+      candidates, and real send-readback readiness apart
+    - current real state is still not goal-complete for Codex App / Claude
+      Desktop / Cursor app chat: Cursor has background CDP read-only/page-target
+      evidence but no verified target conversation; Codex App and Claude
+      Desktop still do not expose usable owned DevTools endpoints
+    - next concrete action: implement or install a product-specific
+      native/extension bridge for at least one app-agent surface, then rerun
+      the matrix until it shows a verified `selected_send_transport` with
+      readback markers and zero window input

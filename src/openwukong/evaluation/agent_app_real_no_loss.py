@@ -30,6 +30,10 @@ from openwukong.control.agent_app_uia_action import (
     build_agent_app_uia_semantic_action_request,
 )
 from openwukong.control.agent_conversation import compose_agent_conversation_message
+from openwukong.control.agent_app_transport_matrix import (
+    build_agent_app_transport_matrix,
+    summarize_agent_app_transport_matrices,
+)
 from openwukong.control.app_resolution import WindowsAppResolver
 from openwukong.evaluation.agent_native_connector_probe import (
     run_agent_native_connector_probe,
@@ -56,6 +60,7 @@ class AgentAppRealNoLossCase:
     uia_semantic_draft_report: dict = dataclasses.field(default_factory=dict)
     app_bridge_dry_run: dict = dataclasses.field(default_factory=dict)
     app_bridge_send_report: dict = dataclasses.field(default_factory=dict)
+    transport_matrix: dict = dataclasses.field(default_factory=dict)
     artifact_path: str = ""
     errors: tuple[str, ...] = ()
 
@@ -204,6 +209,7 @@ class AgentAppRealNoLossCase:
             "app_bridge_send_verified": self.app_bridge_send_verified,
             "app_bridge_dry_run": dict(self.app_bridge_dry_run),
             "app_bridge_send_report": dict(self.app_bridge_send_report),
+            "transport_matrix": dict(self.transport_matrix),
             "background_screenshot_count": self.background_screenshot_count,
             "background_screenshot_success_count": self.background_screenshot_success_count,
             "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
@@ -309,6 +315,12 @@ class AgentAppRealNoLossReport:
     def real_verified_cases(self) -> int:
         return sum(1 for case in self.cases if case.real_verified)
 
+    @property
+    def transport_matrix_summary(self) -> dict:
+        return summarize_agent_app_transport_matrices(
+            case.to_dict() for case in self.cases
+        )
+
     def to_dict(self) -> dict:
         return {
             "mode": self.mode,
@@ -336,6 +348,7 @@ class AgentAppRealNoLossReport:
             "app_bridge_send_verified_cases": self.app_bridge_send_verified_cases,
             "gated_cases": self.gated_cases,
             "real_verified_cases": self.real_verified_cases,
+            "transport_matrix_summary": self.transport_matrix_summary,
             "cases": [case.to_dict() for case in self.cases],
             "elapsed_ms": round(self.elapsed_ms, 3),
         }
@@ -683,6 +696,7 @@ def _case_from_probe(
     forbidden_markers: tuple[str, ...] = (),
 ) -> AgentAppRealNoLossCase:
     decision = str(probe.get("decision", "") or "")
+    transport_matrix = build_agent_app_transport_matrix(probe).to_dict()
     native_ready = int(probe.get("ready_endpoint_count", 0) or 0) > 0
     app_probe = _app_uia_probe(probe)
     matched_window_count = _counter(app_probe, "matched_window_count")
@@ -833,6 +847,7 @@ def _case_from_probe(
         uia_semantic_draft_report=semantic_draft_report,
         app_bridge_dry_run=app_bridge_dry_run,
         app_bridge_send_report=app_bridge_send_report,
+        transport_matrix=transport_matrix,
         errors=tuple(errors),
     )
 

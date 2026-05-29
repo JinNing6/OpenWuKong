@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from openwukong.connectors.browser import BrowserDevToolsClient
+from openwukong.control.agent_app_transport_matrix import (
+    summarize_agent_app_transport_matrices,
+)
 from openwukong.control.app_resolution import WindowsAppResolver
 from openwukong.control.session_readiness_plan import (
     SessionReadinessPlanOptions,
@@ -259,6 +262,16 @@ class MajorScenarioRealNoLossReport:
         )
 
     @property
+    def agent_app_transport_matrix_summary(self) -> dict:
+        summary = self.agent_app_report.get("transport_matrix_summary")
+        if isinstance(summary, dict):
+            return dict(summary)
+        cases = self.agent_app_report.get("cases", [])
+        return summarize_agent_app_transport_matrices(
+            item for item in cases if isinstance(item, dict)
+        )
+
+    @property
     def failed_runner_count(self) -> int:
         return sum(
             1
@@ -337,6 +350,7 @@ class MajorScenarioRealNoLossReport:
             "goal_complete": self.goal_complete,
             "safe_run_ok": self.safe_run_ok,
             "agent_app_endpoint_acceptance": self.agent_app_endpoint_acceptance,
+            "agent_app_transport_matrix_summary": self.agent_app_transport_matrix_summary,
             "agent_app_devtools_resolution": dict(
                 self.agent_app_devtools_resolution_report
             ),
@@ -2295,7 +2309,7 @@ def _agent_app_devtools_debugger_urls_by_agent(
 ) -> dict[str, tuple[str, ...]]:
     mapping: dict[str, list[str]] = {}
     for helper in owned_launch_report.get("helpers", []) or []:
-        if not isinstance(helper, dict) or not bool(helper.get("ready", False)):
+        if not _probeable_owned_devtools_helper(helper):
             continue
         url = str(helper.get("debugger_url", "") or "").strip()
         if not url:
@@ -2344,7 +2358,7 @@ def _agent_app_devtools_process_snapshots(
 ) -> tuple[NativeProcessSnapshot, ...]:
     snapshots: list[NativeProcessSnapshot] = []
     for helper in owned_launch_report.get("helpers", []) or []:
-        if not isinstance(helper, dict) or not bool(helper.get("ready", False)):
+        if not _probeable_owned_devtools_helper(helper):
             continue
         port = _counter(helper, "debug_port")
         if port <= 0:
@@ -2365,6 +2379,18 @@ def _agent_app_devtools_process_snapshots(
             )
         )
     return tuple(snapshots)
+
+
+def _probeable_owned_devtools_helper(helper: object) -> bool:
+    if not isinstance(helper, dict):
+        return False
+    if not str(helper.get("debugger_url", "") or "").strip():
+        return False
+    return bool(
+        helper.get("ready", False)
+        or _counter(helper, "launch_attempts") > 0
+        or _details(helper.get("endpoint_health")).get("browser_level_ready", False)
+    )
 
 
 def _process_name_from_path(path: str) -> str:

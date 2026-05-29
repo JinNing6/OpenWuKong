@@ -472,6 +472,9 @@ def _matching_agent_processes(
             continue
         if pname not in expected_names:
             continue
+        if _extract_remote_debugging_ports(process.command_line):
+            matched.append(process)
+            continue
         if selected_dir and path and path.startswith(selected_dir):
             matched.append(process)
             continue

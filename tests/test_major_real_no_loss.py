@@ -1080,6 +1080,103 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(data["control_attempts"], 0)
         self.assertEqual(data["window_input_attempts"], 0)
 
+    def test_major_report_exposes_agent_app_transport_matrix_summary(self):
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [
+                        {
+                            "agent": "codex app",
+                            "status": "native_connector_ready",
+                            "real_verified": True,
+                            "native_ready": True,
+                            "transport_matrix": {
+                                "send_ready": True,
+                                "draft_ready": True,
+                                "summary": {
+                                    "background_read_only": 0,
+                                },
+                                "selected_send_transport": {
+                                    "transport_id": "agent-native-bridge",
+                                },
+                            },
+                        },
+                        {
+                            "agent": "cursor",
+                            "status": "gated_native_endpoint_missing",
+                            "real_verified": True,
+                            "native_ready": False,
+                            "transport_matrix": {
+                                "send_ready": False,
+                                "draft_ready": False,
+                                "summary": {
+                                    "background_read_only": 1,
+                                },
+                                "selected_send_transport": {},
+                            },
+                        },
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("codex app", "cursor"),
+                cli_agents=(),
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        summary = data["agent_app_transport_matrix_summary"]
+        self.assertEqual(summary["case_count"], 2)
+        self.assertEqual(summary["background_send_ready_cases"], 1)
+        self.assertEqual(summary["background_draft_ready_cases"], 1)
+        self.assertEqual(summary["background_read_only_cases"], 1)
+        self.assertEqual(
+            summary["selected_send_transport_counts"]["agent-native-bridge"],
+            1,
+        )
+        self.assertEqual(summary["selected_send_transport_counts"]["none"], 1)
+
     def test_prepare_agent_app_devtools_owned_launch_fleet_launches_resolved_apps(self):
         calls = []
 
@@ -1462,6 +1559,118 @@ class MajorRealNoLossTests(unittest.TestCase):
             [(item["process_name"], item["pid"], item["listening_ports"]) for item in owned_processes],
             [("Codex.exe", 77524, [19555]), ("Claude.exe", 93796, [19556])],
         )
+
+    def test_runner_forwards_probeable_unready_owned_devtools_for_read_only_matrix(self):
+        app_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _devtools_launch_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-app-devtools-owned-launch-fleet",
+                    "enabled": True,
+                    "ready": False,
+                    "cleanup_ok": True,
+                    "launch_attempts": 1,
+                    "stop_attempts": 1,
+                    "debugger_urls": [],
+                    "helpers": [
+                        {
+                            "agent": "cursor",
+                            "agent_id": "cursor",
+                            "ready": False,
+                            "cleanup_ok": True,
+                            "debugger_url": "http://127.0.0.1:19557",
+                            "debug_port": 19557,
+                            "executable_path": "C:/Apps/Cursor.exe",
+                            "pid": 88457,
+                            "launch_attempts": 1,
+                            "stop_attempts": 1,
+                            "endpoint_health": {
+                                "ready": False,
+                                "error": "devtools_targets_not_ready",
+                                "browser_level_ready": True,
+                                "browser_websocket_url": "ws://127.0.0.1:19557/devtools/browser/browser-1",
+                                "target_count": 0,
+                            },
+                        }
+                    ],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            owned_processes = tuple(kwargs["process_provider"]())
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [
+                        {
+                            "agent": "cursor",
+                            "status": "gated_native_endpoint_missing",
+                            "real_verified": True,
+                            "native_ready": False,
+                            "owned_processes": [process.to_dict() for process in owned_processes],
+                        }
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("cursor",),
+                cli_agents=(),
+                allow_agent_app_devtools_owned_launch=True,
+                agent_app_devtools_owned_launch_runner=_devtools_launch_runner,
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+                agent_app_process_provider=lambda: (),
+            )
+            data = report.to_dict()
+
+        self.assertEqual(
+            app_calls[0]["debugger_urls_by_agent"]["cursor"],
+            ("http://127.0.0.1:19557",),
+        )
+        owned_processes = data["subreports"]["agent_app"]["cases"][0]["owned_processes"]
+        self.assertEqual(owned_processes[0]["process_name"], "Cursor.exe")
+        self.assertEqual(owned_processes[0]["listening_ports"], [19557])
 
     def test_report_exposes_agent_app_endpoint_acceptance_package(self):
         report = _major_report(
