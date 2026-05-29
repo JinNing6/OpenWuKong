@@ -370,6 +370,182 @@ class AgentAppRealNoLossTests(unittest.TestCase):
         self.assertFalse(data["cases"][0]["passed"])
         self.assertIn("window_input_attempts_nonzero", data["cases"][0]["errors"])
 
+    def test_allow_uia_semantic_action_executes_ready_semantic_sender_without_window_input(self):
+        sender_calls = []
+
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=False,
+                decision="agent_native_connector_not_exposed",
+                agent=kwargs["agent"],
+                agent_id="claude",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                window_input_attempts=0,
+                endpoint_count=0,
+                ready_endpoint_count=0,
+                app_uia_probe={
+                    "decision": "agent_app_uia_ready",
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "semantic_composer_count": 1,
+                    "submit_candidate_count": 1,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "matched_windows": [
+                        {
+                            "process_name": "claude.exe",
+                            "pid": 77064,
+                            "window_title": "Claude",
+                            "hwnd": 138024,
+                        }
+                    ],
+                    "composer_candidates": [
+                        {
+                            "control_type": "Edit",
+                            "name": "Write your prompt to Claude",
+                            "is_enabled": True,
+                            "visible": True,
+                            "patterns": ["Value"],
+                            "semantic_composer": True,
+                        }
+                    ],
+                    "submit_candidates": [
+                        {
+                            "control_type": "Button",
+                            "name": "Send",
+                            "is_enabled": True,
+                            "visible": True,
+                            "patterns": ["Invoke"],
+                        }
+                    ],
+                },
+            )
+
+        def fake_uia_sender(request):
+            sender_calls.append(request)
+            return {
+                "mode": "agent-app-uia-semantic-action-send",
+                "safety_mode": "uia_semantic_execute",
+                "ok": True,
+                "decision": "uia_semantic_action_send_accepted",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "uia_value_set_attempts": 1,
+                "uia_invoke_attempts": 1,
+                "foreground_focus_stable": True,
+                "request": request.to_dict(),
+                "operation_result": {
+                    "composer_found": True,
+                    "value_set": True,
+                    "submit_found": True,
+                    "invoke_attempted": True,
+                    "invoke_verified": True,
+                    "readbackText": "OPENWUKONG_UIA_ACCEPTANCE: PASS",
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = run_agent_app_real_no_loss(
+                agents=("claude desktop",),
+                project_name="openwukong",
+                task_name="desktop-message",
+                output_root=root,
+                probe_runner=fake_probe_runner,
+                allow_uia_semantic_action=True,
+                uia_semantic_sender=fake_uia_sender,
+                uia_message="Send through UIA.",
+                uia_required_markers=("OPENWUKONG_UIA_ACCEPTANCE: PASS",),
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+            artifact = json.loads(Path(case["artifact_path"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(len(sender_calls), 1)
+        self.assertEqual(data["uia_semantic_action_send_verified_cases"], 1)
+        self.assertEqual(data["uia_value_set_attempts"], 1)
+        self.assertEqual(data["uia_invoke_attempts"], 1)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(case["status"], "uia_semantic_action_send_accepted")
+        self.assertTrue(case["uia_semantic_action_send_verified"])
+        self.assertTrue(case["passed"])
+        self.assertEqual(
+            case["uia_semantic_action_send_report"]["request"]["payload"]["message"],
+            "Send through UIA.",
+        )
+        self.assertEqual(
+            artifact["uia_semantic_action_send_report"]["decision"],
+            "uia_semantic_action_send_accepted",
+        )
+
+    def test_uia_semantic_sender_is_not_called_without_explicit_allow_flag(self):
+        sender_calls = []
+
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=False,
+                decision="agent_native_connector_not_exposed",
+                agent=kwargs["agent"],
+                agent_id="claude",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                endpoint_count=0,
+                ready_endpoint_count=0,
+                app_uia_probe={
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "semantic_composer_count": 1,
+                    "submit_candidate_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "composer_candidates": [
+                        {
+                            "control_type": "Edit",
+                            "is_enabled": True,
+                            "visible": True,
+                            "patterns": ["Value"],
+                            "semantic_composer": True,
+                        }
+                    ],
+                    "submit_candidates": [
+                        {
+                            "control_type": "Button",
+                            "name": "Send",
+                            "is_enabled": True,
+                            "visible": True,
+                            "patterns": ["Invoke"],
+                        }
+                    ],
+                },
+            )
+
+        def fake_uia_sender(request):
+            sender_calls.append(request)
+            return {}
+
+        report = run_agent_app_real_no_loss(
+            agents=("claude desktop",),
+            project_name="openwukong",
+            task_name="desktop-message",
+            probe_runner=fake_probe_runner,
+            allow_uia_semantic_action=False,
+            uia_semantic_sender=fake_uia_sender,
+            uia_message="Do not send by default.",
+        )
+        data = report.to_dict()
+
+        self.assertEqual(sender_calls, [])
+        self.assertEqual(data["uia_semantic_action_send_verified_cases"], 0)
+        self.assertEqual(data["cases"][0]["uia_semantic_action_send_report"], {})
+
     def test_reports_focus_unstable_when_any_background_capture_changes_foreground(self):
         def fake_probe_runner(**kwargs):
             del kwargs

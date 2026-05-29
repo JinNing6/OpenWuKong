@@ -2,6 +2,7 @@ import unittest
 
 from openwukong.control.agent_app_uia_action import (
     AgentAppUiaSemanticActionDryRunAdapter,
+    AgentAppUiaSemanticActionSenderAdapter,
     build_agent_app_uia_semantic_action_request,
 )
 
@@ -86,6 +87,123 @@ class AgentAppUiaActionContractTests(unittest.TestCase):
         self.assertFalse(data["request"]["uia_value_pattern_ready"])
         self.assertEqual(data["decision"], "uia_semantic_action_value_pattern_not_ready")
         self.assertEqual(data["control_attempts"], 0)
+
+    def test_sender_sets_value_invokes_submit_and_accepts_marker_without_window_input(self):
+        operator_calls = []
+
+        class FakeOperator:
+            def execute(self, request):
+                operator_calls.append(request)
+                return {
+                    "composer_found": True,
+                    "value_set": True,
+                    "post_value": request.message,
+                    "submit_found": True,
+                    "invoke_attempted": True,
+                    "invoke_verified": True,
+                    "readbackText": "OPENWUKONG_UIA_ACCEPTANCE: PASS",
+                }
+
+        request = build_agent_app_uia_semantic_action_request(
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="uia-contract",
+            message="Send through UIA.",
+            selected_transport={"transport_id": "claude-desktop-shell"},
+            app_surface_probe=_ready_uia_probe(),
+            required_markers=("OPENWUKONG_UIA_ACCEPTANCE: PASS",),
+        )
+
+        report = AgentAppUiaSemanticActionSenderAdapter(
+            operator=FakeOperator(),
+            foreground_hwnd_provider=lambda: 100,
+        ).send(request)
+        data = report.to_dict()
+
+        self.assertEqual(len(operator_calls), 1)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "uia_semantic_action_send_accepted")
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(data["uia_value_set_attempts"], 1)
+        self.assertEqual(data["uia_invoke_attempts"], 1)
+        self.assertTrue(data["foreground_focus_stable"])
+        self.assertEqual(data["missing_required_markers"], [])
+        self.assertEqual(
+            data["request"]["payload"]["required_markers"],
+            ["OPENWUKONG_UIA_ACCEPTANCE: PASS"],
+        )
+
+    def test_sender_does_not_call_operator_when_dry_run_is_not_ready(self):
+        operator_calls = []
+        probe = _ready_uia_probe()
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "submit_candidate_count": 0,
+            "submit_candidates": [],
+        }
+        request = build_agent_app_uia_semantic_action_request(
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="uia-contract",
+            message="Send through UIA.",
+            selected_transport={"transport_id": "claude-desktop-shell"},
+            app_surface_probe=probe,
+            required_markers=("OPENWUKONG_UIA_ACCEPTANCE: PASS",),
+        )
+
+        class FakeOperator:
+            def execute(self, request):
+                operator_calls.append(request)
+                return {}
+
+        report = AgentAppUiaSemanticActionSenderAdapter(operator=FakeOperator()).send(request)
+        data = report.to_dict()
+
+        self.assertEqual(operator_calls, [])
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "uia_semantic_action_request_not_ready")
+        self.assertEqual(data["uia_value_set_attempts"], 0)
+        self.assertEqual(data["uia_invoke_attempts"], 0)
+
+    def test_sender_rejects_foreground_change_even_after_semantic_operations(self):
+        foreground_values = iter((100, 200))
+
+        class FakeOperator:
+            def execute(self, request):
+                return {
+                    "composer_found": True,
+                    "value_set": True,
+                    "post_value": request.message,
+                    "submit_found": True,
+                    "invoke_attempted": True,
+                    "invoke_verified": True,
+                    "readbackText": "OPENWUKONG_UIA_ACCEPTANCE: PASS",
+                }
+
+        request = build_agent_app_uia_semantic_action_request(
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="uia-contract",
+            message="Send through UIA.",
+            selected_transport={"transport_id": "claude-desktop-shell"},
+            app_surface_probe=_ready_uia_probe(),
+            required_markers=("OPENWUKONG_UIA_ACCEPTANCE: PASS",),
+        )
+
+        report = AgentAppUiaSemanticActionSenderAdapter(
+            operator=FakeOperator(),
+            foreground_hwnd_provider=lambda: next(foreground_values),
+        ).send(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "uia_semantic_action_foreground_changed")
+        self.assertFalse(data["foreground_focus_stable"])
+        self.assertEqual(data["window_input_attempts"], 0)
 
 
 def _ready_uia_probe():

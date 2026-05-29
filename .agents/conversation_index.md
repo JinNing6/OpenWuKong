@@ -5229,3 +5229,68 @@ When a new conversation starts in this repo:
     - next high-value step is to install or implement one deterministic
       app-native bridge endpoint, then re-run the same major command expecting
       one app chat requirement to flip from gated/unavailable to verified
+- 2026-05-29 added an opt-in UIA semantic sender for agent desktop apps:
+  - implementation:
+    - `agent_app_uia_action` now includes
+      `AgentAppUiaSemanticActionSenderAdapter` and a default
+      `PywinautoUiaSemanticActionOperator`
+    - the sender consumes the existing UIA dry-run contract and only executes
+      when target, ValuePattern composer, InvokePattern submit control, and
+      no-focus visual evidence are ready
+    - execution uses UIA provider semantics only:
+      `ValuePattern.SetValue` for the composer and `InvokePattern.Invoke` for
+      the submit control; it does not use keyboard, mouse, clipboard, or
+      `SendInput`
+    - sender reports now include `uia_value_set_attempts`,
+      `uia_invoke_attempts`, foreground HWND before/after, marker readback,
+      missing required markers, and present forbidden markers
+    - `agent_app_real_no_loss` now exposes explicit
+      `allow_uia_semantic_action` / `--allow-uia-semantic-action` gates,
+      aggregates UIA SetValue/Invoke attempts, and marks a case verified only
+      when the sender reports `uia_semantic_action_send_accepted` with zero
+      control/window-input attempts
+    - `major_real_no_loss` now forwards UIA semantic action options and treats
+      `uia_semantic_action_send_accepted` as satisfying an app background chat
+      requirement
+    - the global `desktop-background-control-testing` skill was updated with
+      the reusable UIA semantic sender safety pattern
+  - official-doc basis:
+    - Microsoft UI Automation control patterns define provider semantics
+      independent of visual control appearance
+    - Microsoft `IUIAutomationValuePattern::SetValue` / `ValuePattern.SetValue`
+      set supported control values through the provider
+    - Microsoft `IUIAutomationInvokePattern::Invoke` invokes a control action
+      such as a button through the provider
+  - safe real validation:
+    - app UIA-gated command:
+      `python -m openwukong.evaluation.agent_app_real_no_loss --agent "codex app" --agent "claude desktop" --agent cursor --project-name openwukong --task-name desktop-message --output-root logs\runtime\agent-app-real-no-loss-r8-uia-gated --screenshot-dir logs\runtime\agent-app-real-no-loss-r8-uia-gated\screenshots --output logs\runtime\agent-app-real-no-loss-r8-uia-gated\report.json --allow-uia-semantic-action --uia-message "OPENWUKONG_UIA_GATED_CHECK" --uia-acceptance-marker "OPENWUKONG_UIA_ACCEPTANCE: PASS"`
+    - app UIA-gated result:
+      `passed_cases=3/3`, `control_attempts=0`,
+      `window_input_attempts=0`, `uia_value_set_attempts=0`,
+      `uia_invoke_attempts=0`, `uia_semantic_action_send_verified_cases=0`,
+      `bridge_send_attempts=0`, `background_screenshot_success_count=4/4`,
+      `background_screenshot_focus_stable=true`
+    - unified major command:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r6-uia-gated --output logs\runtime\major-real-no-loss-r6-uia-gated\report.json --allow-owned-browser-helper-launch --owned-browser-debug-port 9482 --owned-browser-url "data:text/html,<title>OpenWukong Major No Loss R6</title><body>OpenWukong Major No Loss R6</body>" --background-screenshot-dir logs\runtime\major-real-no-loss-r6-uia-gated\background-screenshots --allow-uia-semantic-action --uia-message "OPENWUKONG_UIA_GATED_CHECK" --uia-acceptance-marker "OPENWUKONG_UIA_ACCEPTANCE: PASS" --allow-app-bridge-send --app-bridge-message "OPENWUKONG_APP_BRIDGE_GATED_CHECK" --app-acceptance-marker "OPENWUKONG_ACCEPTANCE: PASS" --allow-agent-cli-execution --agent-cli-timeout-sec 45`
+    - unified major result:
+      `safe_run_ok=true`, `goal_complete=false`, `unmet_requirements=5`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=2`,
+      app subreport `uia_value_set_attempts=0`,
+      app subreport `uia_invoke_attempts=0`,
+      `background_screenshot_success_count=5/5`,
+      `background_screenshot_focus_stable=true`
+  - verification:
+    - `python -m unittest tests.test_agent_app_uia_action_contract tests.test_agent_app_real_no_loss tests.test_major_real_no_loss`: OK
+    - `python -m unittest discover tests`: `444 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - we now have two real opt-in app-surface execution paths:
+      native bridge/CDP and UIA semantic Value/Invoke
+    - both are safely gated in the current live state because Codex App,
+      Claude Desktop, and Cursor do not currently expose a ready target for
+      `openwukong/desktop-message`
+    - next high-value step is a controlled target-prep/no-send flow or a real
+      native/extension bridge so one app surface exposes a ready target and can
+      flip from gated to verified without foreground takeover

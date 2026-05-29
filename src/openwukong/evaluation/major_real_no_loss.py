@@ -228,6 +228,10 @@ def run_major_scenario_real_no_loss(
     cli_agents: Iterable[str] = DEFAULT_CLI_AGENTS,
     project_name: str = "openwukong",
     task_name: str = "major-real-no-loss",
+    allow_uia_semantic_action: bool = False,
+    uia_message: str = "OPENWUKONG_UIA_SEMANTIC_ACTION_REAL_NO_LOSS",
+    uia_required_markers: tuple[str, ...] = (),
+    uia_forbidden_markers: tuple[str, ...] = (),
     allow_app_bridge_send: bool = False,
     app_bridge_message: str = "OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
     app_bridge_required_markers: tuple[str, ...] = (),
@@ -265,6 +269,10 @@ def run_major_scenario_real_no_loss(
             task_name=task_name,
             output_root=root / "agent-app",
             screenshot_dir=root / "background-screenshots" / "agent-app",
+            allow_uia_semantic_action=allow_uia_semantic_action,
+            uia_message=uia_message,
+            uia_required_markers=tuple(uia_required_markers or ()),
+            uia_forbidden_markers=tuple(uia_forbidden_markers or ()),
             allow_app_bridge_send=allow_app_bridge_send,
             bridge_message=app_bridge_message,
             required_markers=tuple(app_bridge_required_markers or ()),
@@ -481,8 +489,11 @@ def _cli_requirement(requirement_id: str, surface: str, case: dict) -> MajorRequ
 
 def _app_requirement(requirement_id: str, surface: str, case: dict) -> MajorRequirement:
     raw_status = str(case.get("status", "") or "").strip()
-    if bool(case.get("app_bridge_send_verified", False)) or raw_status in {
+    if bool(case.get("app_bridge_send_verified", False)) or bool(
+        case.get("uia_semantic_action_send_verified", False)
+    ) or raw_status in {
         "app_bridge_send_accepted",
+        "uia_semantic_action_send_accepted",
         "message_submitted_accepted",
     }:
         status = "verified"
@@ -536,6 +547,7 @@ def _compact_case_evidence(case: dict) -> dict:
         "scenario_id",
         "native_ready",
         "app_bridge_send_verified",
+        "uia_semantic_action_send_verified",
         "foreground_focus_stable",
         "background_screenshot_focus_stable",
         "artifact_path",
@@ -639,6 +651,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--project-name", default="openwukong")
     parser.add_argument("--task-name", default="major-real-no-loss")
     parser.add_argument(
+        "--allow-uia-semantic-action",
+        action="store_true",
+        help="Allow UIA ValuePattern/InvokePattern semantic sends for agent app surfaces when ready.",
+    )
+    parser.add_argument(
+        "--uia-message",
+        default="OPENWUKONG_UIA_SEMANTIC_ACTION_REAL_NO_LOSS",
+        help="Message used for optional app UIA semantic sends.",
+    )
+    parser.add_argument(
+        "--uia-acceptance-marker",
+        action="append",
+        default=[],
+        help="Required UIA semantic action readback marker. Repeat for multiple markers.",
+    )
+    parser.add_argument(
+        "--uia-forbid-marker",
+        action="append",
+        default=[],
+        help="Forbidden UIA semantic action readback marker. Repeat for multiple markers.",
+    )
+    parser.add_argument(
         "--allow-app-bridge-send",
         action="store_true",
         help="Allow native app bridge sends for agent app surfaces when their dry-run contracts are ready.",
@@ -676,6 +710,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         cli_agents=tuple(args.cli_agent or DEFAULT_CLI_AGENTS),
         project_name=args.project_name,
         task_name=args.task_name,
+        allow_uia_semantic_action=args.allow_uia_semantic_action,
+        uia_message=args.uia_message,
+        uia_required_markers=tuple(args.uia_acceptance_marker or ()),
+        uia_forbidden_markers=tuple(args.uia_forbid_marker or ()),
         allow_app_bridge_send=args.allow_app_bridge_send,
         app_bridge_message=args.app_bridge_message,
         app_bridge_required_markers=tuple(args.app_acceptance_marker or ()),
