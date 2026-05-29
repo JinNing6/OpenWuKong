@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Unified real no-loss probe for agent desktop app surfaces.
 
-The runner intentionally stays diagnostic-only. It does not submit tasks,
-send chat messages, type into windows, or click UI. Each app case delegates to
-the read-only native connector probe and aggregates the safety evidence.
+The runner is read-only by default: it does not submit tasks, send chat
+messages, type into windows, or click UI. A native app bridge send is available
+only behind explicit opt-in and only after the dry-run bridge contract is ready.
 """
 
 from __future__ import annotations
@@ -16,10 +16,16 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
+from openwukong.control.agent_app_bridge import (
+    AgentAppBridgeCdpAdapter,
+    AgentAppBridgeDryRunAdapter,
+    build_agent_app_bridge_request,
+)
 from openwukong.control.agent_app_uia_action import (
     AgentAppUiaSemanticActionDryRunAdapter,
     build_agent_app_uia_semantic_action_request,
 )
+from openwukong.control.agent_conversation import compose_agent_conversation_message
 from openwukong.control.app_resolution import WindowsAppResolver
 from openwukong.evaluation.agent_native_connector_probe import (
     run_agent_native_connector_probe,
@@ -41,6 +47,8 @@ class AgentAppRealNoLossCase:
     native_ready: bool
     probe: dict
     uia_semantic_action_dry_run: dict = dataclasses.field(default_factory=dict)
+    app_bridge_dry_run: dict = dataclasses.field(default_factory=dict)
+    app_bridge_send_report: dict = dataclasses.field(default_factory=dict)
     artifact_path: str = ""
     errors: tuple[str, ...] = ()
 
@@ -58,18 +66,27 @@ class AgentAppRealNoLossCase:
 
     @property
     def control_attempts(self) -> int:
-        return _counter(self.probe, "control_attempts")
+        return _counter(self.probe, "control_attempts") + _counter(
+            self.app_bridge_send_report,
+            "control_attempts",
+        )
 
     @property
     def window_input_attempts(self) -> int:
         return _counter(self.probe, "window_input_attempts") + _counter(
             _app_uia_probe(self.probe),
             "window_input_attempts",
+        ) + _counter(
+            self.app_bridge_send_report,
+            "window_input_attempts",
         )
 
     @property
     def bridge_send_attempts(self) -> int:
-        return _counter(self.probe, "bridge_send_attempts")
+        return _counter(self.probe, "bridge_send_attempts") + _counter(
+            self.app_bridge_send_report,
+            "bridge_send_attempts",
+        )
 
     @property
     def agent_command_attempts(self) -> int:
@@ -86,6 +103,12 @@ class AgentAppRealNoLossCase:
     @property
     def uia_semantic_action_ready(self) -> bool:
         return bool(self.uia_semantic_action_dry_run.get("ok", False))
+
+    @property
+    def app_bridge_send_verified(self) -> bool:
+        return str(
+            self.app_bridge_send_report.get("decision", "") or ""
+        ) == "app_bridge_send_accepted"
 
     @property
     def background_screenshot_count(self) -> int:
@@ -118,6 +141,9 @@ class AgentAppRealNoLossCase:
             "uia_invoke_attempts": self.uia_invoke_attempts,
             "uia_semantic_action_ready": self.uia_semantic_action_ready,
             "uia_semantic_action_dry_run": dict(self.uia_semantic_action_dry_run),
+            "app_bridge_send_verified": self.app_bridge_send_verified,
+            "app_bridge_dry_run": dict(self.app_bridge_dry_run),
+            "app_bridge_send_report": dict(self.app_bridge_send_report),
             "background_screenshot_count": self.background_screenshot_count,
             "background_screenshot_success_count": self.background_screenshot_success_count,
             "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
@@ -204,6 +230,10 @@ class AgentAppRealNoLossReport:
         return sum(1 for case in self.cases if case.uia_semantic_action_ready)
 
     @property
+    def app_bridge_send_verified_cases(self) -> int:
+        return sum(1 for case in self.cases if case.app_bridge_send_verified)
+
+    @property
     def gated_cases(self) -> int:
         return sum(1 for case in self.cases if case.status.startswith("gated_"))
 
@@ -233,6 +263,7 @@ class AgentAppRealNoLossReport:
             "failed_cases": self.failed_cases,
             "native_ready_cases": self.native_ready_cases,
             "uia_semantic_action_ready_cases": self.uia_semantic_action_ready_cases,
+            "app_bridge_send_verified_cases": self.app_bridge_send_verified_cases,
             "gated_cases": self.gated_cases,
             "real_verified_cases": self.real_verified_cases,
             "cases": [case.to_dict() for case in self.cases],
@@ -256,6 +287,11 @@ def run_agent_app_real_no_loss(
     max_elements: int = 1200,
     request_timeout: float = 0.2,
     semantic_action_message: str = "OPENWUKONG_UIA_SEMANTIC_ACTION_DRY_RUN",
+    allow_app_bridge_send: bool = False,
+    app_bridge_sender: object | None = None,
+    bridge_message: str = "OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
+    required_markers: tuple[str, ...] = (),
+    forbidden_markers: tuple[str, ...] = (),
 ) -> AgentAppRealNoLossReport:
     started = time.perf_counter()
     root = _resolve_output_root(output_root)
@@ -289,7 +325,14 @@ def run_agent_app_real_no_loss(
                 _case_from_probe(
                     agent,
                     probe,
+                    project_name=str(project_name or "").strip(),
+                    task_name=str(task_name or "").strip(),
                     semantic_action_message=semantic_action_message,
+                    allow_app_bridge_send=allow_app_bridge_send,
+                    app_bridge_sender=app_bridge_sender,
+                    bridge_message=bridge_message,
+                    required_markers=tuple(required_markers or ()),
+                    forbidden_markers=tuple(forbidden_markers or ()),
                 ),
             )
         )
@@ -354,6 +397,28 @@ def main(
         default="OPENWUKONG_UIA_SEMANTIC_ACTION_DRY_RUN",
         help="Message used only to build the UIA semantic dry-run contract; it is never sent.",
     )
+    parser.add_argument(
+        "--allow-app-bridge-send",
+        action="store_true",
+        help="Allow a native app bridge send when the dry-run contract is ready.",
+    )
+    parser.add_argument(
+        "--bridge-message",
+        default="OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
+        help="Message used for the optional app bridge sender.",
+    )
+    parser.add_argument(
+        "--acceptance-marker",
+        action="append",
+        default=[],
+        help="Required marker expected in app bridge readback. Repeat for multiple markers.",
+    )
+    parser.add_argument(
+        "--forbid-marker",
+        action="append",
+        default=[],
+        help="Forbidden marker that fails app bridge readback. Repeat for multiple markers.",
+    )
     args = parser.parse_args(argv)
 
     resolver = resolver_factory(args) if callable(resolver_factory) else WindowsAppResolver()
@@ -372,6 +437,11 @@ def main(
         max_elements=args.max_elements,
         request_timeout=args.request_timeout,
         semantic_action_message=args.semantic_action_message,
+        allow_app_bridge_send=args.allow_app_bridge_send,
+        app_bridge_sender=_default_app_bridge_sender() if args.allow_app_bridge_send else None,
+        bridge_message=args.bridge_message,
+        required_markers=tuple(args.acceptance_marker or ()),
+        forbidden_markers=tuple(args.forbid_marker or ()),
     )
     payload = report.to_dict()
     if args.output:
@@ -392,7 +462,14 @@ def _case_from_probe(
     agent: str,
     probe: dict,
     *,
+    project_name: str = "",
+    task_name: str = "",
     semantic_action_message: str = "",
+    allow_app_bridge_send: bool = False,
+    app_bridge_sender: object | None = None,
+    bridge_message: str = "",
+    required_markers: tuple[str, ...] = (),
+    forbidden_markers: tuple[str, ...] = (),
 ) -> AgentAppRealNoLossCase:
     decision = str(probe.get("decision", "") or "")
     native_ready = int(probe.get("ready_endpoint_count", 0) or 0) > 0
@@ -400,19 +477,42 @@ def _case_from_probe(
     matched_window_count = _counter(app_probe, "matched_window_count")
     target_matched = bool(app_probe.get("target_matched", False))
     real_verified = bool(native_ready or matched_window_count > 0 or target_matched)
-    control_attempts = _counter(probe, "control_attempts")
+    app_bridge_dry_run, app_bridge_send_report = _run_app_bridge_path(
+        agent=agent,
+        probe=probe,
+        project_name=project_name,
+        task_name=task_name,
+        message=bridge_message,
+        required_markers=required_markers,
+        forbidden_markers=forbidden_markers,
+        allow_app_bridge_send=allow_app_bridge_send,
+        app_bridge_sender=app_bridge_sender,
+    )
+    control_attempts = _counter(probe, "control_attempts") + _counter(
+        app_bridge_send_report,
+        "control_attempts",
+    )
     window_input_attempts = _counter(probe, "window_input_attempts") + _counter(
         app_probe,
         "window_input_attempts",
+    ) + _counter(
+        app_bridge_send_report,
+        "window_input_attempts",
     )
-    bridge_send_attempts = _counter(probe, "bridge_send_attempts")
+    bridge_send_attempts = _counter(probe, "bridge_send_attempts") + _counter(
+        app_bridge_send_report,
+        "bridge_send_attempts",
+    )
     command_attempts = _counter(probe, "agent_command_attempts")
     errors: list[str] = []
     if control_attempts:
         errors.append("control_attempts_nonzero")
     if window_input_attempts:
         errors.append("window_input_attempts_nonzero")
-    if bridge_send_attempts:
+    bridge_send_verified = str(
+        app_bridge_send_report.get("decision", "") or ""
+    ) == "app_bridge_send_accepted"
+    if bridge_send_attempts and not bridge_send_verified:
         errors.append("bridge_send_attempts_nonzero")
     if command_attempts:
         errors.append("agent_command_attempts_nonzero")
@@ -427,7 +527,9 @@ def _case_from_probe(
         errors.append("uia_value_set_attempts_nonzero")
     if uia_invoke_attempts:
         errors.append("uia_invoke_attempts_nonzero")
-    if decision == "agent_native_connector_ready":
+    if bridge_send_verified:
+        status = "app_bridge_send_accepted"
+    elif decision == "agent_native_connector_ready":
         status = "native_connector_ready"
     elif matched_window_count > 0 or target_matched:
         status = "gated_native_endpoint_missing"
@@ -444,8 +546,79 @@ def _case_from_probe(
         native_ready=native_ready,
         probe=probe,
         uia_semantic_action_dry_run=semantic_action_dry_run,
+        app_bridge_dry_run=app_bridge_dry_run,
+        app_bridge_send_report=app_bridge_send_report,
         errors=tuple(errors),
     )
+
+
+def _run_app_bridge_path(
+    *,
+    agent: str,
+    probe: dict,
+    project_name: str,
+    task_name: str,
+    message: str,
+    required_markers: tuple[str, ...],
+    forbidden_markers: tuple[str, ...],
+    allow_app_bridge_send: bool,
+    app_bridge_sender: object | None,
+) -> tuple[dict, dict]:
+    request = build_agent_app_bridge_request(
+        agent=agent,
+        agent_id=str(probe.get("agent_id", "") or _agent_id_from_name(agent)),
+        project_name=project_name,
+        task_name=task_name,
+        message=message,
+        composed_message=compose_agent_conversation_message(
+            project_name=project_name,
+            task_name=task_name,
+            message=message,
+            required_markers=tuple(required_markers or ()),
+            forbidden_markers=tuple(forbidden_markers or ()),
+        ),
+        selected_transport={"transport_id": f"{_agent_id_from_name(agent)}-desktop-shell"},
+        app_surface_probe=probe,
+        required_markers=tuple(required_markers or ()),
+        forbidden_markers=tuple(forbidden_markers or ()),
+    )
+    dry_run = AgentAppBridgeDryRunAdapter().prepare(request).to_dict()
+    if not allow_app_bridge_send or not bool(dry_run.get("ok", False)):
+        return dry_run, {}
+    sender = app_bridge_sender or _default_app_bridge_sender()
+    try:
+        send = getattr(sender, "send", None)
+        if callable(send):
+            return dry_run, _report_to_dict(send(request))
+        if callable(sender):
+            return dry_run, _report_to_dict(sender(request))
+        return dry_run, {
+            "mode": "agent-app-bridge-send",
+            "safety_mode": "native_bridge_execute",
+            "ok": False,
+            "decision": "app_bridge_sender_not_callable",
+            "control_attempts": 0,
+            "window_input_attempts": 0,
+            "bridge_send_attempts": 0,
+            "native_call_attempts": 0,
+        }
+    except Exception as exc:
+        return dry_run, {
+            "mode": "agent-app-bridge-send",
+            "safety_mode": "native_bridge_execute",
+            "ok": False,
+            "decision": "app_bridge_sender_failed",
+            "control_attempts": 0,
+            "window_input_attempts": 0,
+            "bridge_send_attempts": 1,
+            "native_call_attempts": 1,
+            "error": str(exc) or exc.__class__.__name__,
+            "request": request.to_dict(),
+        }
+
+
+def _default_app_bridge_sender() -> AgentAppBridgeCdpAdapter:
+    return AgentAppBridgeCdpAdapter()
 
 
 def _build_uia_semantic_action_dry_run(agent: str, probe: dict, *, message: str) -> dict:

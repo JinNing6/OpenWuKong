@@ -228,6 +228,10 @@ def run_major_scenario_real_no_loss(
     cli_agents: Iterable[str] = DEFAULT_CLI_AGENTS,
     project_name: str = "openwukong",
     task_name: str = "major-real-no-loss",
+    allow_app_bridge_send: bool = False,
+    app_bridge_message: str = "OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
+    app_bridge_required_markers: tuple[str, ...] = (),
+    app_bridge_forbidden_markers: tuple[str, ...] = (),
     allow_agent_cli_execution: bool = False,
     agent_cli_timeout_sec: float = 90.0,
     primary_runner: PrimaryRunner | None = None,
@@ -261,6 +265,10 @@ def run_major_scenario_real_no_loss(
             task_name=task_name,
             output_root=root / "agent-app",
             screenshot_dir=root / "background-screenshots" / "agent-app",
+            allow_app_bridge_send=allow_app_bridge_send,
+            bridge_message=app_bridge_message,
+            required_markers=tuple(app_bridge_required_markers or ()),
+            forbidden_markers=tuple(app_bridge_forbidden_markers or ()),
         )
     )
     cli = _report_to_dict(
@@ -527,6 +535,7 @@ def _compact_case_evidence(case: dict) -> dict:
         "agent",
         "scenario_id",
         "native_ready",
+        "app_bridge_send_verified",
         "foreground_focus_stable",
         "background_screenshot_focus_stable",
         "artifact_path",
@@ -629,6 +638,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--cli-agent", action="append", default=None)
     parser.add_argument("--project-name", default="openwukong")
     parser.add_argument("--task-name", default="major-real-no-loss")
+    parser.add_argument(
+        "--allow-app-bridge-send",
+        action="store_true",
+        help="Allow native app bridge sends for agent app surfaces when their dry-run contracts are ready.",
+    )
+    parser.add_argument(
+        "--app-bridge-message",
+        default="OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
+        help="Message used for optional agent app bridge sends.",
+    )
+    parser.add_argument(
+        "--app-acceptance-marker",
+        action="append",
+        default=[],
+        help="Required app bridge readback marker. Repeat for multiple markers.",
+    )
+    parser.add_argument(
+        "--app-forbid-marker",
+        action="append",
+        default=[],
+        help="Forbidden app bridge readback marker. Repeat for multiple markers.",
+    )
     parser.add_argument("--allow-agent-cli-execution", action="store_true")
     parser.add_argument("--agent-cli-timeout-sec", type=float, default=90.0)
     args = parser.parse_args(argv)
@@ -645,6 +676,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         cli_agents=tuple(args.cli_agent or DEFAULT_CLI_AGENTS),
         project_name=args.project_name,
         task_name=args.task_name,
+        allow_app_bridge_send=args.allow_app_bridge_send,
+        app_bridge_message=args.app_bridge_message,
+        app_bridge_required_markers=tuple(args.app_acceptance_marker or ()),
+        app_bridge_forbidden_markers=tuple(args.app_forbid_marker or ()),
         allow_agent_cli_execution=args.allow_agent_cli_execution,
         agent_cli_timeout_sec=args.agent_cli_timeout_sec,
     )

@@ -5164,3 +5164,68 @@ When a new conversation starts in this repo:
     - the full objective is not complete until background write/send is
       verified for WeChat and app-surface Codex/Claude/Cursor, and Claude CLI
       is authenticated or otherwise bypassed by a native app bridge
+- 2026-05-29 connected opt-in app bridge sending to the real no-loss app and
+  major runners:
+  - implementation:
+    - `agent_app_real_no_loss` now builds an app bridge dry-run contract for
+      each app surface and records it in the case artifact
+    - real app bridge sending is available only behind explicit
+      `allow_app_bridge_send` / `--allow-app-bridge-send`
+    - the sender is invoked only when the dry-run request is ready:
+      target matched, semantic composer present, native endpoint ready, and
+      background visual focus stable
+    - default behavior remains read-only; without the explicit flag the runner
+      never calls the sender even when a sender object is supplied
+    - `major_real_no_loss` now forwards app bridge send options and markers to
+      the app runner, so the unified acceptance command can verify app-surface
+      background chat when a deterministic native bridge becomes available
+    - major requirement evidence now preserves `app_bridge_send_verified`
+    - app bridge sender reports now contribute their own
+      `control_attempts` and `window_input_attempts` to the no-loss safety
+      counters, so an unsafe sender cannot be hidden behind an accepted
+      bridge result
+  - official-doc basis:
+    - Python `dataclasses` and `argparse` official docs were checked for the
+      report/CLI extension pattern
+    - Chrome DevTools Protocol `Runtime.evaluate` docs were checked for the
+      native CDP bridge execution primitive already used by the app bridge
+  - safe real validation:
+    - read-only app command:
+      `python -m openwukong.evaluation.agent_app_real_no_loss --agent "codex app" --agent "claude desktop" --agent cursor --project-name openwukong --task-name desktop-message --output-root logs\runtime\agent-app-real-no-loss-r6-bridge-ready --screenshot-dir logs\runtime\agent-app-real-no-loss-r6-bridge-ready\screenshots --output logs\runtime\agent-app-real-no-loss-r6-bridge-ready\report.json --json`
+    - read-only result:
+      `passed_cases=3/3`, `native_ready_cases=0`,
+      `app_bridge_send_verified_cases=0`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `background_screenshot_success_count=4/4`,
+      `background_screenshot_focus_stable=true`
+    - opt-in gated app command:
+      `python -m openwukong.evaluation.agent_app_real_no_loss --agent "codex app" --agent "claude desktop" --agent cursor --project-name openwukong --task-name desktop-message --output-root logs\runtime\agent-app-real-no-loss-r7-bridge-send-gated --screenshot-dir logs\runtime\agent-app-real-no-loss-r7-bridge-send-gated\screenshots --output logs\runtime\agent-app-real-no-loss-r7-bridge-send-gated\report.json --allow-app-bridge-send --bridge-message "OPENWUKONG_APP_BRIDGE_GATED_CHECK" --acceptance-marker "OPENWUKONG_ACCEPTANCE: PASS"`
+    - opt-in gated result:
+      `passed_cases=3/3`, `native_ready_cases=0`,
+      `app_bridge_send_verified_cases=0`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `background_screenshot_success_count=4/4`,
+      `background_screenshot_focus_stable=true`
+    - unified major command:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r5-app-bridge-gated --output logs\runtime\major-real-no-loss-r5-app-bridge-gated\report.json --allow-owned-browser-helper-launch --owned-browser-debug-port 9481 --owned-browser-url "data:text/html,<title>OpenWukong Major No Loss R5</title><body>OpenWukong Major No Loss R5</body>" --background-screenshot-dir logs\runtime\major-real-no-loss-r5-app-bridge-gated\background-screenshots --allow-app-bridge-send --app-bridge-message "OPENWUKONG_APP_BRIDGE_GATED_CHECK" --app-acceptance-marker "OPENWUKONG_ACCEPTANCE: PASS" --allow-agent-cli-execution --agent-cli-timeout-sec 45`
+    - unified major result:
+      `safe_run_ok=true`, `goal_complete=false`, `unmet_requirements=5`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=2`,
+      `background_screenshot_success_count=5/5`,
+      `background_screenshot_focus_stable=true`
+  - verification:
+    - `python -m unittest tests.test_agent_app_real_no_loss tests.test_major_real_no_loss`: OK
+    - `python -m unittest discover tests`: `438 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - app-surface background chat now has the right final safety gate:
+      dry-run evidence first, explicit opt-in second, native bridge send third,
+      marker-based readback before acceptance
+    - this machine still has no ready native endpoint for Codex App, Claude
+      Desktop, or Cursor app-surface chat in the tested state, so no bridge
+      send was attempted
+    - next high-value step is to install or implement one deterministic
+      app-native bridge endpoint, then re-run the same major command expecting
+      one app chat requirement to flip from gated/unavailable to verified

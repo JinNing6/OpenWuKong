@@ -198,6 +198,97 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(cli_calls[0]["agents"], ("codex", "claude"))
         self.assertTrue(cli_calls[0]["allow_cli_execution"])
 
+    def test_runner_passes_app_bridge_send_options_and_marks_app_requirement_verified(self):
+        app_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 1,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "passed_cases": 1,
+                    "failed_cases": 0,
+                    "app_bridge_send_verified_cases": 1,
+                    "cases": [
+                        {
+                            "agent": "codex app",
+                            "status": "app_bridge_send_accepted",
+                            "real_verified": True,
+                            "native_ready": True,
+                            "app_bridge_send_verified": True,
+                        }
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("codex app",),
+                cli_agents=(),
+                project_name="openwukong",
+                task_name="codex-app-message",
+                allow_app_bridge_send=True,
+                app_bridge_message="OPENWUKONG APP BRIDGE CHECK",
+                app_bridge_required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+                app_bridge_forbidden_markers=("OPENWUKONG_ACCEPTANCE: FAIL",),
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(app_calls[0]["allow_app_bridge_send"], True)
+        self.assertEqual(app_calls[0]["bridge_message"], "OPENWUKONG APP BRIDGE CHECK")
+        self.assertEqual(
+            app_calls[0]["required_markers"],
+            ("OPENWUKONG_ACCEPTANCE: PASS",),
+        )
+        self.assertEqual(
+            app_calls[0]["forbidden_markers"],
+            ("OPENWUKONG_ACCEPTANCE: FAIL",),
+        )
+        self.assertEqual(data["bridge_send_attempts"], 1)
+        requirements = {item["requirement_id"]: item for item in data["requirements"]}
+        self.assertEqual(requirements["codex_app_background_chat"]["status"], "verified")
+
 
 if __name__ == "__main__":
     unittest.main()
