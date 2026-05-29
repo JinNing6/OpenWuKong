@@ -6175,3 +6175,50 @@ When a new conversation starts in this repo:
     - this directly supports real Codex App / Claude Desktop / Cursor app
       background control once the app is launched with an owned local DevTools
       port or a companion bridge registers one
+- 2026-05-29 added automatic owned-process DevTools port discovery for agent
+  app surfaces:
+  - implementation:
+    - `agent_native_connector_probe` now scans TCP listening ports already
+      owned by the matched target desktop app process, not only command-line
+      `--remote-debugging-port` flags or manually supplied `--debugger-url`
+    - the probe first reads local `/json/version`; only ports whose response
+      looks like Chrome DevTools Protocol are retained as endpoints
+    - ordinary non-DevTools listening ports are suppressed instead of being
+      reported as unhealthy native endpoints
+    - explicitly supplied debugger URLs keep precedence over automatic
+      listening-port discovery so user/installer configuration remains the
+      authoritative binding when both point to the same port
+  - official-doc basis:
+    - Chrome DevTools Protocol `Target` docs were checked again for target
+      discovery shape
+    - psutil `net_connections` docs were checked for process-owned listening
+      port discovery
+  - validation:
+    - red tests first:
+      `test_auto_discovers_devtools_from_matching_process_listening_port` and
+      `test_auto_listening_non_devtools_port_is_suppressed` failed because no
+      listening-port probing occurred
+    - targeted green:
+      `python -m unittest tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_auto_discovers_devtools_from_matching_process_listening_port tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_auto_listening_non_devtools_port_is_suppressed`: `2 tests OK`
+    - focused regression:
+      `python -m unittest tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_agent_app_bridge tests.test_agent_native_cdp_bridge`: `65 tests OK`
+    - R32 real no-loss smoke without launch/send opt-in:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r32-auto-listening-devtools --output logs\runtime\major-real-no-loss-r32-auto-listening-devtools\report.json --json`
+      produced `safe_run_ok=true`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `background_screenshot_success_count=6/6`,
+      `background_screenshot_focus_stable=true`, and
+      `automation_focus_safe=true`
+    - R32 found no ready automatic CDP/native endpoint on the current live
+      Codex App / Claude Desktop / Cursor processes; all three app-chat
+      surfaces remained correctly gated with
+      `gated_native_endpoint_missing`
+  - current conclusion:
+    - the app-native discovery path is now less dependent on manual flags:
+      if a matched Electron-style desktop app already owns a local CDP
+      listening port, OpenWukong can discover it automatically in read-only
+      mode and route it into the existing bridge contract
+    - current live machine evidence still says Codex App / Claude Desktop /
+      Cursor do not expose a usable local background control endpoint in their
+      present running state, so the next real unlock is starting/installing an
+      owned app-side bridge or DevTools-enabled helper without stealing focus

@@ -195,6 +195,87 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(data["endpoints"][0]["error"], "devtools_endpoint_not_bound_to_agent_process")
         self.assertEqual(http_probe.calls, [])
 
+    def test_auto_discovers_devtools_from_matching_process_listening_port(self):
+        http_probe = _FakeHTTPProbe(
+            {
+                "http://127.0.0.1:9555/json/version": {
+                    "Browser": "Chrome/126.0 Electron",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:9555/devtools/browser/abc",
+                },
+                "http://127.0.0.1:9555/json/list": [
+                    {
+                        "id": "page-1",
+                        "type": "page",
+                        "title": "openwukong - desktop-message",
+                        "url": "app://codex/openwukong/desktop-message",
+                        "webSocketDebuggerUrl": "ws://127.0.0.1:9555/devtools/page/page-1",
+                    }
+                ],
+            }
+        )
+
+        report = run_agent_native_connector_probe(
+            agent="codex app",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_codex_target(task_name="desktop-message"),
+            resolver=_resolver_with_codex_desktop(),
+            process_provider=lambda: (
+                NativeProcessSnapshot(
+                    pid=42,
+                    process_name="Codex.exe",
+                    executable_path="C:/Program Files/WindowsApps/OpenAI.Codex/app/Codex.exe",
+                    command_line="Codex.exe",
+                    listening_ports=(9555,),
+                ),
+            ),
+            http_probe=http_probe,
+        )
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(data["decision"], "agent_native_connector_ready")
+        self.assertEqual(data["ready_endpoint_count"], 1)
+        self.assertEqual(data["endpoints"][0]["source"], "process-listening-port")
+        self.assertEqual(data["endpoints"][0]["debugger_url"], "http://127.0.0.1:9555")
+        self.assertEqual(data["endpoints"][0]["process"]["pid"], 42)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(
+            http_probe.calls,
+            [
+                "http://127.0.0.1:9555/json/version",
+                "http://127.0.0.1:9555/json/list",
+            ],
+        )
+
+    def test_auto_listening_non_devtools_port_is_suppressed(self):
+        http_probe = _FakeHTTPProbe()
+
+        report = run_agent_native_connector_probe(
+            agent="codex app",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_codex_target(task_name="desktop-message"),
+            resolver=_resolver_with_codex_desktop(),
+            process_provider=lambda: (
+                NativeProcessSnapshot(
+                    pid=42,
+                    process_name="Codex.exe",
+                    executable_path="C:/Program Files/WindowsApps/OpenAI.Codex/app/Codex.exe",
+                    command_line="Codex.exe",
+                    listening_ports=(9556,),
+                ),
+            ),
+            http_probe=http_probe,
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "agent_native_connector_not_exposed")
+        self.assertEqual(data["endpoint_count"], 0)
+        self.assertEqual(data["ready_endpoint_count"], 0)
+        self.assertEqual(http_probe.calls, ["http://127.0.0.1:9556/json/version"])
+
     def test_reports_ready_ide_bridge_endpoint_from_explicit_bridge_url(self):
         bridge_calls = []
 

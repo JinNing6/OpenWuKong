@@ -253,6 +253,7 @@ def run_agent_native_connector_probe(
     matching = tuple(_matching_agent_processes(processes, app_probe))
     debugger_endpoints = _discover_debugger_endpoints(
         matching,
+        reserved_ports=_ports_from_debugger_urls(debugger_urls),
         http_probe=http_probe or RequestsNativeConnectorHTTPProbe(),
         timeout=max(0.05, float(request_timeout)),
     )
@@ -482,12 +483,14 @@ def _matching_agent_processes(
 def _discover_debugger_endpoints(
     processes: Iterable[NativeProcessSnapshot],
     *,
+    reserved_ports: Iterable[int] = (),
     http_probe: NativeConnectorHTTPProbe,
     timeout: float,
 ) -> tuple[NativeConnectorEndpoint, ...]:
     endpoints: list[NativeConnectorEndpoint] = []
-    seen_ports: set[int] = set()
-    for process in processes:
+    seen_ports: set[int] = set(int(port) for port in reserved_ports if int(port or 0) > 0)
+    process_list = tuple(processes or ())
+    for process in process_list:
         for port in _extract_remote_debugging_ports(process.command_line):
             if port in seen_ports:
                 continue
@@ -501,7 +504,30 @@ def _discover_debugger_endpoints(
                     timeout=timeout,
                 )
             )
+    for process in process_list:
+        for port in sorted(_positive_int_set(process.listening_ports)):
+            if port in seen_ports:
+                continue
+            seen_ports.add(port)
+            endpoint = _probe_process_listening_debugger_endpoint(
+                port,
+                process=process,
+                http_probe=http_probe,
+                timeout=timeout,
+            )
+            if endpoint is not None:
+                endpoints.append(endpoint)
     return tuple(endpoints)
+
+
+def _ports_from_debugger_urls(debugger_urls: Iterable[str]) -> tuple[int, ...]:
+    ports: list[int] = []
+    for value in debugger_urls or ():
+        base = _normalize_local_debugger_url(value)
+        port = _port_from_url(base)
+        if port > 0 and port not in ports:
+            ports.append(port)
+    return tuple(ports)
 
 
 def _discover_explicit_debugger_endpoints(
@@ -765,6 +791,60 @@ def _probe_debugger_endpoint(
             process=process,
             error=str(exc) or exc.__class__.__name__,
         )
+
+
+def _probe_process_listening_debugger_endpoint(
+    port: int,
+    *,
+    process: NativeProcessSnapshot,
+    http_probe: NativeConnectorHTTPProbe,
+    timeout: float,
+) -> NativeConnectorEndpoint | None:
+    base = f"http://127.0.0.1:{int(port)}"
+    try:
+        version = http_probe.get_json(f"{base}/json/version", timeout=timeout)
+    except Exception:
+        return None
+    if not isinstance(version, dict) or not _looks_like_devtools_version(version):
+        return None
+    try:
+        targets_raw = http_probe.get_json(f"{base}/json/list", timeout=timeout)
+        if not isinstance(targets_raw, list):
+            raise ValueError("devtools_targets_not_list")
+        targets = tuple(
+            _target_from_dict(item)
+            for item in targets_raw
+            if isinstance(item, dict)
+        )
+        return NativeConnectorEndpoint(
+            debugger_url=base,
+            port=int(port),
+            source="process-listening-port",
+            process=process,
+            version=version,
+            targets=targets,
+        )
+    except Exception as exc:
+        return NativeConnectorEndpoint(
+            debugger_url=base,
+            port=int(port),
+            source="process-listening-port",
+            process=process,
+            version=version,
+            error=str(exc) or exc.__class__.__name__,
+        )
+
+
+def _looks_like_devtools_version(data: dict) -> bool:
+    return any(
+        key in data
+        for key in (
+            "Browser",
+            "Protocol-Version",
+            "V8-Version",
+            "webSocketDebuggerUrl",
+        )
+    )
 
 
 def _target_from_dict(data: dict) -> NativeConnectorTarget:
