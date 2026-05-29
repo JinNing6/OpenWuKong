@@ -23,6 +23,8 @@ from openwukong.control.agent_app_bridge import (
 )
 from openwukong.control.agent_app_uia_action import (
     AgentAppUiaSemanticActionDryRunAdapter,
+    AgentAppUiaSemanticDraftDryRunAdapter,
+    AgentAppUiaSemanticDraftWriterAdapter,
     AgentAppUiaSemanticActionSenderAdapter,
     build_agent_app_uia_semantic_action_request,
 )
@@ -49,6 +51,8 @@ class AgentAppRealNoLossCase:
     probe: dict
     uia_semantic_action_dry_run: dict = dataclasses.field(default_factory=dict)
     uia_semantic_action_send_report: dict = dataclasses.field(default_factory=dict)
+    uia_semantic_draft_dry_run: dict = dataclasses.field(default_factory=dict)
+    uia_semantic_draft_report: dict = dataclasses.field(default_factory=dict)
     app_bridge_dry_run: dict = dataclasses.field(default_factory=dict)
     app_bridge_send_report: dict = dataclasses.field(default_factory=dict)
     artifact_path: str = ""
@@ -105,12 +109,24 @@ class AgentAppRealNoLossCase:
         return _counter(self.uia_semantic_action_dry_run, "uia_value_set_attempts") + _counter(
             self.uia_semantic_action_send_report,
             "uia_value_set_attempts",
+        ) + _counter(
+            self.uia_semantic_draft_dry_run,
+            "uia_value_set_attempts",
+        ) + _counter(
+            self.uia_semantic_draft_report,
+            "uia_value_set_attempts",
         )
 
     @property
     def uia_invoke_attempts(self) -> int:
         return _counter(self.uia_semantic_action_dry_run, "uia_invoke_attempts") + _counter(
             self.uia_semantic_action_send_report,
+            "uia_invoke_attempts",
+        ) + _counter(
+            self.uia_semantic_draft_dry_run,
+            "uia_invoke_attempts",
+        ) + _counter(
+            self.uia_semantic_draft_report,
             "uia_invoke_attempts",
         )
 
@@ -125,6 +141,20 @@ class AgentAppRealNoLossCase:
             == "uia_semantic_action_send_accepted"
             and _counter(self.uia_semantic_action_send_report, "control_attempts") == 0
             and _counter(self.uia_semantic_action_send_report, "window_input_attempts") == 0
+        )
+
+    @property
+    def uia_semantic_draft_ready(self) -> bool:
+        return bool(self.uia_semantic_draft_dry_run.get("ok", False))
+
+    @property
+    def uia_semantic_draft_verified(self) -> bool:
+        return bool(
+            str(self.uia_semantic_draft_report.get("decision", "") or "")
+            == "uia_semantic_action_draft_verified"
+            and _counter(self.uia_semantic_draft_report, "control_attempts") == 0
+            and _counter(self.uia_semantic_draft_report, "window_input_attempts") == 0
+            and _counter(self.uia_semantic_draft_report, "uia_invoke_attempts") == 0
         )
 
     @property
@@ -166,6 +196,10 @@ class AgentAppRealNoLossCase:
             "uia_semantic_action_dry_run": dict(self.uia_semantic_action_dry_run),
             "uia_semantic_action_send_verified": self.uia_semantic_action_send_verified,
             "uia_semantic_action_send_report": dict(self.uia_semantic_action_send_report),
+            "uia_semantic_draft_ready": self.uia_semantic_draft_ready,
+            "uia_semantic_draft_dry_run": dict(self.uia_semantic_draft_dry_run),
+            "uia_semantic_draft_verified": self.uia_semantic_draft_verified,
+            "uia_semantic_draft_report": dict(self.uia_semantic_draft_report),
             "app_bridge_send_verified": self.app_bridge_send_verified,
             "app_bridge_dry_run": dict(self.app_bridge_dry_run),
             "app_bridge_send_report": dict(self.app_bridge_send_report),
@@ -259,6 +293,10 @@ class AgentAppRealNoLossReport:
         return sum(1 for case in self.cases if case.uia_semantic_action_send_verified)
 
     @property
+    def uia_semantic_draft_verified_cases(self) -> int:
+        return sum(1 for case in self.cases if case.uia_semantic_draft_verified)
+
+    @property
     def app_bridge_send_verified_cases(self) -> int:
         return sum(1 for case in self.cases if case.app_bridge_send_verified)
 
@@ -293,6 +331,7 @@ class AgentAppRealNoLossReport:
             "native_ready_cases": self.native_ready_cases,
             "uia_semantic_action_ready_cases": self.uia_semantic_action_ready_cases,
             "uia_semantic_action_send_verified_cases": self.uia_semantic_action_send_verified_cases,
+            "uia_semantic_draft_verified_cases": self.uia_semantic_draft_verified_cases,
             "app_bridge_send_verified_cases": self.app_bridge_send_verified_cases,
             "gated_cases": self.gated_cases,
             "real_verified_cases": self.real_verified_cases,
@@ -322,6 +361,11 @@ def run_agent_app_real_no_loss(
     uia_message: str = "OPENWUKONG_UIA_SEMANTIC_ACTION_REAL_NO_LOSS",
     uia_required_markers: tuple[str, ...] = (),
     uia_forbidden_markers: tuple[str, ...] = (),
+    allow_uia_semantic_draft: bool = False,
+    uia_draft_writer: object | None = None,
+    uia_draft_message: str = "OPENWUKONG_UIA_DRAFT_REAL_NO_LOSS",
+    cleanup_uia_draft: bool = True,
+    uia_draft_restore_value: str = "",
     allow_app_bridge_send: bool = False,
     app_bridge_sender: object | None = None,
     bridge_message: str = "OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
@@ -368,6 +412,11 @@ def run_agent_app_real_no_loss(
                     uia_message=uia_message,
                     uia_required_markers=tuple(uia_required_markers or ()),
                     uia_forbidden_markers=tuple(uia_forbidden_markers or ()),
+                    allow_uia_semantic_draft=allow_uia_semantic_draft,
+                    uia_draft_writer=uia_draft_writer,
+                    uia_draft_message=uia_draft_message,
+                    cleanup_uia_draft=cleanup_uia_draft,
+                    uia_draft_restore_value=uia_draft_restore_value,
                     allow_app_bridge_send=allow_app_bridge_send,
                     app_bridge_sender=app_bridge_sender,
                     bridge_message=bridge_message,
@@ -460,6 +509,26 @@ def main(
         help="Forbidden marker that fails UIA semantic action readback. Repeat for multiple markers.",
     )
     parser.add_argument(
+        "--allow-uia-semantic-draft",
+        action="store_true",
+        help="Allow a UIA ValuePattern draft write and cleanup without invoking submit.",
+    )
+    parser.add_argument(
+        "--uia-draft-message",
+        default="OPENWUKONG_UIA_DRAFT_REAL_NO_LOSS",
+        help="Message used for the optional UIA semantic draft writer.",
+    )
+    parser.add_argument(
+        "--keep-uia-draft",
+        action="store_true",
+        help="Leave the UIA draft in the target composer instead of restoring the configured value.",
+    )
+    parser.add_argument(
+        "--uia-draft-restore-value",
+        default="",
+        help="Value restored after the UIA draft write when cleanup is enabled.",
+    )
+    parser.add_argument(
         "--allow-app-bridge-send",
         action="store_true",
         help="Allow a native app bridge send when the dry-run contract is ready.",
@@ -506,6 +575,13 @@ def main(
         uia_message=args.uia_message,
         uia_required_markers=tuple(args.uia_acceptance_marker or ()),
         uia_forbidden_markers=tuple(args.uia_forbid_marker or ()),
+        allow_uia_semantic_draft=args.allow_uia_semantic_draft,
+        uia_draft_writer=(
+            _default_uia_semantic_draft_writer() if args.allow_uia_semantic_draft else None
+        ),
+        uia_draft_message=args.uia_draft_message,
+        cleanup_uia_draft=not args.keep_uia_draft,
+        uia_draft_restore_value=args.uia_draft_restore_value,
         allow_app_bridge_send=args.allow_app_bridge_send,
         app_bridge_sender=_default_app_bridge_sender() if args.allow_app_bridge_send else None,
         bridge_message=args.bridge_message,
@@ -539,6 +615,11 @@ def _case_from_probe(
     uia_message: str = "",
     uia_required_markers: tuple[str, ...] = (),
     uia_forbidden_markers: tuple[str, ...] = (),
+    allow_uia_semantic_draft: bool = False,
+    uia_draft_writer: object | None = None,
+    uia_draft_message: str = "",
+    cleanup_uia_draft: bool = True,
+    uia_draft_restore_value: str = "",
     allow_app_bridge_send: bool = False,
     app_bridge_sender: object | None = None,
     bridge_message: str = "",
@@ -571,11 +652,25 @@ def _case_from_probe(
         allow_uia_semantic_action=allow_uia_semantic_action,
         uia_semantic_sender=uia_semantic_sender,
     )
+    semantic_draft_dry_run, semantic_draft_report = _run_uia_semantic_draft_path(
+        agent=agent,
+        probe=probe,
+        message=uia_draft_message,
+        required_markers=(),
+        forbidden_markers=(),
+        allow_uia_semantic_draft=allow_uia_semantic_draft,
+        uia_draft_writer=uia_draft_writer,
+        cleanup_uia_draft=cleanup_uia_draft,
+        restore_value=uia_draft_restore_value,
+    )
     control_attempts = _counter(probe, "control_attempts") + _counter(
         app_bridge_send_report,
         "control_attempts",
     ) + _counter(
         semantic_action_send_report,
+        "control_attempts",
+    ) + _counter(
+        semantic_draft_report,
         "control_attempts",
     )
     window_input_attempts = _counter(probe, "window_input_attempts") + _counter(
@@ -586,6 +681,9 @@ def _case_from_probe(
         "window_input_attempts",
     ) + _counter(
         semantic_action_send_report,
+        "window_input_attempts",
+    ) + _counter(
+        semantic_draft_report,
         "window_input_attempts",
     )
     bridge_send_attempts = _counter(probe, "bridge_send_attempts") + _counter(
@@ -611,22 +709,52 @@ def _case_from_probe(
         and _counter(semantic_action_send_report, "control_attempts") == 0
         and _counter(semantic_action_send_report, "window_input_attempts") == 0
     )
+    uia_draft_verified = bool(
+        str(semantic_draft_report.get("decision", "") or "")
+        == "uia_semantic_action_draft_verified"
+        and _counter(semantic_draft_report, "control_attempts") == 0
+        and _counter(semantic_draft_report, "window_input_attempts") == 0
+        and _counter(semantic_draft_report, "uia_invoke_attempts") == 0
+    )
+    uia_draft_decision = str(semantic_draft_report.get("decision", "") or "")
+    uia_draft_attempted = bool(
+        _counter(semantic_draft_report, "uia_value_set_attempts")
+        or _counter(semantic_draft_report, "cleanup_value_set_attempts")
+    )
     uia_value_attempts = _counter(semantic_action_dry_run, "uia_value_set_attempts") + _counter(
         semantic_action_send_report,
+        "uia_value_set_attempts",
+    ) + _counter(
+        semantic_draft_dry_run,
+        "uia_value_set_attempts",
+    ) + _counter(
+        semantic_draft_report,
         "uia_value_set_attempts",
     )
     uia_invoke_attempts = _counter(semantic_action_dry_run, "uia_invoke_attempts") + _counter(
         semantic_action_send_report,
         "uia_invoke_attempts",
+    ) + _counter(
+        semantic_draft_dry_run,
+        "uia_invoke_attempts",
+    ) + _counter(
+        semantic_draft_report,
+        "uia_invoke_attempts",
     )
-    if uia_value_attempts and not uia_send_verified:
+    if uia_value_attempts and not (uia_send_verified or uia_draft_verified):
         errors.append("uia_value_set_attempts_nonzero")
     if uia_invoke_attempts and not uia_send_verified:
         errors.append("uia_invoke_attempts_nonzero")
+    if uia_draft_attempted and not uia_draft_verified:
+        errors.append("uia_semantic_draft_not_verified")
     if bridge_send_verified:
         status = "app_bridge_send_accepted"
     elif uia_send_verified:
         status = "uia_semantic_action_send_accepted"
+    elif uia_draft_verified:
+        status = "uia_semantic_action_draft_verified"
+    elif uia_draft_decision.startswith("uia_semantic_action_draft_"):
+        status = uia_draft_decision
     elif decision == "agent_native_connector_ready":
         status = "native_connector_ready"
     elif matched_window_count > 0 or target_matched:
@@ -645,6 +773,8 @@ def _case_from_probe(
         probe=probe,
         uia_semantic_action_dry_run=semantic_action_dry_run,
         uia_semantic_action_send_report=semantic_action_send_report,
+        uia_semantic_draft_dry_run=semantic_draft_dry_run,
+        uia_semantic_draft_report=semantic_draft_report,
         app_bridge_dry_run=app_bridge_dry_run,
         app_bridge_send_report=app_bridge_send_report,
         errors=tuple(errors),
@@ -772,8 +902,72 @@ def _run_uia_semantic_action_path(
         }
 
 
+def _run_uia_semantic_draft_path(
+    *,
+    agent: str,
+    probe: dict,
+    message: str,
+    required_markers: tuple[str, ...],
+    forbidden_markers: tuple[str, ...],
+    allow_uia_semantic_draft: bool,
+    uia_draft_writer: object | None,
+    cleanup_uia_draft: bool,
+    restore_value: str,
+) -> tuple[dict, dict]:
+    request = _build_uia_semantic_action_request(
+        agent,
+        probe,
+        message=message,
+        required_markers=required_markers,
+        forbidden_markers=forbidden_markers,
+    )
+    dry_run = AgentAppUiaSemanticDraftDryRunAdapter().prepare(request).to_dict()
+    if not allow_uia_semantic_draft or not bool(dry_run.get("ok", False)):
+        return dry_run, {}
+    writer = uia_draft_writer or _default_uia_semantic_draft_writer()
+    try:
+        draft = getattr(writer, "draft", None)
+        if callable(draft):
+            return dry_run, _report_to_dict(
+                draft(request, cleanup=cleanup_uia_draft, restore_value=restore_value)
+            )
+        if callable(writer):
+            return dry_run, _report_to_dict(
+                writer(request, cleanup=cleanup_uia_draft, restore_value=restore_value)
+            )
+        return dry_run, {
+            "mode": "agent-app-uia-semantic-action-draft",
+            "safety_mode": "uia_semantic_draft",
+            "ok": False,
+            "decision": "uia_semantic_draft_writer_not_callable",
+            "control_attempts": 0,
+            "window_input_attempts": 0,
+            "uia_value_set_attempts": 0,
+            "uia_invoke_attempts": 0,
+            "cleanup_value_set_attempts": 0,
+        }
+    except Exception as exc:
+        return dry_run, {
+            "mode": "agent-app-uia-semantic-action-draft",
+            "safety_mode": "uia_semantic_draft",
+            "ok": False,
+            "decision": "uia_semantic_action_draft_failed",
+            "control_attempts": 0,
+            "window_input_attempts": 0,
+            "uia_value_set_attempts": 0,
+            "uia_invoke_attempts": 0,
+            "cleanup_value_set_attempts": 0,
+            "error": str(exc) or exc.__class__.__name__,
+            "request": request.to_dict(),
+        }
+
+
 def _default_uia_semantic_sender() -> AgentAppUiaSemanticActionSenderAdapter:
     return AgentAppUiaSemanticActionSenderAdapter()
+
+
+def _default_uia_semantic_draft_writer() -> AgentAppUiaSemanticDraftWriterAdapter:
+    return AgentAppUiaSemanticDraftWriterAdapter()
 
 
 def _build_uia_semantic_action_dry_run(agent: str, probe: dict, *, message: str) -> dict:

@@ -484,6 +484,188 @@ class AgentAppRealNoLossTests(unittest.TestCase):
             "uia_semantic_action_send_accepted",
         )
 
+    def test_allow_uia_semantic_draft_writes_and_cleans_without_invoking_submit(self):
+        writer_calls = []
+
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=False,
+                decision="agent_native_connector_not_exposed",
+                agent=kwargs["agent"],
+                agent_id="cursor",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                window_input_attempts=0,
+                endpoint_count=0,
+                ready_endpoint_count=0,
+                app_uia_probe={
+                    "decision": "agent_app_uia_ready",
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "semantic_composer_count": 1,
+                    "submit_candidate_count": 0,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "matched_windows": [
+                        {
+                            "process_name": "Cursor.exe",
+                            "pid": 99496,
+                            "window_title": "config - PaoPaoHeZi - Cursor",
+                            "hwnd": 70038,
+                        }
+                    ],
+                    "composer_candidates": [
+                        {
+                            "control_type": "Edit",
+                            "class_name": "aislash-editor-input",
+                            "is_enabled": True,
+                            "visible": True,
+                            "patterns": ["Value"],
+                            "semantic_composer": True,
+                            "rect": [1687, 230, 2481, 291],
+                        }
+                    ],
+                    "submit_candidates": [],
+                },
+            )
+
+        def fake_draft_writer(request, *, cleanup=True, restore_value=""):
+            writer_calls.append((request, cleanup, restore_value))
+            return {
+                "mode": "agent-app-uia-semantic-action-draft",
+                "safety_mode": "uia_semantic_draft",
+                "ok": True,
+                "decision": "uia_semantic_action_draft_verified",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "uia_value_set_attempts": 1,
+                "uia_invoke_attempts": 0,
+                "cleanup_value_set_attempts": 1,
+                "cleanup_verified": True,
+                "foreground_focus_stable": True,
+                "request": request.to_dict(),
+                "operation_result": {
+                    "composer_found": True,
+                    "value_set": True,
+                    "draft_value": request.message,
+                    "cleanup_attempted": True,
+                    "cleanup_value_set": True,
+                    "post_cleanup_value": restore_value,
+                    "readbackText": request.message,
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = run_agent_app_real_no_loss(
+                agents=("cursor",),
+                project_name="PaoPaoHeZi",
+                output_root=root,
+                probe_runner=fake_probe_runner,
+                allow_uia_semantic_draft=True,
+                uia_draft_writer=fake_draft_writer,
+                uia_draft_message="OPENWUKONG_UIA_DRAFT_PROBE",
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+            artifact = json.loads(Path(case["artifact_path"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(len(writer_calls), 1)
+        self.assertEqual(data["uia_semantic_draft_verified_cases"], 1)
+        self.assertEqual(data["uia_value_set_attempts"], 1)
+        self.assertEqual(data["uia_invoke_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(case["status"], "uia_semantic_action_draft_verified")
+        self.assertTrue(case["uia_semantic_draft_verified"])
+        self.assertTrue(case["passed"])
+        self.assertEqual(
+            case["uia_semantic_draft_report"]["request"]["payload"]["message"],
+            "OPENWUKONG_UIA_DRAFT_PROBE",
+        )
+        self.assertEqual(
+            artifact["uia_semantic_draft_report"]["decision"],
+            "uia_semantic_action_draft_verified",
+        )
+
+    def test_failed_uia_semantic_draft_surfaces_provider_failure_status(self):
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=False,
+                decision="agent_native_connector_not_exposed",
+                agent=kwargs["agent"],
+                agent_id="cursor",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                window_input_attempts=0,
+                endpoint_count=0,
+                ready_endpoint_count=0,
+                app_uia_probe={
+                    "decision": "agent_app_uia_ready",
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "semantic_composer_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "matched_windows": [
+                        {
+                            "process_name": "Cursor.exe",
+                            "pid": 99496,
+                            "window_title": "config - PaoPaoHeZi - Cursor",
+                            "hwnd": 70038,
+                        }
+                    ],
+                    "composer_candidates": [
+                        {
+                            "control_type": "Edit",
+                            "class_name": "aislash-editor-input",
+                            "is_enabled": True,
+                            "visible": True,
+                            "patterns": ["Value"],
+                            "semantic_composer": True,
+                            "rect": [1687, 230, 2481, 291],
+                        }
+                    ],
+                },
+            )
+
+        def failing_draft_writer(request, *, cleanup=True, restore_value=""):
+            del request, cleanup, restore_value
+            return {
+                "mode": "agent-app-uia-semantic-action-draft",
+                "safety_mode": "uia_semantic_draft",
+                "ok": False,
+                "decision": "uia_semantic_action_draft_foreground_changed",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "uia_value_set_attempts": 1,
+                "uia_invoke_attempts": 0,
+                "cleanup_value_set_attempts": 1,
+                "cleanup_verified": False,
+                "foreground_focus_stable": False,
+            }
+
+        report = run_agent_app_real_no_loss(
+            agents=("cursor",),
+            project_name="PaoPaoHeZi",
+            probe_runner=fake_probe_runner,
+            allow_uia_semantic_draft=True,
+            uia_draft_writer=failing_draft_writer,
+            uia_draft_message="OPENWUKONG_UIA_DRAFT_PROBE",
+        )
+        data = report.to_dict()
+        case = data["cases"][0]
+
+        self.assertEqual(case["status"], "uia_semantic_action_draft_foreground_changed")
+        self.assertFalse(case["passed"])
+        self.assertEqual(data["uia_semantic_draft_verified_cases"], 0)
+        self.assertIn("uia_semantic_draft_not_verified", case["errors"])
+
     def test_uia_semantic_sender_is_not_called_without_explicit_allow_flag(self):
         sender_calls = []
 

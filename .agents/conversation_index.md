@@ -5294,3 +5294,68 @@ When a new conversation starts in this repo:
     - next high-value step is a controlled target-prep/no-send flow or a real
       native/extension bridge so one app surface exposes a ready target and can
       flip from gated to verified without foreground takeover
+- 2026-05-29 added a UIA draft-only app-surface path and captured Cursor
+  provider negative evidence:
+  - implementation:
+    - `agent_app_uia_action` now ranks UIA composer candidates before action:
+      Cursor/agent chat composers such as `aislash-editor-input` are preferred,
+      while Monaco editor inputs, filter boxes, problem filters, search/find
+      fields, and tiny editor accessibility shims are rejected
+    - send contracts now require a positive send/submit Invoke candidate and
+      reject unrelated Invoke controls such as menu `Go`, branch buttons, and
+      project action buttons
+    - added `AgentAppUiaSemanticDraftDryRunAdapter` and
+      `AgentAppUiaSemanticDraftWriterAdapter`
+    - draft-only execution uses UIA `ValuePattern.SetValue` for the selected
+      composer, never invokes submit, records cleanup attempts separately, and
+      rejects foreground HWND changes
+    - `agent_app_real_no_loss` now exposes explicit
+      `allow_uia_semantic_draft` / `--allow-uia-semantic-draft` gates and
+      reports `uia_semantic_draft_verified_cases`
+    - failed draft attempts now surface provider-specific decisions such as
+      `uia_semantic_action_draft_foreground_changed` instead of being collapsed
+      into generic gated status
+  - official-doc basis:
+    - Microsoft UI Automation control patterns and `ValuePattern.SetValue`
+      docs were checked before extending the provider-semantic write path
+    - draft-only deliberately does not use `InvokePattern.Invoke`
+  - safe/real validation:
+    - read-only Cursor project probe:
+      `logs\runtime\agent-app-real-no-loss-r9-cursor-project-probe\report.json`
+      showed `PaoPaoHeZi` target visible, background screenshots stable, and a
+      selectable `aislash-editor-input` composer
+    - real draft-only command:
+      `python -m openwukong.evaluation.agent_app_real_no_loss --agent cursor --project-name PaoPaoHeZi --output-root logs\runtime\agent-app-real-no-loss-r10-cursor-uia-draft --screenshot-dir logs\runtime\agent-app-real-no-loss-r10-cursor-uia-draft\screenshots --output logs\runtime\agent-app-real-no-loss-r10-cursor-uia-draft\report.json --allow-uia-semantic-draft --uia-draft-message OPENWUKONG_UIA_DRAFT_PROBE_R10 --json`
+    - real result before the status-classification follow-up:
+      `passed_cases=0/1`, `uia_value_set_attempts=1`,
+      `uia_invoke_attempts=0`, `window_input_attempts=0`,
+      `background_screenshot_success_count=3/3`,
+      `background_screenshot_focus_stable=true`
+    - provider negative evidence:
+      Cursor exposed a ValuePattern candidate, but `SetValue` did not change
+      the draft value (`draft_value` stayed newline), cleanup could not verify,
+      and foreground HWND changed from `467268` to `70038`
+    - read-only post-change command:
+      `python -m openwukong.evaluation.agent_app_real_no_loss --agent cursor --project-name PaoPaoHeZi --output-root logs\runtime\agent-app-real-no-loss-r11-cursor-readonly-after-draft --screenshot-dir logs\runtime\agent-app-real-no-loss-r11-cursor-readonly-after-draft\screenshots --output logs\runtime\agent-app-real-no-loss-r11-cursor-readonly-after-draft\report.json --json`
+    - read-only post-change result:
+      `passed_cases=1/1`, `control_attempts=0`,
+      `window_input_attempts=0`, `uia_value_set_attempts=0`,
+      `uia_invoke_attempts=0`, `uia_semantic_draft_ready=true`,
+      `uia_semantic_action_ready=false`,
+      `background_screenshot_success_count=3/3`,
+      `background_screenshot_focus_stable=true`
+  - verification:
+    - `python -m unittest tests.test_agent_app_uia_action_contract tests.test_agent_app_real_no_loss tests.test_major_real_no_loss`: OK
+    - `python -m unittest discover tests`: `448 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - UIA structure is useful for precise detection and gating, but Cursor's
+      current provider is not a background-safe write transport even when it
+      exposes ValuePattern
+    - this is strong evidence that app-surface background writing for
+      Electron/IDE agents should move to native/extension bridge rather than
+      relying on UIA `SetValue`
+    - next concrete action: implement one native/extension bridge for Cursor or
+      Codex app-surface chat, then re-run the same no-loss runner expecting
+      native bridge verification without provider focus changes

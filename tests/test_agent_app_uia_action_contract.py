@@ -2,7 +2,9 @@ import unittest
 
 from openwukong.control.agent_app_uia_action import (
     AgentAppUiaSemanticActionDryRunAdapter,
+    AgentAppUiaSemanticDraftWriterAdapter,
     AgentAppUiaSemanticActionSenderAdapter,
+    AgentAppUiaSemanticDraftDryRunAdapter,
     build_agent_app_uia_semantic_action_request,
 )
 
@@ -59,6 +61,35 @@ class AgentAppUiaActionContractTests(unittest.TestCase):
         self.assertEqual(data["decision"], "uia_semantic_action_invoke_pattern_not_ready")
         self.assertEqual(data["control_attempts"], 0)
         self.assertFalse(data["request"]["uia_invoke_pattern_ready"])
+
+    def test_cursor_candidates_select_agent_chat_composer_and_reject_non_send_invoke(self):
+        request = build_agent_app_uia_semantic_action_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="PaoPaoHeZi",
+            task_name="",
+            message="OPENWUKONG_UIA_DRAFT_PROBE",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=_cursor_probe_with_editor_filter_and_chat_candidates(),
+        )
+
+        send_dry_run = AgentAppUiaSemanticActionDryRunAdapter().prepare(request).to_dict()
+        draft_dry_run = AgentAppUiaSemanticDraftDryRunAdapter().prepare(request).to_dict()
+
+        self.assertEqual(
+            send_dry_run["decision"],
+            "uia_semantic_action_invoke_pattern_not_ready",
+        )
+        self.assertFalse(send_dry_run["request"]["uia_invoke_pattern_ready"])
+        self.assertTrue(draft_dry_run["ok"])
+        self.assertEqual(
+            draft_dry_run["decision"],
+            "uia_semantic_action_draft_dry_run_ready",
+        )
+        self.assertEqual(
+            draft_dry_run["request"]["composer"]["class_name"],
+            "aislash-editor-input",
+        )
 
     def test_target_visible_without_value_pattern_reports_value_pattern_not_ready(self):
         probe = _ready_uia_probe()
@@ -205,6 +236,50 @@ class AgentAppUiaActionContractTests(unittest.TestCase):
         self.assertFalse(data["foreground_focus_stable"])
         self.assertEqual(data["window_input_attempts"], 0)
 
+    def test_draft_writer_sets_value_cleans_up_and_never_invokes_submit(self):
+        operator_calls = []
+
+        class FakeOperator:
+            def draft(self, request, *, cleanup, restore_value):
+                operator_calls.append((request, cleanup, restore_value))
+                return {
+                    "composer_found": True,
+                    "original_value": restore_value,
+                    "value_set_attempted": True,
+                    "value_set": True,
+                    "draft_value": request.message,
+                    "cleanup_attempted": True,
+                    "cleanup_value_set": True,
+                    "post_cleanup_value": restore_value,
+                    "readbackText": request.message,
+                }
+
+        request = build_agent_app_uia_semantic_action_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="PaoPaoHeZi",
+            task_name="",
+            message="OPENWUKONG_UIA_DRAFT_PROBE",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=_cursor_probe_with_editor_filter_and_chat_candidates(),
+        )
+
+        report = AgentAppUiaSemanticDraftWriterAdapter(
+            operator=FakeOperator(),
+            foreground_hwnd_provider=lambda: 500,
+        ).draft(request, cleanup=True, restore_value="")
+        data = report.to_dict()
+
+        self.assertEqual(len(operator_calls), 1)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "uia_semantic_action_draft_verified")
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(data["uia_value_set_attempts"], 1)
+        self.assertEqual(data["uia_invoke_attempts"], 0)
+        self.assertEqual(data["cleanup_value_set_attempts"], 1)
+        self.assertTrue(data["cleanup_verified"])
+        self.assertTrue(data["foreground_focus_stable"])
+
 
 def _ready_uia_probe():
     return {
@@ -245,6 +320,80 @@ def _ready_uia_probe():
                     "patterns": ["Invoke"],
                     "rect": [2390, 1155, 2440, 1233],
                 }
+            ],
+        },
+    }
+
+
+def _cursor_probe_with_editor_filter_and_chat_candidates():
+    return {
+        "mode": "agent-native-connector-probe",
+        "decision": "agent_native_connector_not_exposed",
+        "control_attempts": 0,
+        "app_uia_probe": {
+            "decision": "agent_app_uia_ready",
+            "target_matched": True,
+            "semantic_composer_count": 3,
+            "submit_candidate_count": 2,
+            "background_screenshot_focus_stable": True,
+            "matched_windows": [
+                {
+                    "process_name": "Cursor.exe",
+                    "pid": 99496,
+                    "window_title": "config - PaoPaoHeZi - Cursor",
+                    "hwnd": 70038,
+                }
+            ],
+            "composer_candidates": [
+                {
+                    "control_type": "Edit",
+                    "name": "The editor is not accessible at this time. To enable screen reader optimized mode, use Shift+Alt+F1",
+                    "class_name": "inputarea monaco-mouse-cursor-text",
+                    "is_enabled": True,
+                    "visible": True,
+                    "patterns": ["Text", "Value"],
+                    "semantic_composer": True,
+                    "rect": [799, 1362, 803, 1366],
+                },
+                {
+                    "control_type": "Edit",
+                    "name": "Filter Problems",
+                    "class_name": "input empty",
+                    "is_enabled": True,
+                    "visible": True,
+                    "patterns": ["Text", "Value"],
+                    "semantic_composer": True,
+                    "rect": [798, 1272, 1546, 1343],
+                },
+                {
+                    "control_type": "Edit",
+                    "name": "",
+                    "class_name": "aislash-editor-input",
+                    "value_preview": "\n",
+                    "is_enabled": True,
+                    "visible": True,
+                    "patterns": ["Text", "Value"],
+                    "semantic_composer": True,
+                    "rect": [1687, 230, 2481, 291],
+                },
+            ],
+            "submit_candidates": [
+                {
+                    "control_type": "Button",
+                    "name": "\u4ece\u6b64\u5904\u5f00\u59cb\u5206\u652f",
+                    "class_name": "border-token-border user-select-none no-drag cursor-interaction flex items-center gap-1 border white",
+                    "is_enabled": True,
+                    "visible": True,
+                    "patterns": ["Invoke"],
+                },
+                {
+                    "control_type": "MenuItem",
+                    "name": "Go",
+                    "class_name": "menubar-menu-button",
+                    "is_enabled": True,
+                    "visible": True,
+                    "patterns": ["Invoke"],
+                },
             ],
         },
     }
