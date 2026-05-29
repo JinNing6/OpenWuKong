@@ -17,6 +17,7 @@ from openwukong.evaluation.agent_app_uia_probe import (
     AgentAppUiaProbeReport,
     run_agent_app_uia_probe,
 )
+from openwukong.evaluation.ide_bridge_capture import capture_ide_bridge_capabilities
 
 
 class NativeConnectorHTTPProbe(Protocol):
@@ -68,13 +69,29 @@ class NativeConnectorEndpoint:
     debugger_url: str
     port: int
     source: str
+    endpoint_type: str = "devtools"
+    bridge_url: str = ""
     process: NativeProcessSnapshot | None = None
     version: dict | None = None
     targets: tuple[NativeConnectorTarget, ...] = ()
+    metadata: dict | None = None
+    commands: tuple[str, ...] = ()
+    chat_adapters: tuple[dict, ...] = ()
+    adapter_mapping: dict | None = None
+    preferred_chat_adapter: str = ""
+    send_command_id: str = ""
+    capability_ok: bool = False
     error: str = ""
 
     @property
     def ready(self) -> bool:
+        if self.endpoint_type == "ide_bridge":
+            return bool(
+                not self.error
+                and self.capability_ok
+                and self.bridge_url
+                and (self.preferred_chat_adapter or self.send_command_id)
+            )
         return bool(not self.error and self.version and any(target.ready for target in self.targets))
 
     @property
@@ -83,13 +100,23 @@ class NativeConnectorEndpoint:
 
     def to_dict(self) -> dict:
         return {
+            "endpoint_type": self.endpoint_type,
             "debugger_url": self.debugger_url,
+            "bridge_url": self.bridge_url,
             "port": int(self.port or 0),
             "source": self.source,
             "ready": self.ready,
             "target_count": self.target_count,
             "version": dict(self.version or {}),
             "targets": [target.to_dict() for target in self.targets],
+            "metadata": dict(self.metadata or {}),
+            "command_count": len(self.commands),
+            "commands": list(self.commands),
+            "chat_adapters": [dict(adapter) for adapter in self.chat_adapters],
+            "adapter_mapping": dict(self.adapter_mapping or {}),
+            "preferred_chat_adapter": self.preferred_chat_adapter,
+            "send_command_id": self.send_command_id,
+            "capability_ok": self.capability_ok,
             "process": self.process.to_dict() if self.process else {},
             "error": self.error,
         }
@@ -177,6 +204,9 @@ def run_agent_native_connector_probe(
     resolver: WindowsAppResolver | None = None,
     process_provider: Callable[[], Iterable[NativeProcessSnapshot]] | None = None,
     http_probe: NativeConnectorHTTPProbe | None = None,
+    ide_bridge_urls: Iterable[str] = (),
+    ide_bridge_probe: Callable[..., object] | None = None,
+    workspace_path: str = "",
     screenshot_dir: str | Path = "",
     window_capture_provider: object | None = None,
     max_windows: int = 80,
@@ -203,12 +233,19 @@ def run_agent_native_connector_probe(
         http_probe=http_probe or RequestsNativeConnectorHTTPProbe(),
         timeout=max(0.05, float(request_timeout)),
     )
+    ide_endpoints = _discover_ide_bridge_endpoints(
+        ide_bridge_urls,
+        ide_bridge_probe=ide_bridge_probe or capture_ide_bridge_capabilities,
+        timeout=max(0.05, float(request_timeout)),
+        workspace_path=str(workspace_path or ""),
+        agent_id=app_probe.surface_binding.agent_id,
+    )
     return AgentNativeConnectorProbeReport(
         agent=str(agent or "").strip(),
         project_name=str(project_name or "").strip(),
         task_name=str(task_name or "").strip(),
         app_uia_probe=app_probe,
-        endpoints=endpoints,
+        endpoints=tuple(endpoints) + tuple(ide_endpoints),
         process_count=len(processes),
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
@@ -259,8 +296,9 @@ def format_agent_native_connector_probe_report(report: AgentNativeConnectorProbe
         f"App UIA: {report.app_uia_probe.decision}",
     ]
     for endpoint in report.endpoints:
+        endpoint_url = endpoint.bridge_url if endpoint.endpoint_type == "ide_bridge" else endpoint.debugger_url
         lines.append(
-            f"- {endpoint.debugger_url} ready={str(endpoint.ready).lower()} "
+            f"- {endpoint_url} type={endpoint.endpoint_type} ready={str(endpoint.ready).lower()} "
             f"targets={endpoint.target_count} source={endpoint.source}"
         )
     return "\n".join(lines).rstrip()
@@ -273,6 +311,7 @@ def main(
     observer: object | None = None,
     process_provider: Callable[[], Iterable[NativeProcessSnapshot]] | None = None,
     http_probe: NativeConnectorHTTPProbe | None = None,
+    ide_bridge_probe: Callable[..., object] | None = None,
     window_capture_provider: object | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(
@@ -287,6 +326,17 @@ def main(
     parser.add_argument("--max-windows", type=int, default=80)
     parser.add_argument("--max-elements", type=int, default=1200)
     parser.add_argument("--request-timeout", type=float, default=0.2)
+    parser.add_argument(
+        "--ide-bridge-url",
+        action="append",
+        default=[],
+        help="Explicit IDE extension/native bridge URL to probe read-only. Repeat for multiple bridges.",
+    )
+    parser.add_argument(
+        "--workspace-path",
+        default="",
+        help="Optional workspace path included in IDE bridge capability probes.",
+    )
     args = parser.parse_args(argv)
 
     resolver = resolver_factory(args) if callable(resolver_factory) else WindowsAppResolver()
@@ -298,6 +348,9 @@ def main(
         resolver=resolver,
         process_provider=process_provider,
         http_probe=http_probe,
+        ide_bridge_urls=tuple(args.ide_bridge_url or ()),
+        ide_bridge_probe=ide_bridge_probe,
+        workspace_path=args.workspace_path,
         screenshot_dir=args.screenshot_dir,
         window_capture_provider=window_capture_provider,
         max_windows=args.max_windows,
@@ -370,6 +423,87 @@ def _discover_debugger_endpoints(
     return tuple(endpoints)
 
 
+def _discover_ide_bridge_endpoints(
+    bridge_urls: Iterable[str],
+    *,
+    ide_bridge_probe: Callable[..., object],
+    timeout: float,
+    workspace_path: str,
+    agent_id: str,
+) -> tuple[NativeConnectorEndpoint, ...]:
+    endpoints: list[NativeConnectorEndpoint] = []
+    seen: set[str] = set()
+    for raw_url in bridge_urls or ():
+        bridge_url = str(raw_url or "").strip().rstrip("/")
+        if not bridge_url or bridge_url in seen:
+            continue
+        seen.add(bridge_url)
+        endpoints.append(
+            _probe_ide_bridge_endpoint(
+                bridge_url,
+                ide_bridge_probe=ide_bridge_probe,
+                timeout=timeout,
+                workspace_path=workspace_path,
+                agent_id=agent_id,
+            )
+        )
+    return tuple(endpoints)
+
+
+def _probe_ide_bridge_endpoint(
+    bridge_url: str,
+    *,
+    ide_bridge_probe: Callable[..., object],
+    timeout: float,
+    workspace_path: str,
+    agent_id: str,
+) -> NativeConnectorEndpoint:
+    try:
+        raw_report = ide_bridge_probe(
+            bridge_url,
+            workspace_path=workspace_path,
+            request_timeout=timeout,
+        )
+        data = _report_to_dict(raw_report)
+        metadata = _dict_value(data.get("metadata"))
+        commands = tuple(_string_list(data.get("commands")))
+        chat_adapters = tuple(
+            dict(item) for item in data.get("chat_adapters", []) if isinstance(item, dict)
+        )
+        adapter_mapping = _dict_value(data.get("adapter_mapping"))
+        preferred_adapter = _preferred_chat_adapter(
+            adapter_mapping,
+            chat_adapters,
+            agent_id=agent_id,
+        )
+        send_command_id = _send_command_id(data, metadata)
+        ok = bool(data.get("ok", False))
+        return NativeConnectorEndpoint(
+            debugger_url=bridge_url,
+            bridge_url=bridge_url,
+            port=_port_from_url(bridge_url),
+            source="explicit-ide-bridge-url",
+            endpoint_type="ide_bridge",
+            metadata=metadata,
+            commands=commands,
+            chat_adapters=chat_adapters,
+            adapter_mapping=adapter_mapping,
+            preferred_chat_adapter=preferred_adapter,
+            send_command_id=send_command_id,
+            capability_ok=ok,
+            error="" if ok else str(data.get("error", "ide_bridge_capability_failed") or "ide_bridge_capability_failed"),
+        )
+    except Exception as exc:
+        return NativeConnectorEndpoint(
+            debugger_url=bridge_url,
+            bridge_url=bridge_url,
+            port=_port_from_url(bridge_url),
+            source="explicit-ide-bridge-url",
+            endpoint_type="ide_bridge",
+            error=str(exc) or exc.__class__.__name__,
+        )
+
+
 def _probe_debugger_endpoint(
     port: int,
     *,
@@ -417,6 +551,76 @@ def _target_from_dict(data: dict) -> NativeConnectorTarget:
         url=str(data.get("url", "") or ""),
         web_socket_debugger_url=str(data.get("webSocketDebuggerUrl", "") or ""),
     )
+
+
+def _preferred_chat_adapter(
+    adapter_mapping: dict,
+    chat_adapters: tuple[dict, ...],
+    *,
+    agent_id: str,
+) -> str:
+    normalized_agent = lower_text(agent_id)
+    if normalized_agent:
+        mapped = adapter_mapping.get(normalized_agent)
+        if isinstance(mapped, dict) and bool(mapped.get("available", False)):
+            command_id = str(mapped.get("commandId", "") or mapped.get("command_id", "") or "").strip()
+            if command_id:
+                return normalized_agent
+    for adapter in chat_adapters:
+        adapter_id = str(adapter.get("adapter_id", "") or "").strip()
+        command_id = str(adapter.get("command_id", "") or adapter.get("commandId", "") or "").strip()
+        if adapter_id and command_id and bool(adapter.get("available", False)):
+            return adapter_id
+    for adapter_id, mapped in adapter_mapping.items():
+        if not isinstance(mapped, dict):
+            continue
+        command_id = str(mapped.get("commandId", "") or mapped.get("command_id", "") or "").strip()
+        if adapter_id and command_id and bool(mapped.get("available", False)):
+            return str(adapter_id)
+    return ""
+
+
+def _send_command_id(data: dict, metadata: dict) -> str:
+    for source in (data, metadata):
+        value = str(
+            source.get("send_command_id", "")
+            or source.get("sendCommandId", "")
+            or source.get("send_command", "")
+            or source.get("sendCommand", "")
+            or ""
+        ).strip()
+        if value:
+            return value
+    return ""
+
+
+def _dict_value(value: object) -> dict:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item or "").strip()]
+
+
+def _report_to_dict(value: object) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        data = to_dict()
+        if isinstance(data, dict):
+            return dict(data)
+    return {}
+
+
+def _port_from_url(url: str) -> int:
+    match = re.search(r":(\d+)(?:/|$)", str(url or ""))
+    if not match:
+        return 0
+    port = int(match.group(1))
+    return port if 0 < port <= 65535 else 0
 
 
 def _extract_remote_debugging_ports(command_line: str) -> tuple[int, ...]:

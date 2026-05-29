@@ -36,6 +36,14 @@ class _FakeHTTPProbe:
         return self.responses[url]
 
 
+class _FakeIDEBridgeReport:
+    def __init__(self, **payload):
+        self.payload = dict(payload)
+
+    def to_dict(self):
+        return dict(self.payload)
+
+
 class AgentNativeConnectorProbeTests(unittest.TestCase):
     def test_reports_ready_when_remote_debugging_endpoint_is_reachable(self):
         observer = _observer_with_codex_target()
@@ -86,6 +94,65 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(data["ready_endpoint_count"], 1)
         self.assertEqual(data["endpoints"][0]["debugger_url"], "http://127.0.0.1:9333")
         self.assertEqual(data["endpoints"][0]["target_count"], 1)
+
+    def test_reports_ready_ide_bridge_endpoint_from_explicit_bridge_url(self):
+        bridge_calls = []
+
+        def fake_ide_bridge_probe(bridge_url, **kwargs):
+            bridge_calls.append((bridge_url, dict(kwargs)))
+            return _FakeIDEBridgeReport(
+                mode="ide-bridge-capability-capture",
+                safety_mode="read_only",
+                ok=True,
+                control_attempts=0,
+                bridge_url=bridge_url,
+                metadata={"ide_name": "Cursor", "workspaceFolders": []},
+                command_count=2,
+                commands=["cursor.chat.submit", "workbench.action.files.save"],
+                chat_adapters=[
+                    {
+                        "adapter_id": "cursor",
+                        "label": "Cursor Chat",
+                        "command_id": "cursor.chat.submit",
+                        "available": True,
+                        "available_candidates": ["cursor.chat.submit"],
+                    }
+                ],
+                adapter_mapping={
+                    "cursor": {
+                        "label": "Cursor Chat",
+                        "commandId": "cursor.chat.submit",
+                        "available": True,
+                        "availableCandidates": ["cursor.chat.submit"],
+                        "commandCandidates": ["cursor.chat.submit"],
+                    }
+                },
+            )
+
+        report = run_agent_native_connector_probe(
+            agent="cursor",
+            project_name="PaoPaoHeZi",
+            task_name="desktop-message",
+            observer=_observer_with_cursor_target(),
+            resolver=_resolver_with_cursor_desktop(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            ide_bridge_urls=("http://127.0.0.1:8787",),
+            ide_bridge_probe=fake_ide_bridge_probe,
+        )
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "agent_native_connector_ready")
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["endpoint_count"], 1)
+        self.assertEqual(data["ready_endpoint_count"], 1)
+        self.assertEqual(data["endpoints"][0]["endpoint_type"], "ide_bridge")
+        self.assertEqual(data["endpoints"][0]["bridge_url"], "http://127.0.0.1:8787")
+        self.assertEqual(data["endpoints"][0]["preferred_chat_adapter"], "cursor")
+        self.assertEqual(data["endpoints"][0]["adapter_mapping"]["cursor"]["commandId"], "cursor.chat.submit")
+        self.assertEqual(bridge_calls[0][0], "http://127.0.0.1:8787")
+        self.assertEqual(bridge_calls[0][1]["workspace_path"], "")
 
     def test_target_visible_but_no_debug_port_reports_native_connector_not_exposed(self):
         report = run_agent_native_connector_probe(
@@ -196,6 +263,65 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(data["mode"], "agent-native-connector-probe")
         self.assertEqual(data["decision"], "agent_native_connector_not_exposed")
 
+    def test_main_accepts_explicit_ide_bridge_url_without_control_attempts(self):
+        bridge_calls = []
+
+        def fake_ide_bridge_probe(bridge_url, **kwargs):
+            bridge_calls.append((bridge_url, dict(kwargs)))
+            return _FakeIDEBridgeReport(
+                ok=True,
+                control_attempts=0,
+                bridge_url=bridge_url,
+                metadata={"ide_name": "Cursor"},
+                commands=[],
+                chat_adapters=[
+                    {
+                        "adapter_id": "cursor",
+                        "command_id": "cursor.chat.submit",
+                        "available": True,
+                    }
+                ],
+                adapter_mapping={
+                    "cursor": {
+                        "label": "Cursor",
+                        "commandId": "cursor.chat.submit",
+                        "available": True,
+                    }
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "native-probe.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = main(
+                    [
+                        "--agent",
+                        "cursor",
+                        "--project-name",
+                        "PaoPaoHeZi",
+                        "--task-name",
+                        "desktop-message",
+                        "--ide-bridge-url",
+                        "http://127.0.0.1:8787",
+                        "--output",
+                        str(output),
+                        "--json",
+                    ],
+                    resolver_factory=lambda args: _resolver_with_cursor_desktop(),
+                    observer=_observer_with_cursor_target(),
+                    process_provider=lambda: (),
+                    http_probe=_FakeHTTPProbe(),
+                    ide_bridge_probe=fake_ide_bridge_probe,
+                )
+            data = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(code, 0)
+        self.assertEqual(data["decision"], "agent_native_connector_ready")
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["endpoints"][0]["endpoint_type"], "ide_bridge")
+        self.assertEqual(bridge_calls[0][0], "http://127.0.0.1:8787")
+
     def test_main_writes_screenshot_metadata_when_requested(self):
         capture = _FakeBackgroundCaptureProvider()
         with tempfile.TemporaryDirectory() as td:
@@ -256,6 +382,40 @@ def _observer_with_codex_target(*, hwnd=0):
     )
 
 
+def _observer_with_cursor_target(*, hwnd=70038):
+    return StaticAccessibilityObserver(
+        [
+            AccessibilityWindowSnapshot(
+                pid=99496,
+                process_name="Cursor.exe",
+                window_title="config - PaoPaoHeZi - Cursor",
+                hwnd=int(hwnd or 0),
+                elements=(
+                    AccessibilityElementSnapshot(
+                        control_type="ListItem",
+                        name="PaoPaoHeZi",
+                        rect=(10, 20, 300, 90),
+                        patterns=("Selection",),
+                    ),
+                    AccessibilityElementSnapshot(
+                        control_type="ListItem",
+                        name="desktop-message",
+                        rect=(10, 100, 300, 160),
+                        patterns=("Selection",),
+                    ),
+                    AccessibilityElementSnapshot(
+                        control_type="Edit",
+                        class_name="aislash-editor-input",
+                        name="Plan, Build, / for commands, @ for context",
+                        rect=(1290, 164, 1927, 506),
+                        patterns=("Value",),
+                    ),
+                ),
+            )
+        ]
+    )
+
+
 def _resolver_with_codex_desktop():
     return WindowsAppResolver(
         candidate_providers=(
@@ -268,6 +428,25 @@ def _resolver_with_codex_desktop():
                         executable_name="Codex.exe",
                         path="C:/Program Files/WindowsApps/OpenAI.Codex/app/Codex.exe",
                         pid=42,
+                    ),
+                ]
+            ),
+        )
+    )
+
+
+def _resolver_with_cursor_desktop():
+    return WindowsAppResolver(
+        candidate_providers=(
+            StaticAppCandidateProvider(
+                [
+                    AppResolutionCandidate(
+                        source="running-process",
+                        display_name="Cursor",
+                        process_name="Cursor.exe",
+                        executable_name="Cursor.exe",
+                        path="C:/Users/me/AppData/Local/Programs/cursor/Cursor.exe",
+                        pid=99496,
                     ),
                 ]
             ),

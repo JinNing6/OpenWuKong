@@ -5359,3 +5359,68 @@ When a new conversation starts in this repo:
     - next concrete action: implement one native/extension bridge for Cursor or
       Codex app-surface chat, then re-run the same no-loss runner expecting
       native bridge verification without provider focus changes
+- 2026-05-29 connected explicit IDE extension bridge endpoints into the
+  unified agent app no-loss path:
+  - implementation:
+    - `agent_native_connector_probe` now accepts explicit
+      `ide_bridge_urls` / `--ide-bridge-url` values and probes each one through
+      the read-only `/v1/ide/capabilities` contract
+    - discovered IDE bridge endpoints are represented beside CDP endpoints with
+      `endpoint_type=ide_bridge`, `bridge_url`, `metadata`, `commands`,
+      `chat_adapters`, `adapter_mapping`, `preferred_chat_adapter`, and
+      `capability_ok`
+    - `AgentAppBridgeNativeAdapter` now routes app bridge sends by endpoint
+      type:
+      `ide_bridge` goes through `IDEExtensionBridgeClient.send_chat`, while
+      existing DevTools/CDP endpoints keep the prior DOM/CDP path
+    - IDE bridge sends report the same no-loss counters as CDP sends:
+      `bridge_send_attempts`, `native_call_attempts`, `control_attempts=0`,
+      and `window_input_attempts=0`
+    - the app bridge dry-run contract can now be ready for an IDE native bridge
+      even when UIA composer semantics are not the write transport
+    - multi-window agent targeting now prefers the matched window whose title
+      contains the requested project/task, preventing a generic Cursor/Codex
+      window from becoming the bridge request target when another project
+      window is also open
+    - `agent_app_real_no_loss` and `major_real_no_loss` now forward
+      `ide_bridge_urls` and `workspace_path`, so the same unified acceptance
+      command can verify extension/native app chat once the bridge is running
+  - official-doc basis:
+    - VS Code official extension command docs were checked for
+      `vscode.commands.executeCommand`
+    - VS Code activation event docs were checked for extension startup and
+      command activation behavior
+    - VS Code command-line docs were checked for isolated extension-host
+      options such as `--user-data-dir` and `--extensions-dir`
+  - safe/real validation:
+    - read-only Cursor project command:
+      `python -m openwukong.evaluation.agent_app_real_no_loss --agent cursor --project-name PaoPaoHeZi --output-root logs\runtime\agent-app-real-no-loss-r13-ide-bridge-project --screenshot-dir logs\runtime\agent-app-real-no-loss-r13-ide-bridge-project\screenshots --output logs\runtime\agent-app-real-no-loss-r13-ide-bridge-project\report.json --ide-bridge-url http://127.0.0.1:8787 --workspace-path E:\ideaProjects\agent\openwukong`
+    - result:
+      `passed_cases=1/1`, `failed_cases=0`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `background_screenshot_success_count=3/3`,
+      `background_screenshot_focus_stable=true`
+    - project targeting evidence:
+      app bridge dry-run target selected
+      `config - PaoPaoHeZi - Cursor` instead of the unrelated
+      `start.md - trustusb-2 ... - Cursor` window
+    - bridge state:
+      endpoint `http://127.0.0.1:8787` was recorded as
+      `endpoint_type=ide_bridge`, but `ready=false` because no bridge server
+      was listening on that port
+  - verification:
+    - red/green targeted TDD:
+      `python -m unittest tests.test_agent_native_connector_probe tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_major_real_no_loss`: OK
+    - full suite:
+      `python -m unittest discover tests`: `453 tests OK`
+    - `python -m compileall -q src tests`: OK
+    - `git diff --check`: OK, only CRLF warnings
+  - current conclusion:
+    - the unified no-loss path now understands IDE/native extension bridges and
+      can verify app-surface background chat when such a bridge is live
+    - the current machine still lacks a running Cursor bridge on 8787, so the
+      real run correctly stayed gated and made no send attempt
+    - next concrete action: start/install the OpenWukong IDE bridge in an
+      isolated or user-approved Cursor/VS Code extension host, configure a
+      real chat adapter command, and rerun the same no-loss command expecting
+      `cursor_background_chat` to flip from gated to verified

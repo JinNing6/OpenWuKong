@@ -269,6 +269,8 @@ class MajorRealNoLossTests(unittest.TestCase):
                 app_bridge_message="OPENWUKONG APP BRIDGE CHECK",
                 app_bridge_required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
                 app_bridge_forbidden_markers=("OPENWUKONG_ACCEPTANCE: FAIL",),
+                ide_bridge_urls=("http://127.0.0.1:8787",),
+                workspace_path="E:/ideaProjects/agent/openwukong",
                 primary_runner=_primary_runner,
                 agent_app_runner=_agent_app_runner,
                 agent_cli_runner=_agent_cli_runner,
@@ -285,6 +287,8 @@ class MajorRealNoLossTests(unittest.TestCase):
             app_calls[0]["forbidden_markers"],
             ("OPENWUKONG_ACCEPTANCE: FAIL",),
         )
+        self.assertEqual(app_calls[0]["ide_bridge_urls"], ("http://127.0.0.1:8787",))
+        self.assertEqual(app_calls[0]["workspace_path"], "E:/ideaProjects/agent/openwukong")
         self.assertEqual(data["bridge_send_attempts"], 1)
         requirements = {item["requirement_id"]: item for item in data["requirements"]}
         self.assertEqual(requirements["codex_app_background_chat"]["status"], "verified")

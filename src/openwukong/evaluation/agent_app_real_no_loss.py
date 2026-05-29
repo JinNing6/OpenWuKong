@@ -18,6 +18,7 @@ from typing import Callable, Iterable, Optional
 
 from openwukong.control.agent_app_bridge import (
     AgentAppBridgeCdpAdapter,
+    AgentAppBridgeNativeAdapter,
     AgentAppBridgeDryRunAdapter,
     build_agent_app_bridge_request,
 )
@@ -351,6 +352,9 @@ def run_agent_app_real_no_loss(
     probe_runner: ProbeRunner | None = None,
     process_provider: object | None = None,
     http_probe: object | None = None,
+    ide_bridge_urls: Iterable[str] = (),
+    ide_bridge_probe: object | None = None,
+    workspace_path: str = "",
     window_capture_provider: object | None = None,
     max_windows: int = 80,
     max_elements: int = 1200,
@@ -391,6 +395,9 @@ def run_agent_app_real_no_loss(
             resolver=resolver,
             process_provider=process_provider,
             http_probe=http_probe,
+            ide_bridge_urls=tuple(ide_bridge_urls or ()),
+            ide_bridge_probe=ide_bridge_probe,
+            workspace_path=workspace_path,
             screenshot_dir=str(agent_screenshot_dir) if agent_screenshot_dir else "",
             window_capture_provider=window_capture_provider,
             max_windows=max_windows,
@@ -461,6 +468,7 @@ def main(
     probe_runner: ProbeRunner | None = None,
     process_provider: object | None = None,
     http_probe: object | None = None,
+    ide_bridge_probe: object | None = None,
     window_capture_provider: object | None = None,
 ) -> int:
     parser = argparse.ArgumentParser(
@@ -481,6 +489,17 @@ def main(
     parser.add_argument("--max-windows", type=int, default=80)
     parser.add_argument("--max-elements", type=int, default=1200)
     parser.add_argument("--request-timeout", type=float, default=0.2)
+    parser.add_argument(
+        "--ide-bridge-url",
+        action="append",
+        default=[],
+        help="Explicit IDE extension/native bridge URL to probe read-only and use for app bridge sends when allowed.",
+    )
+    parser.add_argument(
+        "--workspace-path",
+        default="",
+        help="Optional workspace path included in IDE bridge capability probes.",
+    )
     parser.add_argument(
         "--semantic-action-message",
         default="OPENWUKONG_UIA_SEMANTIC_ACTION_DRY_RUN",
@@ -563,6 +582,9 @@ def main(
         probe_runner=probe_runner,
         process_provider=process_provider,
         http_probe=http_probe,
+        ide_bridge_urls=tuple(args.ide_bridge_url or ()),
+        ide_bridge_probe=ide_bridge_probe,
+        workspace_path=args.workspace_path,
         window_capture_provider=window_capture_provider,
         max_windows=args.max_windows,
         max_elements=args.max_elements,
@@ -846,8 +868,8 @@ def _run_app_bridge_path(
         }
 
 
-def _default_app_bridge_sender() -> AgentAppBridgeCdpAdapter:
-    return AgentAppBridgeCdpAdapter()
+def _default_app_bridge_sender() -> AgentAppBridgeNativeAdapter:
+    return AgentAppBridgeNativeAdapter()
 
 
 def _run_uia_semantic_action_path(

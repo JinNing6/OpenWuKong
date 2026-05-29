@@ -252,6 +252,55 @@ class AgentAppRealNoLossTests(unittest.TestCase):
         )
         self.assertEqual(artifact["app_bridge_send_report"]["decision"], "app_bridge_send_accepted")
 
+    def test_passes_explicit_ide_bridge_urls_to_native_probe(self):
+        calls = []
+
+        def fake_probe_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=False,
+                decision="agent_native_connector_endpoint_unhealthy",
+                agent=kwargs["agent"],
+                agent_id="cursor",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=0,
+                endpoints=[
+                    {
+                        "endpoint_type": "ide_bridge",
+                        "bridge_url": "http://127.0.0.1:8787",
+                        "ready": False,
+                        "error": "connection_failed",
+                    }
+                ],
+                app_uia_probe={
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "semantic_composer_count": 1,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        report = run_agent_app_real_no_loss(
+            agents=("cursor",),
+            project_name="PaoPaoHeZi",
+            task_name="desktop-message",
+            probe_runner=fake_probe_runner,
+            ide_bridge_urls=("http://127.0.0.1:8787",),
+            workspace_path="E:/ideaProjects/agent/openwukong",
+        )
+        data = report.to_dict()
+
+        self.assertEqual(calls[0]["ide_bridge_urls"], ("http://127.0.0.1:8787",))
+        self.assertEqual(calls[0]["workspace_path"], "E:/ideaProjects/agent/openwukong")
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["bridge_send_attempts"], 0)
+        self.assertEqual(data["cases"][0]["probe"]["endpoints"][0]["endpoint_type"], "ide_bridge")
+
     def test_app_bridge_sender_is_not_called_without_explicit_allow_flag(self):
         sender_calls = []
 

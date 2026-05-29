@@ -3,6 +3,7 @@ import unittest
 from openwukong.control.agent_app_bridge import (
     AgentAppBridgeCdpAdapter,
     AgentAppBridgeDryRunAdapter,
+    AgentAppBridgeNativeAdapter,
     build_agent_app_bridge_request,
 )
 
@@ -99,6 +100,43 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertEqual(report.decision, "app_bridge_target_not_ready")
         self.assertEqual(report.bridge_send_attempts, 0)
 
+    def test_dry_run_prefers_project_window_when_agent_has_multiple_windows(self):
+        probe = _ready_ide_bridge_probe()
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "matched_windows": [
+                {
+                    "process_name": "Cursor.exe",
+                    "pid": 100,
+                    "window_title": "start.md - other-project - Cursor",
+                    "hwnd": 111,
+                },
+                {
+                    "process_name": "Cursor.exe",
+                    "pid": 200,
+                    "window_title": "config - PaoPaoHeZi - Cursor",
+                    "hwnd": 222,
+                },
+            ],
+        }
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="PaoPaoHeZi",
+            task_name="",
+            message="Summarize the active task.",
+            composed_message="Project: PaoPaoHeZi\n\nMessage:\nSummarize the active task.",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=probe,
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["request"]["target_ready"])
+        self.assertEqual(data["request"]["target"]["pid"], 200)
+        self.assertEqual(data["request"]["target"]["hwnd"], 222)
+
     def test_cdp_adapter_sends_message_to_ready_endpoint_and_verifies_markers(self):
         devtools = _FakeDevToolsClient(
             {
@@ -188,6 +226,47 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertEqual(report.decision, "app_bridge_message_submitted_acceptance_pending")
         self.assertEqual(report.bridge_send_attempts, 1)
 
+    def test_native_adapter_sends_ide_bridge_chat_without_cdp_or_window_input(self):
+        bridge = _FakeIDEBridgeClient(
+            {
+                "ok": True,
+                "action_key": "ide-chat:1",
+                "conversation": "OPENWUKONG_ACCEPTANCE: PASS\nCursor accepted.",
+                "metadata": {
+                    "adapter_id": "cursor",
+                    "command_id": "cursor.chat.submit",
+                    "ide_name": "Cursor",
+                },
+            }
+        )
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="PaoPaoHeZi",
+            task_name="desktop-message",
+            message="Summarize the active task.",
+            composed_message="Project: PaoPaoHeZi\nTask: desktop-message\n\nMessage:\nSummarize the active task.",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=_ready_ide_bridge_probe(),
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+        )
+
+        report = AgentAppBridgeNativeAdapter(ide_bridge_client=bridge).send(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_send_accepted")
+        self.assertEqual(data["bridge_send_attempts"], 1)
+        self.assertEqual(data["native_call_attempts"], 1)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(data["transport"], "vscode-extension-bridge")
+        self.assertEqual(data["action_result"]["adapter_id"], "cursor")
+        self.assertEqual(data["action_result"]["command_id"], "cursor.chat.submit")
+        self.assertEqual(bridge.chat_calls[0][0], "http://127.0.0.1:8787")
+        self.assertEqual(bridge.chat_calls[0][2], "cursor")
+        self.assertIn("Project: PaoPaoHeZi", bridge.chat_calls[0][3])
+
 
 class _FakeDevToolsClient:
     def __init__(self, value):
@@ -197,6 +276,16 @@ class _FakeDevToolsClient:
     def evaluate(self, debugger_url, target, expression):
         self.evaluate_calls.append((debugger_url, target, expression))
         return {"type": "object", "value": dict(self.value)}
+
+
+class _FakeIDEBridgeClient:
+    def __init__(self, value):
+        self.value = dict(value)
+        self.chat_calls = []
+
+    def send_chat(self, bridge_url, target, adapter_id, message):
+        self.chat_calls.append((bridge_url, target, adapter_id, message))
+        return dict(self.value)
 
 
 def _ready_probe():
@@ -241,6 +330,38 @@ def _ready_probe():
             ],
         },
     }
+
+
+def _ready_ide_bridge_probe():
+    probe = _ready_probe()
+    probe["endpoints"] = [
+        {
+            "endpoint_type": "ide_bridge",
+            "bridge_url": "http://127.0.0.1:8787",
+            "ready": True,
+            "preferred_chat_adapter": "cursor",
+            "adapter_mapping": {
+                "cursor": {
+                    "label": "Cursor Chat",
+                    "commandId": "cursor.chat.submit",
+                    "available": True,
+                    "availableCandidates": ["cursor.chat.submit"],
+                    "commandCandidates": ["cursor.chat.submit"],
+                }
+            },
+            "chat_adapters": [
+                {
+                    "adapter_id": "cursor",
+                    "label": "Cursor Chat",
+                    "command_id": "cursor.chat.submit",
+                    "available": True,
+                    "available_candidates": ["cursor.chat.submit"],
+                }
+            ],
+            "metadata": {"ide_name": "Cursor"},
+        }
+    ]
+    return probe
 
 
 if __name__ == "__main__":

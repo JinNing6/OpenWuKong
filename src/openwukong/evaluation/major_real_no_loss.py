@@ -236,6 +236,8 @@ def run_major_scenario_real_no_loss(
     app_bridge_message: str = "OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
     app_bridge_required_markers: tuple[str, ...] = (),
     app_bridge_forbidden_markers: tuple[str, ...] = (),
+    ide_bridge_urls: Iterable[str] = (),
+    workspace_path: str = "",
     allow_agent_cli_execution: bool = False,
     agent_cli_timeout_sec: float = 90.0,
     primary_runner: PrimaryRunner | None = None,
@@ -277,6 +279,8 @@ def run_major_scenario_real_no_loss(
             bridge_message=app_bridge_message,
             required_markers=tuple(app_bridge_required_markers or ()),
             forbidden_markers=tuple(app_bridge_forbidden_markers or ()),
+            ide_bridge_urls=tuple(ide_bridge_urls or ()),
+            workspace_path=workspace_path,
         )
     )
     cli = _report_to_dict(
@@ -694,6 +698,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=[],
         help="Forbidden app bridge readback marker. Repeat for multiple markers.",
     )
+    parser.add_argument(
+        "--ide-bridge-url",
+        action="append",
+        default=[],
+        help="Explicit IDE extension/native bridge URL forwarded to agent app no-loss probes.",
+    )
+    parser.add_argument(
+        "--workspace-path",
+        default="",
+        help="Optional workspace path included in IDE bridge capability probes.",
+    )
     parser.add_argument("--allow-agent-cli-execution", action="store_true")
     parser.add_argument("--agent-cli-timeout-sec", type=float, default=90.0)
     args = parser.parse_args(argv)
@@ -718,6 +733,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         app_bridge_message=args.app_bridge_message,
         app_bridge_required_markers=tuple(args.app_acceptance_marker or ()),
         app_bridge_forbidden_markers=tuple(args.app_forbid_marker or ()),
+        ide_bridge_urls=tuple(args.ide_bridge_url or ()),
+        workspace_path=args.workspace_path,
         allow_agent_cli_execution=args.allow_agent_cli_execution,
         agent_cli_timeout_sec=args.agent_cli_timeout_sec,
     )
