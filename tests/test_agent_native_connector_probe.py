@@ -154,6 +154,57 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(bridge_calls[0][0], "http://127.0.0.1:8787")
         self.assertEqual(bridge_calls[0][1]["workspace_path"], "")
 
+    def test_ide_bridge_endpoint_does_not_reuse_cursor_adapter_for_codex_app(self):
+        def fake_ide_bridge_probe(bridge_url, **kwargs):
+            del kwargs
+            return _FakeIDEBridgeReport(
+                mode="ide-bridge-capability-capture",
+                safety_mode="read_only",
+                ok=True,
+                control_attempts=0,
+                bridge_url=bridge_url,
+                metadata={"ide_name": "Cursor", "workspaceFolders": []},
+                command_count=1,
+                commands=["composer.startComposerPrompt"],
+                chat_adapters=[
+                    {
+                        "adapter_id": "cursor",
+                        "label": "Cursor Chat",
+                        "command_id": "composer.startComposerPrompt",
+                        "available": True,
+                        "available_candidates": ["composer.startComposerPrompt"],
+                    }
+                ],
+                adapter_mapping={
+                    "cursor": {
+                        "label": "Cursor Chat",
+                        "commandId": "composer.startComposerPrompt",
+                        "available": True,
+                        "availableCandidates": ["composer.startComposerPrompt"],
+                        "commandCandidates": ["composer.startComposerPrompt"],
+                    }
+                },
+            )
+
+        report = run_agent_native_connector_probe(
+            agent="codex app",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_codex_target(),
+            resolver=_resolver_with_codex_desktop(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            ide_bridge_urls=("http://127.0.0.1:8787",),
+            ide_bridge_probe=fake_ide_bridge_probe,
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["ready_endpoint_count"], 0)
+        self.assertEqual(data["endpoints"][0]["endpoint_type"], "ide_bridge")
+        self.assertEqual(data["endpoints"][0]["preferred_chat_adapter"], "")
+        self.assertFalse(data["endpoints"][0]["ready"])
+
     def test_target_visible_but_no_debug_port_reports_native_connector_not_exposed(self):
         report = run_agent_native_connector_probe(
             agent="codex app",

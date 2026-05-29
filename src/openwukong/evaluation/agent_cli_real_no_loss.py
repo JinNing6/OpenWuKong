@@ -27,12 +27,32 @@ _ACCEPTANCE_MARKER = "OPENWUKONG_AGENT_CLI_NO_LOSS: PASS"
 class StaticForegroundObserver:
     before: int = 0
     after: int = 0
+    before_process_name: str = ""
+    before_window_title: str = ""
+    after_process_name: str = ""
+    after_window_title: str = ""
 
     def get_foreground_window(self) -> int:
         return int(self.before or 0)
 
     def get_foreground_window_after(self) -> int:
         return int(self.after or self.before or 0)
+
+    def get_foreground_snapshot(self) -> dict:
+        return {
+            "hwnd": int(self.before or 0),
+            "pid": 0,
+            "process_name": self.before_process_name,
+            "window_title": self.before_window_title,
+        }
+
+    def get_foreground_snapshot_after(self) -> dict:
+        return {
+            "hwnd": int(self.after or self.before or 0),
+            "pid": 0,
+            "process_name": self.after_process_name,
+            "window_title": self.after_window_title,
+        }
 
 
 class WindowsForegroundObserver:
@@ -47,6 +67,14 @@ class WindowsForegroundObserver:
     def get_foreground_window_after(self) -> int:
         return self.get_foreground_window()
 
+    def get_foreground_snapshot(self) -> dict:
+        hwnd = self.get_foreground_window()
+        return _foreground_snapshot_from_hwnd(hwnd)
+
+    def get_foreground_snapshot_after(self) -> dict:
+        hwnd = self.get_foreground_window_after()
+        return _foreground_snapshot_from_hwnd(hwnd)
+
 
 @dataclasses.dataclass(frozen=True)
 class AgentCliNoLossCase:
@@ -59,6 +87,10 @@ class AgentCliNoLossCase:
     output_root: str
     foreground_hwnd_before: int = 0
     foreground_hwnd_after: int = 0
+    foreground_snapshot_before: dict = dataclasses.field(default_factory=dict)
+    foreground_snapshot_after: dict = dataclasses.field(default_factory=dict)
+    foreground_change_classification: str = "stable"
+    foreground_no_steal_verified: bool = True
     agent_command_attempts: int = 0
     window_input_attempts: int = 0
     workspace_clean: bool = True
@@ -103,6 +135,10 @@ class AgentCliNoLossCase:
             "foreground_hwnd_before": int(self.foreground_hwnd_before or 0),
             "foreground_hwnd_after": int(self.foreground_hwnd_after or 0),
             "foreground_focus_stable": self.foreground_focus_stable,
+            "foreground_snapshot_before": dict(self.foreground_snapshot_before),
+            "foreground_snapshot_after": dict(self.foreground_snapshot_after),
+            "foreground_change_classification": self.foreground_change_classification,
+            "foreground_no_steal_verified": bool(self.foreground_no_steal_verified),
             "agent_command_attempts": int(self.agent_command_attempts or 0),
             "window_input_attempts": int(self.window_input_attempts or 0),
             "workspace_clean": bool(self.workspace_clean),
@@ -164,6 +200,10 @@ class AgentCliNoLossReport:
     def foreground_focus_stable(self) -> bool:
         return not any(not case.foreground_focus_stable for case in self.cases)
 
+    @property
+    def foreground_no_steal_verified(self) -> bool:
+        return not any(not case.foreground_no_steal_verified for case in self.cases)
+
     def to_dict(self, *, include_details: bool = True) -> dict:
         return {
             "mode": self.mode,
@@ -179,6 +219,7 @@ class AgentCliNoLossReport:
             "agent_command_attempts": self.agent_command_attempts,
             "window_input_attempts": self.window_input_attempts,
             "foreground_focus_stable": self.foreground_focus_stable,
+            "foreground_no_steal_verified": self.foreground_no_steal_verified,
             "cases": [
                 case.to_dict(include_details=include_details)
                 for case in self.cases
@@ -238,7 +279,8 @@ def _run_case(
     case_output.mkdir(parents=True, exist_ok=True)
 
     before_files = _snapshot_files(workspace)
-    foreground_before = _foreground_before(foreground_observer)
+    foreground_snapshot_before = _foreground_snapshot_before(foreground_observer)
+    foreground_before = int(foreground_snapshot_before.get("hwnd", 0) or 0)
     conversation = run_agent_conversation(
         agent=agent,
         project_name="openwukong",
@@ -262,10 +304,21 @@ def _run_case(
         timeout_sec=timeout_sec,
         audit_log_path=str(case_output / "command-audit.jsonl"),
     )
-    foreground_after = _foreground_after(foreground_observer)
+    foreground_snapshot_after = _foreground_snapshot_after(foreground_observer)
+    foreground_after = int(foreground_snapshot_after.get("hwnd", 0) or 0)
     after_files = _snapshot_files(workspace)
     delta = tuple(sorted(after_files - before_files))
     data = conversation.to_dict()
+    foreground_classification = _classify_foreground_change(
+        agent,
+        data,
+        foreground_snapshot_before,
+        foreground_snapshot_after,
+    )
+    foreground_no_steal = foreground_classification in {
+        "stable",
+        "changed_to_unrelated_surface",
+    }
     status = _classify_status(
         data,
         allow_cli_execution=allow_cli_execution,
@@ -297,6 +350,10 @@ def _run_case(
         output_root=str(case_output),
         foreground_hwnd_before=foreground_before,
         foreground_hwnd_after=foreground_after,
+        foreground_snapshot_before=foreground_snapshot_before,
+        foreground_snapshot_after=foreground_snapshot_after,
+        foreground_change_classification=foreground_classification,
+        foreground_no_steal_verified=foreground_no_steal,
         agent_command_attempts=int(data.get("agent_command_attempts", 0) or 0),
         window_input_attempts=window_input_attempts,
         workspace_clean=workspace_clean,
@@ -399,6 +456,155 @@ def _foreground_after(observer: object) -> int:
 
 def _focus_stable(before: int, after: int) -> bool:
     return not (int(before or 0) and int(after or 0) and int(before or 0) != int(after or 0))
+
+
+def _foreground_snapshot_before(observer: object) -> dict:
+    getter = getattr(observer, "get_foreground_snapshot", None)
+    if callable(getter):
+        try:
+            return _normalize_foreground_snapshot(getter())
+        except Exception:
+            pass
+    hwnd = _foreground_before(observer)
+    return _foreground_snapshot_from_hwnd(hwnd)
+
+
+def _foreground_snapshot_after(observer: object) -> dict:
+    getter = getattr(observer, "get_foreground_snapshot_after", None)
+    if callable(getter):
+        try:
+            return _normalize_foreground_snapshot(getter())
+        except Exception:
+            pass
+    hwnd = _foreground_after(observer)
+    return _foreground_snapshot_from_hwnd(hwnd)
+
+
+def _normalize_foreground_snapshot(value: object) -> dict:
+    data = dict(value) if isinstance(value, dict) else {}
+    return {
+        "hwnd": _safe_int(data.get("hwnd")),
+        "pid": _safe_int(data.get("pid")),
+        "process_name": str(data.get("process_name", "") or ""),
+        "window_title": str(data.get("window_title", "") or ""),
+    }
+
+
+def _foreground_snapshot_from_hwnd(hwnd: int) -> dict:
+    handle = int(hwnd or 0)
+    pid = _window_pid(handle)
+    return {
+        "hwnd": handle,
+        "pid": pid,
+        "process_name": _process_name(pid),
+        "window_title": _window_title(handle),
+    }
+
+
+def _classify_foreground_change(
+    agent: str,
+    conversation: dict,
+    before: dict,
+    after: dict,
+) -> str:
+    before_hwnd = _safe_int(before.get("hwnd"))
+    after_hwnd = _safe_int(after.get("hwnd"))
+    if not before_hwnd or not after_hwnd or before_hwnd == after_hwnd:
+        return "stable"
+    if _foreground_snapshot_matches_agent(agent, conversation, after):
+        return "changed_to_agent_surface"
+    if _foreground_snapshot_has_identity(after):
+        return "changed_to_unrelated_surface"
+    return "changed_unknown"
+
+
+def _foreground_snapshot_matches_agent(
+    agent: str,
+    conversation: dict,
+    snapshot: dict,
+) -> bool:
+    aliases = _agent_aliases(agent)
+    process_name = str(snapshot.get("process_name", "") or "")
+    window_title = str(snapshot.get("window_title", "") or "")
+    selected = conversation.get("selected_transport")
+    pid = _safe_int(snapshot.get("pid"))
+    selected_pid = _safe_int(selected.get("pid")) if isinstance(selected, dict) else 0
+    if pid and selected_pid and pid == selected_pid:
+        return True
+    if isinstance(selected, dict):
+        selected_exe = Path(str(selected.get("path", "") or "")).name.casefold()
+        if selected_exe and process_name.casefold() == selected_exe:
+            return True
+    haystack = " ".join([process_name, window_title]).casefold()
+    return any(alias and alias in haystack for alias in aliases)
+
+
+def _foreground_snapshot_has_identity(snapshot: dict) -> bool:
+    return bool(
+        _safe_int(snapshot.get("pid"))
+        or str(snapshot.get("process_name", "") or "").strip()
+        or str(snapshot.get("window_title", "") or "").strip()
+    )
+
+
+def _agent_aliases(agent: str) -> tuple[str, ...]:
+    normalized = str(agent or "").strip().casefold()
+    if normalized == "codex":
+        return ("codex", "openai.codex")
+    if normalized == "claude":
+        return ("claude", "anthropic")
+    return (normalized,) if normalized else ()
+
+
+def _window_pid(hwnd: int) -> int:
+    if not hwnd:
+        return 0
+    try:
+        import ctypes
+
+        pid = ctypes.c_ulong(0)
+        ctypes.windll.user32.GetWindowThreadProcessId(
+            int(hwnd),
+            ctypes.byref(pid),
+        )
+        return int(pid.value or 0)
+    except Exception:
+        return 0
+
+
+def _process_name(pid: int) -> str:
+    if int(pid or 0) <= 0:
+        return ""
+    try:
+        import psutil
+
+        return str(psutil.Process(int(pid)).name() or "")
+    except Exception:
+        return ""
+
+
+def _window_title(hwnd: int) -> str:
+    if not hwnd:
+        return ""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        length = int(user32.GetWindowTextLengthW(int(hwnd)) or 0)
+        if length <= 0:
+            return ""
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(int(hwnd), buffer, length + 1)
+        return str(buffer.value or "")
+    except Exception:
+        return ""
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
 
 
 def _resolve_output_root(output_root: str | Path) -> Path:

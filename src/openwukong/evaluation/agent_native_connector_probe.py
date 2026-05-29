@@ -566,6 +566,14 @@ def _preferred_chat_adapter(
             command_id = str(mapped.get("commandId", "") or mapped.get("command_id", "") or "").strip()
             if command_id:
                 return normalized_agent
+        for adapter in chat_adapters:
+            adapter_id = str(adapter.get("adapter_id", "") or "").strip()
+            if lower_text(adapter_id) != normalized_agent:
+                continue
+            command_id = str(adapter.get("command_id", "") or adapter.get("commandId", "") or "").strip()
+            if command_id and bool(adapter.get("available", False)):
+                return adapter_id
+        return ""
     for adapter in chat_adapters:
         adapter_id = str(adapter.get("adapter_id", "") or "").strip()
         command_id = str(adapter.get("command_id", "") or adapter.get("commandId", "") or "").strip()

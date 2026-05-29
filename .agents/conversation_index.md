@@ -5570,3 +5570,74 @@ When a new conversation starts in this repo:
       stronger semantic surface, Codex/Claude CLI were intentionally skipped
       without execution opt-in, and Codex App / Claude Desktop still need
       their own native/app bridge paths
+- 2026-05-29 verified Codex CLI execution and fixed IDE-bridge agent scoping:
+  - implementation:
+    - `agent_cli_real_no_loss` now records foreground snapshots before and
+      after CLI execution:
+      `hwnd`, `pid`, `process_name`, and `window_title`
+    - CLI reports now classify foreground changes as:
+      `stable`, `changed_to_agent_surface`,
+      `changed_to_unrelated_surface`, or `changed_unknown`
+    - CLI reports now expose `foreground_no_steal_verified`, so normal user
+      foreground movement can be distinguished from an agent CLI stealing focus
+    - `agent_native_connector_probe` no longer falls back from the requested
+      agent adapter to any available IDE adapter; a Cursor adapter can only
+      satisfy `agent_id=cursor`, not `codex` or `claude`
+    - `AgentAppBridgeRequest` now enforces the same agent/adapter match as a
+      second safety layer before treating an IDE bridge endpoint as target-ready
+  - official-doc basis:
+    - Microsoft Win32 docs for `GetForegroundWindow` and related window/PID
+      APIs were checked before adding foreground attribution
+  - safe/real validation:
+    - focused CLI command:
+      `python -m openwukong.evaluation.agent_cli_real_no_loss --agent codex --agent claude --output-root logs\runtime\agent-cli-real-no-loss-r17-execution-focus-attribution --output logs\runtime\agent-cli-real-no-loss-r17-execution-focus-attribution\report.json --allow-cli-execution --timeout-sec 120 --json`
+    - focused CLI result:
+      `passed_cases=2/2`, `verified_cases=1`,
+      `agent_command_attempts=2`, `window_input_attempts=0`,
+      `foreground_focus_stable=true`,
+      `foreground_no_steal_verified=true`
+    - Codex CLI result:
+      `status=verified`, `real_verified=true`, `workspace_clean=true`,
+      exact marker `OPENWUKONG_AGENT_CLI_NO_LOSS: PASS`
+    - Claude CLI result:
+      `status=cli_auth_required`, `real_verified=false`, local CLI returned
+      `Not logged in · Please run /login`; this is an auth/environment blocker,
+      not a control-layer blocker
+    - unified major command:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r19-owned-ide-cli-scoped --output logs\runtime\major-real-no-loss-r19-owned-ide-cli-scoped\report.json --allow-owned-browser-helper-launch --owned-browser-debug-port 9486 --owned-browser-url "data:text/html,<title>OpenWukong Major Scoped R19</title><body>OpenWukong Major Scoped R19</body>" --project-name openwukong --task-name major-owned-ide-cli-r19 --allow-app-bridge-send --app-bridge-message "OPENWUKONG_MAJOR_OWNED_IDE_CLI_R19" --allow-owned-ide-bridge-helper-launch --owned-ide-executable "E:\cursor\cursor\cursor\Cursor.exe" --owned-ide-bridge-port 8796 --owned-ide-capability-timeout-sec 45 --allow-agent-cli-execution --agent-cli-timeout-sec 120`
+    - unified major result:
+      `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `agent_command_attempts=2`, `bridge_send_attempts=1`,
+      `background_screenshot_success_count=6/6`,
+      `background_screenshot_focus_stable=true`,
+      `owned_ide_bridge_cleanup_ok=true`
+    - requirement result after fixing the false positive:
+      `codex_cli_background_task=verified`,
+      `cursor_background_chat=verified`,
+      `codex_app_background_chat=gated_native_endpoint_missing`,
+      `claude_desktop_background_chat=unavailable`,
+      `claude_cli_background_task=auth_required`
+    - cleanup check:
+      port `8796` reported `TcpTestSucceeded=false`, and no process command
+      line still contained the owned IDE bridge runtime root
+  - regression evidence:
+    - red test:
+      `tests.test_agent_cli_real_no_loss.AgentCliRealNoLossTests.test_unrelated_foreground_change_is_not_classified_as_cli_focus_steal`: failed before snapshot attribution, then OK
+    - red test:
+      `tests.test_agent_cli_real_no_loss.AgentCliRealNoLossTests.test_agent_surface_foreground_change_is_classified_as_focus_steal_risk`: failed before snapshot attribution, then OK
+    - red test:
+      `tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_ide_bridge_endpoint_does_not_reuse_cursor_adapter_for_codex_app`: failed before adapter scoping, then OK
+    - red test:
+      `tests.test_agent_app_bridge.AgentAppBridgeTests.test_ide_bridge_cursor_adapter_cannot_satisfy_codex_app_request`: failed before bridge request scoping, then OK
+    - targeted suite:
+      `python -m unittest tests.test_agent_app_bridge tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_agent_cli_real_no_loss`: `43 tests OK`
+  - current conclusion:
+    - developer-workstation background path now has verified real coverage for
+      browser, Word hidden COM, file search, WeChat observation, Cursor app
+      bridge, and Codex CLI
+    - the remaining true gaps are:
+      WeChat deterministic background send,
+      Claude CLI login/auth,
+      Codex App native/app bridge,
+      Claude Desktop native/app bridge

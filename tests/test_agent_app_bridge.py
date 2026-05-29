@@ -144,6 +144,42 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertEqual(data["request"]["target"]["hwnd"], 2491830)
         self.assertEqual(data["request"]["endpoint"]["preferred_chat_adapter"], "cursor")
 
+    def test_ide_bridge_cursor_adapter_cannot_satisfy_codex_app_request(self):
+        probe = _ready_ide_bridge_probe()
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "target_matched": False,
+            "semantic_composer_count": 0,
+        }
+        probe["endpoints"][0]["metadata"] = {
+            "ide_name": "Cursor",
+            "workspaceFolders": [
+                {
+                    "name": "openwukong",
+                    "fsPath": "E:\\ideaProjects\\agent\\openwukong",
+                }
+            ],
+        }
+        request = build_agent_app_bridge_request(
+            agent="codex app",
+            agent_id="codex",
+            project_name="openwukong",
+            task_name="isolated-ide-bridge",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: isolated-ide-bridge",
+            selected_transport={"transport_id": "codex-desktop-shell"},
+            app_surface_probe=probe,
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_target_not_ready")
+        self.assertFalse(data["request"]["target_ready"])
+        self.assertTrue(data["request"]["native_endpoint_ready"])
+        self.assertEqual(data["request"]["endpoint"]["preferred_chat_adapter"], "cursor")
+
     def test_dry_run_prefers_project_window_when_agent_has_multiple_windows(self):
         probe = _ready_ide_bridge_probe()
         probe["app_uia_probe"] = {

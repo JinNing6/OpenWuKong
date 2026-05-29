@@ -48,13 +48,13 @@ class AgentAppBridgeRequest:
             self.app_uia_probe.get("target_matched", False)
             and (
                 int(self.app_uia_probe.get("semantic_composer_count", 0) or 0) > 0
-                or _endpoint_supports_ide_chat(self.endpoint)
+                or _endpoint_supports_ide_chat(self.endpoint, self.agent_id)
             )
         )
         if uia_target_ready:
             return True
         return bool(
-            _endpoint_supports_ide_chat(self.endpoint)
+            _endpoint_supports_ide_chat(self.endpoint, self.agent_id)
             and _endpoint_matches_project(self.endpoint, self.project_name)
         )
 
@@ -775,23 +775,31 @@ def _endpoint_is_ide_bridge(endpoint: dict) -> bool:
     return str(endpoint.get("endpoint_type", "") or "").strip() == "ide_bridge"
 
 
-def _endpoint_supports_ide_chat(endpoint: dict) -> bool:
+def _endpoint_supports_ide_chat(endpoint: dict, agent_id: str = "") -> bool:
     if not _endpoint_is_ide_bridge(endpoint):
         return False
     if not bool(endpoint.get("ready", False)):
         return False
-    if str(endpoint.get("preferred_chat_adapter", "") or "").strip():
-        return True
-    if str(endpoint.get("send_command_id", "") or "").strip():
-        return True
+    normalized_agent = str(agent_id or "").strip().lower()
+    preferred = str(endpoint.get("preferred_chat_adapter", "") or "").strip()
+    if preferred:
+        return not normalized_agent or preferred.lower() == normalized_agent
     adapter_mapping = endpoint.get("adapter_mapping")
     if isinstance(adapter_mapping, dict):
+        if normalized_agent:
+            item = adapter_mapping.get(normalized_agent)
+            if isinstance(item, dict):
+                command_id = str(item.get("commandId", "") or item.get("command_id", "") or "").strip()
+                return bool(command_id and item.get("available", False))
+            return False
         for item in adapter_mapping.values():
             if not isinstance(item, dict):
                 continue
             command_id = str(item.get("commandId", "") or item.get("command_id", "") or "").strip()
             if command_id and bool(item.get("available", False)):
                 return True
+    if str(endpoint.get("send_command_id", "") or "").strip():
+        return not normalized_agent
     return False
 
 
@@ -828,9 +836,11 @@ def _endpoint_matches_project(endpoint: dict, project_name: str) -> bool:
 
 def _select_ide_chat_adapter(endpoint: dict, agent_id: str) -> str:
     preferred = str(endpoint.get("preferred_chat_adapter", "") or "").strip()
-    if preferred:
-        return preferred
     normalized_agent = str(agent_id or "").strip().lower()
+    if preferred:
+        if normalized_agent and preferred.lower() != normalized_agent:
+            return ""
+        return preferred
     adapter_mapping = endpoint.get("adapter_mapping")
     if isinstance(adapter_mapping, dict):
         if normalized_agent:
@@ -839,6 +849,7 @@ def _select_ide_chat_adapter(endpoint: dict, agent_id: str) -> str:
                 command_id = str(item.get("commandId", "") or item.get("command_id", "") or "").strip()
                 if command_id:
                     return normalized_agent
+            return ""
         for key, item in adapter_mapping.items():
             if not isinstance(item, dict):
                 continue
