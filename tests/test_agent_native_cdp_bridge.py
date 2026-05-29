@@ -151,6 +151,94 @@ class AgentNativeCdpBridgeTests(unittest.TestCase):
             "Codex.exe",
         )
 
+    def test_write_registry_preserves_other_agent_bridge_entries(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry_path = Path(td) / "native-bridges.json"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "openwukong-native-bridge-registry-v1",
+                        "agent_native_bridges": [
+                            {
+                                "url": "http://127.0.0.1:18889",
+                                "type": "agent_native_bridge",
+                                "agent_id": "claude",
+                                "agent": "claude desktop",
+                                "surface_kind": "desktop_app",
+                                "enabled": True,
+                                "app_binding": {
+                                    "process_name": "Claude.exe",
+                                    "pid": 42000,
+                                    "hwnd": 36000,
+                                    "window_title": "Claude",
+                                },
+                                "debugger_url": "http://127.0.0.1:9444",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            write_agent_native_cdp_bridge_registry(
+                registry_path,
+                bridge_url="http://127.0.0.1:18888",
+                config=_config(),
+            )
+            data = json.loads(registry_path.read_text(encoding="utf-8"))
+
+        entries = data["agent_native_bridges"]
+        self.assertEqual(
+            [entry["agent_id"] for entry in entries],
+            ["claude", "codex"],
+        )
+        self.assertEqual(entries[0]["url"], "http://127.0.0.1:18889")
+        self.assertEqual(entries[1]["url"], "http://127.0.0.1:18888")
+
+    def test_write_registry_updates_existing_agent_bridge_entry_by_url(self):
+        with tempfile.TemporaryDirectory() as td:
+            registry_path = Path(td) / "native-bridges.json"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "openwukong-native-bridge-registry-v1",
+                        "agent_native_bridges": [
+                            {
+                                "url": "http://127.0.0.1:18888",
+                                "type": "agent_native_bridge",
+                                "agent_id": "codex",
+                                "agent": "codex app",
+                                "surface_kind": "desktop_app",
+                                "enabled": True,
+                                "app_binding": {
+                                    "process_name": "Codex.exe",
+                                    "pid": 1,
+                                    "hwnd": 2,
+                                    "window_title": "Old Codex",
+                                },
+                                "debugger_url": "http://127.0.0.1:9000",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            write_agent_native_cdp_bridge_registry(
+                registry_path,
+                bridge_url="http://127.0.0.1:18888",
+                config=_config(),
+            )
+            data = json.loads(registry_path.read_text(encoding="utf-8"))
+
+        entries = data["agent_native_bridges"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["agent_id"], "codex")
+        self.assertEqual(entries[0]["app_binding"]["pid"], 32000)
+        self.assertEqual(entries[0]["debugger_url"], "http://127.0.0.1:9333")
+
 
 class _FakeDevToolsClient:
     def __init__(self, value=None, targets=None):

@@ -195,8 +195,9 @@ def write_agent_native_cdp_bridge_registry(
 ) -> None:
     path = Path(registry_path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    url = str(bridge_url or "").strip().rstrip("/")
     entry = {
-        "url": str(bridge_url or "").strip().rstrip("/"),
+        "url": url,
         "type": "agent_native_bridge",
         "agent_id": config.agent_id,
         "agent": config.agent,
@@ -210,14 +211,54 @@ def write_agent_native_cdp_bridge_registry(
         },
         "debugger_url": config.debugger_url,
     }
+    entries = _merged_registry_entries(path, entry)
     data = {
         "schema_version": AGENT_NATIVE_BRIDGE_REGISTRY_SCHEMA_VERSION,
-        "agent_native_bridges": [entry],
+        "agent_native_bridges": entries,
     }
     path.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _merged_registry_entries(path: Path, new_entry: dict) -> list[dict]:
+    existing_entries: list[dict] = []
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            raw_entries = data.get("agent_native_bridges", [])
+            if isinstance(raw_entries, list):
+                existing_entries = [
+                    dict(entry) for entry in raw_entries if isinstance(entry, dict)
+                ]
+        except Exception:
+            existing_entries = []
+
+    new_url = str(new_entry.get("url", "") or "").strip().rstrip("/")
+    new_agent_id = str(new_entry.get("agent_id", "") or "").strip().casefold()
+    new_process_name = str(
+        (new_entry.get("app_binding") or {}).get("process_name", "") or ""
+    ).strip().casefold()
+    merged: list[dict] = []
+    for entry in existing_entries:
+        existing_url = str(entry.get("url", "") or "").strip().rstrip("/")
+        existing_agent_id = str(entry.get("agent_id", "") or "").strip().casefold()
+        existing_process_name = str(
+            (entry.get("app_binding") or {}).get("process_name", "") or ""
+        ).strip().casefold()
+        same_url = bool(new_url and existing_url == new_url)
+        same_agent_process = bool(
+            new_agent_id
+            and existing_agent_id == new_agent_id
+            and new_process_name
+            and existing_process_name == new_process_name
+        )
+        if same_url or same_agent_process:
+            continue
+        merged.append(entry)
+    merged.append(dict(new_entry))
+    return merged
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -6275,3 +6275,66 @@ When a new conversation starts in this repo:
       unlocked by itself; those products still need a real owned DevTools
       endpoint or installed app-side bridge, after which the current control
       layer can discover and gate the route precisely
+- 2026-05-29 integrated the no-focus agent native CDP helper into the unified
+  major real no-loss runner:
+  - implementation:
+    - the CDP helper registry writer now merges entries instead of overwriting
+      the file, so Codex App / Claude Desktop / Cursor-style helpers can share
+      one local registry without deleting each other
+    - `major_real_no_loss` now has an explicit
+      `--allow-agent-native-cdp-bridge-helper-launch` path that starts the
+      managed Python helper, waits for its registry entry, forwards that
+      registry to agent app probes, and stops it through the session readiness
+      manifest
+    - the major report now exposes
+      `agent_native_cdp_bridge_launch_attempts`,
+      `agent_native_cdp_bridge_stop_attempts`, and
+      `agent_native_cdp_bridge_cleanup_ok`
+    - fixed a critical cleanup-token bug where the target app debugger URL
+      from `--debugger-url http://127...` could be treated as an owned-process
+      cleanup token; in a parent major run this could match and kill the
+      current runner before it wrote the final report
+    - residual cleanup now excludes the target debugger URL and includes the
+      registry path as the owned helper token
+  - official-doc basis:
+    - Python `subprocess` docs were checked again before changing managed
+      helper launch/cleanup behavior
+  - validation:
+    - red tests first:
+      `test_write_registry_preserves_other_agent_bridge_entries` failed before
+      registry merge existed
+    - red tests first:
+      `test_runner_prepares_agent_native_cdp_bridge_helper_and_forwards_registry`,
+      `test_prepare_agent_native_cdp_bridge_helper_launches_and_waits_for_registry`,
+      and `test_cli_forwards_agent_native_cdp_bridge_helper_options` failed
+      before major-runner integration and CLI flags existed
+    - red test first:
+      `test_agent_native_cdp_bridge_residual_tokens_exclude_target_debugger_url`
+      failed because the target debugger URL was included in cleanup tokens and
+      the split `--registry-path` value was missing
+    - focused green:
+      `python -m unittest tests.test_agent_native_cdp_bridge tests.test_major_real_no_loss tests.test_agent_app_real_no_loss tests.test_session_readiness_plan`: `58 tests OK`
+    - R37 real no-loss smoke:
+      `run_major_scenario_real_no_loss(... allow_agent_native_cdp_bridge_helper_launch=True, agent_apps=("codex app",), cli_agents=(), debugger_url=http://127.0.0.1:65530 ...)`
+      produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `agent_native_cdp_bridge_launch_attempts=1`,
+      `agent_native_cdp_bridge_stop_attempts=1`,
+      `agent_native_cdp_bridge_cleanup_ok=true`, and
+      `bridge_send_attempts=0`
+    - R37 intentionally used a fake debugger URL, so agent app chat stayed
+      gated with `agent_native_connector_endpoint_unhealthy` instead of
+      sending anything
+    - R37 helper PID `14020` was confirmed gone after cleanup
+    - full verification:
+      `python -m unittest discover tests`: `515 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - the unified no-loss runner can now start, register, probe, and clean up
+      an app-side native CDP bridge as part of the same acceptance report used
+      for WeChat / Word / Browser / File / Codex / Claude / Cursor scenarios
+    - the current machine still needs a real owned DevTools/native endpoint for
+      Codex App / Claude Desktop / Cursor app chat to move from gated to
+      verified send; the runner now has the correct no-focus lifecycle once
+      such an endpoint exists

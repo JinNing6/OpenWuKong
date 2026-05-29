@@ -880,15 +880,24 @@ def _terminate_owned_residual_processes(
 
 def _managed_process_tokens(argv: tuple[str, ...]) -> tuple[str, ...]:
     tokens: list[str] = []
-    for value in argv:
-        text = str(value or "").strip()
+    values = tuple(str(value or "").strip() for value in argv)
+    for index, text in enumerate(values):
         if not text:
+            continue
+        previous = values[index - 1] if index > 0 else ""
+        if previous == "--debugger-url":
             continue
         if text.startswith("--remote-debugging-port="):
             tokens.extend(_token_variants(text))
         if text == "openwukong.control.agent_native_cdp_bridge":
             tokens.extend(_token_variants(text))
-        if text.startswith("http://127.0.0.1:") or text.startswith("https://127.0.0.1:"):
+        if (
+            previous != "--debugger-url"
+            and (
+                text.startswith("http://127.0.0.1:")
+                or text.startswith("https://127.0.0.1:")
+            )
+        ):
             tokens.extend(_token_variants(text))
         if text.startswith("--user-data-dir=") or text.startswith("--extensions-dir="):
             tokens.extend(_token_variants(text))
@@ -898,6 +907,8 @@ def _managed_process_tokens(argv: tuple[str, ...]) -> tuple[str, ...]:
             tokens.extend(_token_variants(text))
             path_text = text.split("=", 1)[1].strip()
             tokens.extend(_token_variants(path_text))
+        if previous == "--registry-path":
+            tokens.extend(_token_variants(text))
     seen: set[str] = set()
     unique: list[str] = []
     for token in tokens:

@@ -47,6 +47,7 @@ PrimaryRunner = Callable[..., object]
 AgentAppRunner = Callable[..., object]
 AgentCliRunner = Callable[..., object]
 OwnedIdeBridgeHelperRunner = Callable[..., object]
+AgentNativeCdpBridgeHelperRunner = Callable[..., object]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -82,6 +83,7 @@ class MajorScenarioRealNoLossReport:
     artifact_path: str
     primary_report: dict
     owned_ide_bridge_helper_report: dict
+    agent_native_cdp_bridge_helper_report: dict
     agent_app_report: dict
     agent_cli_report: dict
     requirements: tuple[MajorRequirement, ...]
@@ -143,6 +145,24 @@ class MajorScenarioRealNoLossReport:
         if not bool(self.owned_ide_bridge_helper_report.get("enabled", False)):
             return True
         return bool(self.owned_ide_bridge_helper_report.get("cleanup_ok", False))
+
+    @property
+    def agent_native_cdp_bridge_launch_attempts(self) -> int:
+        return _counter(self.agent_native_cdp_bridge_helper_report, "launch_attempts")
+
+    @property
+    def agent_native_cdp_bridge_stop_attempts(self) -> int:
+        return _counter(self.agent_native_cdp_bridge_helper_report, "stop_attempts")
+
+    @property
+    def agent_native_cdp_bridge_cleanup_ok(self) -> bool:
+        if not self.agent_native_cdp_bridge_helper_report:
+            return True
+        if not bool(self.agent_native_cdp_bridge_helper_report.get("enabled", False)):
+            return True
+        return bool(
+            self.agent_native_cdp_bridge_helper_report.get("cleanup_ok", False)
+        )
 
     @property
     def bridge_send_attempts(self) -> int:
@@ -210,7 +230,9 @@ class MajorScenarioRealNoLossReport:
                 self.agent_cli_report,
             )
             if _counter(report, "failed_cases") > 0
-        ) + (0 if self.owned_ide_bridge_cleanup_ok else 1)
+        ) + (0 if self.owned_ide_bridge_cleanup_ok else 1) + (
+            0 if self.agent_native_cdp_bridge_cleanup_ok else 1
+        )
 
     @property
     def unmet_requirements(self) -> tuple[str, ...]:
@@ -229,6 +251,7 @@ class MajorScenarioRealNoLossReport:
             and self.window_input_attempts == 0
             and self.automation_focus_safe
             and self.owned_ide_bridge_cleanup_ok
+            and self.agent_native_cdp_bridge_cleanup_ok
         )
 
     @property
@@ -239,6 +262,7 @@ class MajorScenarioRealNoLossReport:
             and self.window_input_attempts == 0
             and self.automation_focus_safe
             and self.owned_ide_bridge_cleanup_ok
+            and self.agent_native_cdp_bridge_cleanup_ok
         )
 
     def to_dict(self) -> dict:
@@ -253,6 +277,9 @@ class MajorScenarioRealNoLossReport:
             "owned_ide_bridge_stop_attempts": self.owned_ide_bridge_stop_attempts,
             "owned_ide_bridge_cleanup_ok": self.owned_ide_bridge_cleanup_ok,
             "isolated_ide_command_probe_attempts": self.isolated_ide_command_probe_attempts,
+            "agent_native_cdp_bridge_launch_attempts": self.agent_native_cdp_bridge_launch_attempts,
+            "agent_native_cdp_bridge_stop_attempts": self.agent_native_cdp_bridge_stop_attempts,
+            "agent_native_cdp_bridge_cleanup_ok": self.agent_native_cdp_bridge_cleanup_ok,
             "bridge_send_attempts": self.bridge_send_attempts,
             "agent_command_attempts": self.agent_command_attempts,
             "owned_app_launch_attempts": self.owned_app_launch_attempts,
@@ -273,6 +300,9 @@ class MajorScenarioRealNoLossReport:
             "subreports": {
                 "primary": dict(self.primary_report),
                 "owned_ide_bridge_helper": dict(self.owned_ide_bridge_helper_report),
+                "agent_native_cdp_bridge_helper": dict(
+                    self.agent_native_cdp_bridge_helper_report
+                ),
                 "agent_app": dict(self.agent_app_report),
                 "agent_cli": dict(self.agent_cli_report),
             },
@@ -325,10 +355,23 @@ def run_major_scenario_real_no_loss(
     owned_ide_workspace_root: str = "",
     owned_ide_chat_adapter_id: str = "cursor",
     owned_ide_capability_timeout_sec: float = 30.0,
+    allow_agent_native_cdp_bridge_helper_launch: bool = False,
+    agent_native_cdp_bridge_helper_agent: str = "codex app",
+    agent_native_cdp_bridge_helper_agent_id: str = "codex",
+    agent_native_cdp_bridge_helper_port: int = 18888,
+    agent_native_cdp_bridge_helper_debugger_url: str = "",
+    agent_native_cdp_bridge_helper_process_name: str = "Codex.exe",
+    agent_native_cdp_bridge_helper_pid: int = 0,
+    agent_native_cdp_bridge_helper_hwnd: int = 0,
+    agent_native_cdp_bridge_helper_window_title: str = "",
+    agent_native_cdp_bridge_helper_target_title: str = "",
+    agent_native_cdp_bridge_helper_target_url: str = "",
+    agent_native_cdp_bridge_registry_wait_timeout_sec: float = 5.0,
     allow_agent_cli_execution: bool = False,
     agent_cli_timeout_sec: float = 90.0,
     primary_runner: PrimaryRunner | None = None,
     owned_ide_bridge_helper_runner: OwnedIdeBridgeHelperRunner | None = None,
+    agent_native_cdp_bridge_helper_runner: AgentNativeCdpBridgeHelperRunner | None = None,
     agent_app_runner: AgentAppRunner | None = None,
     agent_cli_runner: AgentCliRunner | None = None,
 ) -> MajorScenarioRealNoLossReport:
@@ -366,6 +409,7 @@ def run_major_scenario_real_no_loss(
         )
     )
     helper = _disabled_owned_ide_bridge_helper_report()
+    native_helper = _disabled_agent_native_cdp_bridge_helper_report()
     app: dict = {}
     cli: dict = {}
     try:
@@ -385,9 +429,37 @@ def run_major_scenario_real_no_loss(
                     capability_timeout_sec=owned_ide_capability_timeout_sec,
                 )
             )
+        if allow_agent_native_cdp_bridge_helper_launch:
+            native_helper = _report_to_dict(
+                (
+                    agent_native_cdp_bridge_helper_runner
+                    or prepare_agent_native_cdp_bridge_helper
+                )(
+                    output_root=root / "agent-native-cdp-bridge",
+                    agent=agent_native_cdp_bridge_helper_agent,
+                    agent_id=agent_native_cdp_bridge_helper_agent_id,
+                    bridge_port=agent_native_cdp_bridge_helper_port,
+                    debugger_url=agent_native_cdp_bridge_helper_debugger_url,
+                    process_name=agent_native_cdp_bridge_helper_process_name,
+                    pid=agent_native_cdp_bridge_helper_pid,
+                    hwnd=agent_native_cdp_bridge_helper_hwnd,
+                    window_title=agent_native_cdp_bridge_helper_window_title,
+                    project_name=project_name,
+                    task_name=task_name,
+                    target_title=agent_native_cdp_bridge_helper_target_title,
+                    target_url=agent_native_cdp_bridge_helper_target_url,
+                    registry_wait_timeout_sec=agent_native_cdp_bridge_registry_wait_timeout_sec,
+                )
+            )
         effective_ide_bridge_urls = _effective_ide_bridge_urls(
             ide_bridge_urls,
             helper,
+        )
+        effective_agent_native_bridge_registry_paths = (
+            _effective_agent_native_bridge_registry_paths(
+                agent_native_bridge_registry_paths,
+                native_helper,
+            )
         )
         effective_workspace_path = workspace_path or str(
             helper.get("workspace_path", "") or ""
@@ -410,9 +482,7 @@ def run_major_scenario_real_no_loss(
                 debugger_urls=tuple(debugger_urls or ()),
                 ide_bridge_urls=effective_ide_bridge_urls,
                 agent_native_bridge_urls=tuple(agent_native_bridge_urls or ()),
-                agent_native_bridge_registry_paths=tuple(
-                    agent_native_bridge_registry_paths or ()
-                ),
+                agent_native_bridge_registry_paths=effective_agent_native_bridge_registry_paths,
                 workspace_path=effective_workspace_path,
             )
         )
@@ -425,6 +495,7 @@ def run_major_scenario_real_no_loss(
             )
         )
     finally:
+        native_helper = _stop_agent_native_cdp_bridge_helper_if_needed(native_helper)
         helper = _stop_owned_ide_bridge_helper_if_needed(helper)
 
     report = MajorScenarioRealNoLossReport(
@@ -432,6 +503,7 @@ def run_major_scenario_real_no_loss(
         artifact_path="",
         primary_report=primary,
         owned_ide_bridge_helper_report=helper,
+        agent_native_cdp_bridge_helper_report=native_helper,
         agent_app_report=app,
         agent_cli_report=cli,
         requirements=_build_requirements(primary, app, cli),
@@ -814,6 +886,167 @@ class OwnedIdeBridgeHelperReport:
         }
 
 
+@dataclasses.dataclass(frozen=True)
+class AgentNativeCdpBridgeHelperReport:
+    enabled: bool
+    output_root: str
+    agent: str = "codex app"
+    agent_id: str = "codex"
+    bridge_url: str = ""
+    registry_path: str = ""
+    manifest_path: str = ""
+    ready: bool = False
+    cleanup_ok: bool = True
+    launch_report: dict = dataclasses.field(default_factory=dict)
+    stop_report: dict = dataclasses.field(default_factory=dict)
+    error: str = ""
+    elapsed_ms: float = 0.0
+
+    @property
+    def mode(self) -> str:
+        return "agent-native-cdp-bridge-helper"
+
+    @property
+    def safety_mode(self) -> str:
+        return "managed_background_helper_launch"
+
+    @property
+    def control_allowed(self) -> bool:
+        return False
+
+    @property
+    def control_attempts(self) -> int:
+        return 0
+
+    @property
+    def window_input_attempts(self) -> int:
+        return 0
+
+    @property
+    def launch_attempts(self) -> int:
+        return _counter(self.launch_report, "launch_attempts")
+
+    @property
+    def stop_attempts(self) -> int:
+        return _counter(self.stop_report, "stop_attempts")
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "safety_mode": self.safety_mode,
+            "control_allowed": self.control_allowed,
+            "control_attempts": self.control_attempts,
+            "window_input_attempts": self.window_input_attempts,
+            "enabled": self.enabled,
+            "ready": self.ready,
+            "cleanup_ok": self.cleanup_ok,
+            "agent": self.agent,
+            "agent_id": self.agent_id,
+            "bridge_url": self.bridge_url,
+            "registry_path": self.registry_path,
+            "manifest_path": self.manifest_path,
+            "launch_attempts": self.launch_attempts,
+            "stop_attempts": self.stop_attempts,
+            "launch_report": dict(self.launch_report),
+            "stop_report": dict(self.stop_report),
+            "error": self.error,
+            "elapsed_ms": round(self.elapsed_ms, 3),
+        }
+
+
+def prepare_agent_native_cdp_bridge_helper(
+    *,
+    output_root: str | Path,
+    agent: str = "codex app",
+    agent_id: str = "codex",
+    bridge_port: int = 18888,
+    debugger_url: str = "",
+    process_name: str = "Codex.exe",
+    pid: int = 0,
+    hwnd: int = 0,
+    window_title: str = "",
+    project_name: str = "openwukong",
+    task_name: str = "major-real-no-loss",
+    target_title: str = "",
+    target_url: str = "",
+    registry_wait_timeout_sec: float = 5.0,
+    plan_executor: Callable[..., object] | None = None,
+) -> AgentNativeCdpBridgeHelperReport:
+    started = time.perf_counter()
+    root = Path(output_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    host = "127.0.0.1"
+    bridge_url = f"http://{host}:{int(bridge_port)}"
+    registry_path = root / "native-bridges.json"
+    manifest_path = root / "manifest.json"
+    launch_report: dict = {}
+    error = ""
+    ready = False
+    active_plan_executor = plan_executor or execute_session_readiness_plan
+
+    try:
+        if not str(debugger_url or "").strip():
+            error = "agent_native_cdp_bridge_debugger_url_required"
+            raise RuntimeError(error)
+        if not str(process_name or "").strip():
+            error = "agent_native_cdp_bridge_process_name_required"
+            raise RuntimeError(error)
+        plan = build_session_readiness_plan(
+            routes=("agent-native-cdp-bridge",),
+            options=SessionReadinessPlanOptions(
+                agent_bridge_agent=agent,
+                agent_bridge_agent_id=agent_id,
+                agent_bridge_host=host,
+                agent_bridge_port=int(bridge_port),
+                agent_bridge_debugger_url=debugger_url,
+                agent_bridge_registry_path=str(registry_path),
+                agent_bridge_process_name=process_name,
+                agent_bridge_pid=int(pid or 0),
+                agent_bridge_hwnd=int(hwnd or 0),
+                agent_bridge_window_title=window_title,
+                agent_bridge_project_name=project_name,
+                agent_bridge_task_name=task_name,
+                agent_bridge_target_title=target_title,
+                agent_bridge_target_url=target_url,
+            ),
+        )
+        launch_report = _report_to_dict(
+            active_plan_executor(
+                plan,
+                manifest_path=str(manifest_path),
+            )
+        )
+        if _counter(launch_report, "launch_attempts") <= 0:
+            error = "agent_native_cdp_bridge_helper_not_started"
+            raise RuntimeError(error)
+        ready = _wait_for_agent_native_cdp_bridge_registry(
+            registry_path,
+            bridge_url=bridge_url,
+            agent_id=agent_id,
+            timeout_sec=registry_wait_timeout_sec,
+        )
+        if not ready:
+            error = "agent_native_cdp_bridge_registry_not_ready"
+    except Exception as exc:
+        if not error:
+            error = str(exc) or exc.__class__.__name__
+
+    return AgentNativeCdpBridgeHelperReport(
+        enabled=True,
+        output_root=str(root),
+        agent=str(agent or "").strip(),
+        agent_id=str(agent_id or "").strip(),
+        bridge_url=bridge_url,
+        registry_path=str(registry_path),
+        manifest_path=str(manifest_path),
+        ready=ready,
+        cleanup_ok=False,
+        launch_report=launch_report,
+        error=error,
+        elapsed_ms=(time.perf_counter() - started) * 1000,
+    )
+
+
 def prepare_owned_ide_bridge_helper(
     *,
     output_root: str | Path,
@@ -1009,6 +1242,26 @@ def _disabled_owned_ide_bridge_helper_report() -> dict:
     }
 
 
+def _disabled_agent_native_cdp_bridge_helper_report() -> dict:
+    return {
+        "mode": "agent-native-cdp-bridge-helper",
+        "safety_mode": "managed_background_helper_launch",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "enabled": False,
+        "ready": False,
+        "cleanup_ok": True,
+        "agent": "",
+        "agent_id": "",
+        "bridge_url": "",
+        "registry_path": "",
+        "manifest_path": "",
+        "launch_attempts": 0,
+        "stop_attempts": 0,
+    }
+
+
 def _effective_ide_bridge_urls(
     explicit_urls: Iterable[str],
     helper_report: dict,
@@ -1025,7 +1278,42 @@ def _effective_ide_bridge_urls(
     return tuple(urls)
 
 
+def _effective_agent_native_bridge_registry_paths(
+    explicit_paths: Iterable[str | Path],
+    helper_report: dict,
+) -> tuple[str | Path, ...]:
+    paths: list[str | Path] = []
+    seen: set[str] = set()
+    for value in explicit_paths or ():
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            paths.append(value)
+    if bool(helper_report.get("ready", False)):
+        registry_path = str(helper_report.get("registry_path", "") or "").strip()
+        if registry_path and registry_path not in seen:
+            paths.append(Path(registry_path))
+    return tuple(paths)
+
+
 def _stop_owned_ide_bridge_helper_if_needed(helper_report: dict) -> dict:
+    if not bool(helper_report.get("enabled", False)):
+        return helper_report
+    manifest_path = str(helper_report.get("manifest_path", "") or "").strip()
+    if not manifest_path:
+        return dict(helper_report)
+    existing_stop = helper_report.get("stop_report")
+    if isinstance(existing_stop, dict) and existing_stop:
+        return dict(helper_report)
+    stop_report = stop_session_readiness_manifest(manifest_path).to_dict()
+    updated = dict(helper_report)
+    updated["stop_report"] = stop_report
+    updated["stop_attempts"] = _counter(stop_report, "stop_attempts")
+    updated["cleanup_ok"] = _stop_report_cleanup_ok(stop_report)
+    return updated
+
+
+def _stop_agent_native_cdp_bridge_helper_if_needed(helper_report: dict) -> dict:
     if not bool(helper_report.get("enabled", False)):
         return helper_report
     manifest_path = str(helper_report.get("manifest_path", "") or "").strip()
@@ -1121,6 +1409,40 @@ def _wait_for_ide_bridge_capabilities(
                 last["error"] = "ide_bridge_capability_timeout"
             return last
         time.sleep(0.5)
+
+
+def _wait_for_agent_native_cdp_bridge_registry(
+    registry_path: Path,
+    *,
+    bridge_url: str,
+    agent_id: str,
+    timeout_sec: float,
+) -> bool:
+    deadline = time.monotonic() + max(0.1, float(timeout_sec or 0.1))
+    expected_url = str(bridge_url or "").strip().rstrip("/")
+    expected_agent_id = str(agent_id or "").strip().casefold()
+    while True:
+        try:
+            data = json.loads(registry_path.read_text(encoding="utf-8"))
+            entries = data.get("agent_native_bridges", [])
+            if isinstance(entries, list):
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_url = str(entry.get("url", "") or "").strip().rstrip("/")
+                    entry_agent_id = str(
+                        entry.get("agent_id", "") or ""
+                    ).strip().casefold()
+                    if (
+                        entry_url == expected_url
+                        and (not expected_agent_id or entry_agent_id == expected_agent_id)
+                    ):
+                        return True
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
 
 
 def _adapter_available(capability_report: dict, adapter_id: str) -> bool:
@@ -1363,6 +1685,29 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--owned-ide-workspace-root", default="")
     parser.add_argument("--owned-ide-chat-adapter-id", default="cursor")
     parser.add_argument("--owned-ide-capability-timeout-sec", type=float, default=30.0)
+    parser.add_argument(
+        "--allow-agent-native-cdp-bridge-helper-launch",
+        action="store_true",
+        help="Launch a managed local agent-native CDP bridge helper and forward its registry to agent app probes.",
+    )
+    parser.add_argument("--agent-native-cdp-bridge-helper-agent", default="codex app")
+    parser.add_argument("--agent-native-cdp-bridge-helper-agent-id", default="codex")
+    parser.add_argument("--agent-native-cdp-bridge-helper-port", type=int, default=18888)
+    parser.add_argument("--agent-native-cdp-bridge-helper-debugger-url", default="")
+    parser.add_argument(
+        "--agent-native-cdp-bridge-helper-process-name",
+        default="Codex.exe",
+    )
+    parser.add_argument("--agent-native-cdp-bridge-helper-pid", type=int, default=0)
+    parser.add_argument("--agent-native-cdp-bridge-helper-hwnd", type=int, default=0)
+    parser.add_argument("--agent-native-cdp-bridge-helper-window-title", default="")
+    parser.add_argument("--agent-native-cdp-bridge-helper-target-title", default="")
+    parser.add_argument("--agent-native-cdp-bridge-helper-target-url", default="")
+    parser.add_argument(
+        "--agent-native-cdp-bridge-registry-wait-timeout-sec",
+        type=float,
+        default=5.0,
+    )
     parser.add_argument("--allow-agent-cli-execution", action="store_true")
     parser.add_argument("--agent-cli-timeout-sec", type=float, default=90.0)
     args = parser.parse_args(argv)
@@ -1414,6 +1759,42 @@ def main(argv: Optional[list[str]] = None) -> int:
         owned_ide_workspace_root=args.owned_ide_workspace_root,
         owned_ide_chat_adapter_id=args.owned_ide_chat_adapter_id,
         owned_ide_capability_timeout_sec=args.owned_ide_capability_timeout_sec,
+        allow_agent_native_cdp_bridge_helper_launch=(
+            args.allow_agent_native_cdp_bridge_helper_launch
+        ),
+        agent_native_cdp_bridge_helper_agent=(
+            args.agent_native_cdp_bridge_helper_agent
+        ),
+        agent_native_cdp_bridge_helper_agent_id=(
+            args.agent_native_cdp_bridge_helper_agent_id
+        ),
+        agent_native_cdp_bridge_helper_port=(
+            args.agent_native_cdp_bridge_helper_port
+        ),
+        agent_native_cdp_bridge_helper_debugger_url=(
+            args.agent_native_cdp_bridge_helper_debugger_url
+        ),
+        agent_native_cdp_bridge_helper_process_name=(
+            args.agent_native_cdp_bridge_helper_process_name
+        ),
+        agent_native_cdp_bridge_helper_pid=(
+            args.agent_native_cdp_bridge_helper_pid
+        ),
+        agent_native_cdp_bridge_helper_hwnd=(
+            args.agent_native_cdp_bridge_helper_hwnd
+        ),
+        agent_native_cdp_bridge_helper_window_title=(
+            args.agent_native_cdp_bridge_helper_window_title
+        ),
+        agent_native_cdp_bridge_helper_target_title=(
+            args.agent_native_cdp_bridge_helper_target_title
+        ),
+        agent_native_cdp_bridge_helper_target_url=(
+            args.agent_native_cdp_bridge_helper_target_url
+        ),
+        agent_native_cdp_bridge_registry_wait_timeout_sec=(
+            args.agent_native_cdp_bridge_registry_wait_timeout_sec
+        ),
         allow_agent_cli_execution=args.allow_agent_cli_execution,
         agent_cli_timeout_sec=args.agent_cli_timeout_sec,
     )

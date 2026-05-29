@@ -2,9 +2,12 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from openwukong.evaluation import major_real_no_loss
 from openwukong.evaluation.major_real_no_loss import (
     MajorScenarioRealNoLossReport,
+    prepare_agent_native_cdp_bridge_helper,
     prepare_owned_ide_bridge_helper,
     run_major_scenario_real_no_loss,
 )
@@ -18,12 +21,17 @@ class _FakeReport:
         return dict(self._data)
 
 
-def _major_report(primary=None, app=None, cli=None, helper=None):
+class _FakeMainReport(_FakeReport):
+    safe_run_ok = True
+
+
+def _major_report(primary=None, app=None, cli=None, helper=None, native_helper=None):
     return MajorScenarioRealNoLossReport(
         output_root="",
         artifact_path="",
         primary_report=dict(primary or {}),
         owned_ide_bridge_helper_report=dict(helper or {}),
+        agent_native_cdp_bridge_helper_report=dict(native_helper or {}),
         agent_app_report=dict(app or {}),
         agent_cli_report=dict(cli or {}),
         requirements=(),
@@ -608,6 +616,254 @@ class MajorRealNoLossTests(unittest.TestCase):
             (registry_path,),
         )
         self.assertEqual(data["control_attempts"], 0)
+
+    def test_runner_prepares_agent_native_cdp_bridge_helper_and_forwards_registry(self):
+        app_calls = []
+        helper_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _helper_runner(**kwargs):
+            helper_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-native-cdp-bridge-helper",
+                    "safety_mode": "managed_background_helper_launch",
+                    "enabled": True,
+                    "ready": True,
+                    "cleanup_ok": True,
+                    "bridge_url": "http://127.0.0.1:18890",
+                    "registry_path": str(Path(kwargs["output_root"]) / "native-bridges.json"),
+                    "manifest_path": str(Path(kwargs["output_root"]) / "manifest.json"),
+                    "launch_attempts": 1,
+                    "stop_attempts": 1,
+                    "stop_report": {
+                        "mode": "session-readiness-stop",
+                        "stop_attempts": 1,
+                        "results": [{"status": "stopped"}],
+                    },
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent": kwargs["agent"],
+                    "agent_id": kwargs["agent_id"],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "passed_cases": 1,
+                    "failed_cases": 0,
+                    "native_ready_cases": 1,
+                    "cases": [
+                        {
+                            "agent": "codex app",
+                            "status": "native_connector_ready",
+                            "real_verified": True,
+                            "native_ready": True,
+                        }
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            explicit_registry = Path(tmp) / "explicit-native-bridges.json"
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("codex app",),
+                cli_agents=(),
+                project_name="openwukong",
+                task_name="codex-agent-native-cdp-helper",
+                agent_native_bridge_registry_paths=(explicit_registry,),
+                allow_agent_native_cdp_bridge_helper_launch=True,
+                agent_native_cdp_bridge_helper_agent="codex app",
+                agent_native_cdp_bridge_helper_agent_id="codex",
+                agent_native_cdp_bridge_helper_port=18890,
+                agent_native_cdp_bridge_helper_debugger_url="http://127.0.0.1:9333",
+                agent_native_cdp_bridge_helper_process_name="Codex.exe",
+                agent_native_cdp_bridge_helper_runner=_helper_runner,
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        helper_registry = Path(tmp) / "agent-native-cdp-bridge" / "native-bridges.json"
+        self.assertEqual(len(helper_calls), 1)
+        self.assertEqual(helper_calls[0]["agent"], "codex app")
+        self.assertEqual(helper_calls[0]["agent_id"], "codex")
+        self.assertEqual(helper_calls[0]["debugger_url"], "http://127.0.0.1:9333")
+        self.assertEqual(helper_calls[0]["process_name"], "Codex.exe")
+        self.assertEqual(
+            tuple(Path(path).resolve() for path in app_calls[0]["agent_native_bridge_registry_paths"]),
+            (explicit_registry.resolve(), helper_registry.resolve()),
+        )
+        self.assertEqual(data["agent_native_cdp_bridge_launch_attempts"], 1)
+        self.assertEqual(data["agent_native_cdp_bridge_stop_attempts"], 1)
+        self.assertTrue(data["agent_native_cdp_bridge_cleanup_ok"])
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+
+    def test_prepare_agent_native_cdp_bridge_helper_launches_and_waits_for_registry(self):
+        calls = []
+
+        def _execute_plan(plan, **kwargs):
+            action = plan.to_dict()["actions"][0]
+            calls.append({"action": action, "kwargs": dict(kwargs)})
+            argv = action["argv"]
+            registry_path = Path(argv[argv.index("--registry-path") + 1])
+            registry_path.parent.mkdir(parents=True, exist_ok=True)
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "openwukong-native-bridge-registry-v1",
+                        "agent_native_bridges": [
+                            {
+                                "url": "http://127.0.0.1:18891",
+                                "type": "agent_native_bridge",
+                                "agent_id": "codex",
+                                "agent": "codex app",
+                                "surface_kind": "desktop_app",
+                                "enabled": True,
+                                "app_binding": {"process_name": "Codex.exe"},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return _FakeReport(
+                {
+                    "mode": "session-readiness-execution",
+                    "safety_mode": "isolated_helper_launch",
+                    "control_attempts": 0,
+                    "launch_attempts": 1,
+                    "manifest_path": kwargs["manifest_path"],
+                    "results": [
+                        {
+                            "status": "started",
+                            "pid": 4343,
+                            "readiness_url": "http://127.0.0.1:18891",
+                        }
+                    ],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = prepare_agent_native_cdp_bridge_helper(
+                output_root=Path(tmp) / "agent-native",
+                agent="codex app",
+                agent_id="codex",
+                bridge_port=18891,
+                debugger_url="http://127.0.0.1:9333",
+                process_name="Codex.exe",
+                project_name="openwukong",
+                task_name="desktop-message",
+                plan_executor=_execute_plan,
+                registry_wait_timeout_sec=0.2,
+            )
+            data = report.to_dict()
+            registry_exists = Path(data["registry_path"]).is_file()
+
+        self.assertTrue(data["ready"])
+        self.assertEqual(data["launch_attempts"], 1)
+        self.assertEqual(data["bridge_url"], "http://127.0.0.1:18891")
+        self.assertTrue(registry_exists)
+        self.assertEqual(calls[0]["action"]["route_id"], "agent-native-cdp-bridge")
+        self.assertIn("--debugger-url", calls[0]["action"]["argv"])
+        self.assertIn("--process-name", calls[0]["action"]["argv"])
+
+    def test_cli_forwards_agent_native_cdp_bridge_helper_options(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--allow-agent-native-cdp-bridge-helper-launch",
+                    "--agent-native-cdp-bridge-helper-agent",
+                    "codex app",
+                    "--agent-native-cdp-bridge-helper-agent-id",
+                    "codex",
+                    "--agent-native-cdp-bridge-helper-port",
+                    "18892",
+                    "--agent-native-cdp-bridge-helper-debugger-url",
+                    "http://127.0.0.1:9333",
+                    "--agent-native-cdp-bridge-helper-process-name",
+                    "Codex.exe",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0]["allow_agent_native_cdp_bridge_helper_launch"])
+        self.assertEqual(
+            calls[0]["agent_native_cdp_bridge_helper_agent"],
+            "codex app",
+        )
+        self.assertEqual(calls[0]["agent_native_cdp_bridge_helper_agent_id"], "codex")
+        self.assertEqual(calls[0]["agent_native_cdp_bridge_helper_port"], 18892)
+        self.assertEqual(
+            calls[0]["agent_native_cdp_bridge_helper_debugger_url"],
+            "http://127.0.0.1:9333",
+        )
+        self.assertEqual(
+            calls[0]["agent_native_cdp_bridge_helper_process_name"],
+            "Codex.exe",
+        )
 
     def test_runner_passes_uia_semantic_options_and_marks_app_requirement_verified(self):
         app_calls = []

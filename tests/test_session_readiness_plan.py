@@ -10,6 +10,7 @@ from unittest.mock import patch
 from openwukong.control.session_readiness_plan import (
     SessionReadinessPlanOptions,
     TaskTreeSessionReadinessTerminator,
+    _managed_process_tokens,
     build_session_readiness_plan,
     execute_session_readiness_plan,
     stop_session_readiness_manifest,
@@ -901,6 +902,32 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertEqual(data["results"][0]["status"], "stopped")
         self.assertEqual(terminator.tree_pids, [7171])
         self.assertEqual(terminator.owned_argv, [argv])
+
+    def test_agent_native_cdp_bridge_residual_tokens_exclude_target_debugger_url(self):
+        registry_path = "E:/tmp/openwukong/native-bridges.json"
+        argv = (
+            "python.exe",
+            "-m",
+            "openwukong.control.agent_native_cdp_bridge",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18888",
+            "--agent-id",
+            "codex",
+            "--debugger-url",
+            "http://127.0.0.1:65530",
+            "--process-name",
+            "Codex.exe",
+            "--registry-path",
+            registry_path,
+        )
+
+        tokens = _managed_process_tokens(argv)
+
+        self.assertIn("openwukong.control.agent_native_cdp_bridge", tokens)
+        self.assertIn(registry_path, tokens)
+        self.assertNotIn("http://127.0.0.1:65530", tokens)
 
 
 if __name__ == "__main__":
