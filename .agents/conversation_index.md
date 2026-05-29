@@ -6553,3 +6553,62 @@ When a new conversation starts in this repo:
     - the remaining app-chat gap is explicit opt-in execution of the owned
       DevTools launch route, probing the new endpoint, then performing native
       bridge send/readback verification without foreground takeover
+- 2026-05-29 integrated owned agent-app DevTools launch into the unified
+  no-loss runner behind an explicit opt-in gate:
+  - implementation:
+    - `major_real_no_loss` now accepts
+      `allow_agent_app_devtools_owned_launch`
+    - the runner now builds the read-only `agent_app_devtools_resolution`
+      report before agent app probing, then can prepare an
+      `agent-app-devtools-owned-launch-fleet` from those resolved executable
+      paths
+    - `prepare_agent_app_devtools_owned_launch_fleet` launches only
+      `executable_ready=true` app surfaces through the existing
+      `agent-app-devtools-owned` session readiness route, using per-agent
+      isolated profiles and default local DevTools ports:
+      Codex `19555`, Claude `19556`, Cursor `19557`
+    - the runner forwards ready owned DevTools debugger URLs to
+      `agent_app_real_no_loss`, and then stops the owned launch manifests in
+      `finally`
+    - the major report now exposes
+      `agent_app_devtools_launch_attempts`,
+      `agent_app_devtools_stop_attempts`,
+      `agent_app_devtools_cleanup_ok`, and a new
+      `subreports.agent_app_devtools_owned_launch`
+    - the CLI exposes `--allow-agent-app-devtools-owned-launch`
+    - default behavior remains no GUI launch: without the explicit flag,
+      `agent_app_devtools_launch_attempts=0`
+  - official-doc basis:
+    - Python `subprocess` docs were checked for the managed helper lifecycle
+      and Python `argparse` docs were checked before adding the CLI gate
+  - validation:
+    - red tests first:
+      `test_runner_prepares_agent_app_devtools_owned_launch_and_forwards_debugger_urls`,
+      `test_prepare_agent_app_devtools_owned_launch_fleet_launches_resolved_apps`,
+      and `test_cli_forwards_agent_app_devtools_owned_launch_option` failed
+      before runner integration, fleet preparation, and CLI support existed
+    - targeted green:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_prepares_agent_app_devtools_owned_launch_and_forwards_debugger_urls tests.test_major_real_no_loss.MajorRealNoLossTests.test_prepare_agent_app_devtools_owned_launch_fleet_launches_resolved_apps tests.test_major_real_no_loss.MajorRealNoLossTests.test_cli_forwards_agent_app_devtools_owned_launch_option`: OK
+    - focused regression:
+      `python -m unittest tests.test_major_real_no_loss tests.test_agent_app_real_no_loss tests.test_session_readiness_plan tests.test_app_resolution tests.test_agent_surface_report`: `89 tests OK`
+    - R42 real no-launch smoke:
+      `run_major_scenario_real_no_loss(... agent_apps=("codex app", "claude desktop", "cursor"), cli_agents=())`
+      wrote
+      `logs/runtime/major-real-no-loss-r42-agent-app-devtools-owned-no-launch/major-real-no-loss-report.json`
+      and produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_app_devtools_launch_attempts=0`,
+      `agent_app_devtools_stop_attempts=0`,
+      `agent_app_devtools_cleanup_ok=true`, and
+      `executable_ready_cases=3`
+    - full verification:
+      `python -m unittest discover tests`: `528 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - OpenWukong now has the full no-loss runner lifecycle to resolve,
+      launch, forward, and clean up owned Codex App / Claude Desktop / Cursor
+      DevTools endpoints, but it executes only with an explicit opt-in flag
+    - the next gap is a real opt-in background launch test on this machine,
+      then endpoint probing and native bridge send/readback verification
+      against the launched owned endpoints

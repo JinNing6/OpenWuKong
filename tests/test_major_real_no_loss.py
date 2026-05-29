@@ -902,6 +902,253 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(data["control_attempts"], 0)
         self.assertEqual(data["window_input_attempts"], 0)
 
+    def test_runner_prepares_agent_app_devtools_owned_launch_and_forwards_debugger_urls(self):
+        app_calls = []
+        devtools_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        class _Resolver:
+            def resolve(self, agent):
+                exe_name = {
+                    "codex app": "Codex.exe",
+                    "claude desktop": "Claude.exe",
+                }[agent]
+                return _FakeReport(
+                    {
+                        "mode": "app-resolution",
+                        "ok": True,
+                        "decision": "resolved",
+                        "path": f"C:/Apps/{exe_name}",
+                        "source": "running-process",
+                    }
+                )
+
+        def _devtools_launch_runner(**kwargs):
+            devtools_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-devtools-owned-launch-fleet",
+                    "safety_mode": "managed_background_helper_launch",
+                    "enabled": True,
+                    "ready": True,
+                    "cleanup_ok": True,
+                    "output_root": str(kwargs["output_root"]),
+                    "launch_attempts": 2,
+                    "stop_attempts": 2,
+                    "debugger_urls": [
+                        "http://127.0.0.1:19555",
+                        "http://127.0.0.1:19556",
+                    ],
+                    "helpers": [
+                        {
+                            "agent": "codex app",
+                            "agent_id": "codex",
+                            "ready": True,
+                            "cleanup_ok": True,
+                            "debugger_url": "http://127.0.0.1:19555",
+                            "launch_attempts": 1,
+                            "stop_attempts": 1,
+                            "manifest_path": "codex-manifest.json",
+                            "stop_report": {
+                                "mode": "session-readiness-stop",
+                                "stop_attempts": 1,
+                                "results": [{"status": "stopped"}],
+                            },
+                        },
+                        {
+                            "agent": "claude desktop",
+                            "agent_id": "claude",
+                            "ready": True,
+                            "cleanup_ok": True,
+                            "debugger_url": "http://127.0.0.1:19556",
+                            "launch_attempts": 1,
+                            "stop_attempts": 1,
+                            "manifest_path": "claude-manifest.json",
+                            "stop_report": {
+                                "mode": "session-readiness-stop",
+                                "stop_attempts": 1,
+                                "results": [{"status": "stopped"}],
+                            },
+                        },
+                    ],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 2,
+                    "background_screenshot_success_count": 2,
+                    "background_screenshot_focus_stable": True,
+                    "passed_cases": 2,
+                    "failed_cases": 0,
+                    "native_ready_cases": 2,
+                    "cases": [
+                        {
+                            "agent": "codex app",
+                            "status": "native_connector_ready",
+                            "real_verified": True,
+                            "native_ready": True,
+                        },
+                        {
+                            "agent": "claude desktop",
+                            "status": "native_connector_ready",
+                            "real_verified": True,
+                            "native_ready": True,
+                        },
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("codex app", "claude desktop"),
+                cli_agents=(),
+                project_name="openwukong",
+                task_name="agent-app-devtools-owned",
+                debugger_urls=("http://127.0.0.1:19444",),
+                allow_agent_app_devtools_owned_launch=True,
+                agent_app_devtools_resolver=_Resolver(),
+                agent_app_devtools_owned_launch_runner=_devtools_launch_runner,
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(len(devtools_calls), 1)
+        resolution_cases = devtools_calls[0]["resolution_report"]["cases"]
+        self.assertEqual(
+            [case["executable_path"] for case in resolution_cases],
+            ["C:/Apps/Codex.exe", "C:/Apps/Claude.exe"],
+        )
+        self.assertEqual(
+            app_calls[0]["debugger_urls"],
+            (
+                "http://127.0.0.1:19444",
+                "http://127.0.0.1:19555",
+                "http://127.0.0.1:19556",
+            ),
+        )
+        self.assertEqual(data["agent_app_devtools_launch_attempts"], 2)
+        self.assertEqual(data["agent_app_devtools_stop_attempts"], 2)
+        self.assertTrue(data["agent_app_devtools_cleanup_ok"])
+        self.assertEqual(
+            data["subreports"]["agent_app_devtools_owned_launch"]["mode"],
+            "agent-app-devtools-owned-launch-fleet",
+        )
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+
+    def test_prepare_agent_app_devtools_owned_launch_fleet_launches_resolved_apps(self):
+        calls = []
+
+        def _execute_plan(plan, **kwargs):
+            action = plan.to_dict()["actions"][0]
+            calls.append({"action": action, "kwargs": dict(kwargs)})
+            return _FakeReport(
+                {
+                    "mode": "session-readiness-execution",
+                    "safety_mode": "isolated_helper_launch",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "launch_attempts": 1,
+                    "manifest_path": kwargs["manifest_path"],
+                    "results": [
+                        {
+                            "status": "started",
+                            "pid": 4343,
+                            "readiness_url": action["readiness_url"],
+                        }
+                    ],
+                }
+            )
+
+        resolution_report = {
+            "mode": "agent-app-devtools-resolution",
+            "cases": [
+                {
+                    "agent": "codex app",
+                    "agent_id": "codex",
+                    "status": "resolved",
+                    "executable_ready": True,
+                    "executable_path": "C:/Apps/Codex.exe",
+                },
+                {
+                    "agent": "claude desktop",
+                    "agent_id": "claude",
+                    "status": "resolved",
+                    "executable_ready": True,
+                    "executable_path": "C:/Apps/Claude.exe",
+                },
+                {
+                    "agent": "cursor",
+                    "agent_id": "cursor",
+                    "status": "app_not_found",
+                    "executable_ready": False,
+                    "executable_path": "",
+                },
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = major_real_no_loss.prepare_agent_app_devtools_owned_launch_fleet(
+                output_root=Path(tmp) / "agent-app-devtools",
+                resolution_report=resolution_report,
+                plan_executor=_execute_plan,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(data["launch_attempts"], 2)
+        self.assertFalse(data["cleanup_ok"])
+        self.assertEqual(
+            data["debugger_urls"],
+            ["http://127.0.0.1:19555", "http://127.0.0.1:19556"],
+        )
+        self.assertEqual(
+            [call["action"]["route_id"] for call in calls],
+            ["agent-app-devtools-owned", "agent-app-devtools-owned"],
+        )
+        self.assertIn("--remote-debugging-port=19555", calls[0]["action"]["argv"])
+        self.assertIn("--user-data-dir", " ".join(calls[0]["action"]["argv"]))
+        self.assertEqual(data["helpers"][0]["agent_id"], "codex")
+
     def test_report_exposes_agent_app_endpoint_acceptance_package(self):
         report = _major_report(
             app={
@@ -1267,6 +1514,40 @@ class MajorRealNoLossTests(unittest.TestCase):
             calls[0]["agent_native_cdp_bridge_helper_specs"][1]["process_name"],
             "Claude.exe",
         )
+
+    def test_cli_forwards_agent_app_devtools_owned_launch_option(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--allow-agent-app-devtools-owned-launch",
+                    "--agent-app",
+                    "codex app",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0]["allow_agent_app_devtools_owned_launch"])
+        self.assertEqual(calls[0]["agent_apps"], ("codex app",))
 
     def test_runner_passes_uia_semantic_options_and_marks_app_requirement_verified(self):
         app_calls = []

@@ -49,6 +49,7 @@ AgentAppRunner = Callable[..., object]
 AgentCliRunner = Callable[..., object]
 OwnedIdeBridgeHelperRunner = Callable[..., object]
 AgentNativeCdpBridgeHelperRunner = Callable[..., object]
+AgentAppDevToolsOwnedLaunchRunner = Callable[..., object]
 AgentAppDevToolsResolver = object
 
 
@@ -90,6 +91,7 @@ class MajorScenarioRealNoLossReport:
     agent_cli_report: dict
     requirements: tuple[MajorRequirement, ...]
     agent_app_devtools_resolution_report: dict = dataclasses.field(default_factory=dict)
+    agent_app_devtools_owned_launch_report: dict = dataclasses.field(default_factory=dict)
     elapsed_ms: float = 0.0
 
     @property
@@ -168,6 +170,24 @@ class MajorScenarioRealNoLossReport:
         )
 
     @property
+    def agent_app_devtools_launch_attempts(self) -> int:
+        return _counter(self.agent_app_devtools_owned_launch_report, "launch_attempts")
+
+    @property
+    def agent_app_devtools_stop_attempts(self) -> int:
+        return _counter(self.agent_app_devtools_owned_launch_report, "stop_attempts")
+
+    @property
+    def agent_app_devtools_cleanup_ok(self) -> bool:
+        if not self.agent_app_devtools_owned_launch_report:
+            return True
+        if not bool(self.agent_app_devtools_owned_launch_report.get("enabled", False)):
+            return True
+        return bool(
+            self.agent_app_devtools_owned_launch_report.get("cleanup_ok", False)
+        )
+
+    @property
     def bridge_send_attempts(self) -> int:
         return _counter(self.agent_app_report, "bridge_send_attempts")
 
@@ -212,6 +232,7 @@ class MajorScenarioRealNoLossReport:
             + self.window_input_attempts
             + self.external_communication_attempts
             + self.owned_ide_bridge_launch_attempts
+            + self.agent_app_devtools_launch_attempts
             + self.bridge_send_attempts
             + self.agent_command_attempts
             + self.owned_app_launch_attempts
@@ -243,6 +264,8 @@ class MajorScenarioRealNoLossReport:
             if _counter(report, "failed_cases") > 0
         ) + (0 if self.owned_ide_bridge_cleanup_ok else 1) + (
             0 if self.agent_native_cdp_bridge_cleanup_ok else 1
+        ) + (
+            0 if self.agent_app_devtools_cleanup_ok else 1
         )
 
     @property
@@ -263,6 +286,7 @@ class MajorScenarioRealNoLossReport:
             and self.automation_focus_safe
             and self.owned_ide_bridge_cleanup_ok
             and self.agent_native_cdp_bridge_cleanup_ok
+            and self.agent_app_devtools_cleanup_ok
         )
 
     @property
@@ -274,6 +298,7 @@ class MajorScenarioRealNoLossReport:
             and self.automation_focus_safe
             and self.owned_ide_bridge_cleanup_ok
             and self.agent_native_cdp_bridge_cleanup_ok
+            and self.agent_app_devtools_cleanup_ok
         )
 
     def to_dict(self) -> dict:
@@ -291,6 +316,9 @@ class MajorScenarioRealNoLossReport:
             "agent_native_cdp_bridge_launch_attempts": self.agent_native_cdp_bridge_launch_attempts,
             "agent_native_cdp_bridge_stop_attempts": self.agent_native_cdp_bridge_stop_attempts,
             "agent_native_cdp_bridge_cleanup_ok": self.agent_native_cdp_bridge_cleanup_ok,
+            "agent_app_devtools_launch_attempts": self.agent_app_devtools_launch_attempts,
+            "agent_app_devtools_stop_attempts": self.agent_app_devtools_stop_attempts,
+            "agent_app_devtools_cleanup_ok": self.agent_app_devtools_cleanup_ok,
             "bridge_send_attempts": self.bridge_send_attempts,
             "agent_command_attempts": self.agent_command_attempts,
             "owned_app_launch_attempts": self.owned_app_launch_attempts,
@@ -321,6 +349,9 @@ class MajorScenarioRealNoLossReport:
                 "agent_app": dict(self.agent_app_report),
                 "agent_app_devtools_resolution": dict(
                     self.agent_app_devtools_resolution_report
+                ),
+                "agent_app_devtools_owned_launch": dict(
+                    self.agent_app_devtools_owned_launch_report
                 ),
                 "agent_cli": dict(self.agent_cli_report),
             },
@@ -386,6 +417,7 @@ def run_major_scenario_real_no_loss(
     agent_native_cdp_bridge_helper_target_url: str = "",
     agent_native_cdp_bridge_registry_wait_timeout_sec: float = 5.0,
     agent_native_cdp_bridge_helper_specs: Iterable[dict] = (),
+    allow_agent_app_devtools_owned_launch: bool = False,
     allow_agent_cli_execution: bool = False,
     agent_cli_timeout_sec: float = 90.0,
     primary_runner: PrimaryRunner | None = None,
@@ -393,6 +425,7 @@ def run_major_scenario_real_no_loss(
     agent_native_cdp_bridge_helper_runner: AgentNativeCdpBridgeHelperRunner | None = None,
     agent_app_runner: AgentAppRunner | None = None,
     agent_app_devtools_resolver: AgentAppDevToolsResolver | None = None,
+    agent_app_devtools_owned_launch_runner: AgentAppDevToolsOwnedLaunchRunner | None = None,
     agent_cli_runner: AgentCliRunner | None = None,
 ) -> MajorScenarioRealNoLossReport:
     started = time.perf_counter()
@@ -430,9 +463,13 @@ def run_major_scenario_real_no_loss(
     )
     helper = _disabled_owned_ide_bridge_helper_report()
     native_helper = _disabled_agent_native_cdp_bridge_helper_report()
+    agent_app_devtools_launch = _disabled_agent_app_devtools_owned_launch_report()
     app: dict = {}
     cli: dict = {}
-    app_devtools_resolution: dict = {}
+    app_devtools_resolution: dict = _build_agent_app_devtools_resolution_report(
+        tuple(agent_apps),
+        resolver=agent_app_devtools_resolver,
+    )
     try:
         if allow_owned_ide_bridge_helper_launch:
             helper = _report_to_dict(
@@ -488,6 +525,16 @@ def run_major_scenario_real_no_loss(
                         registry_wait_timeout_sec=agent_native_cdp_bridge_registry_wait_timeout_sec,
                     )
                 )
+        if allow_agent_app_devtools_owned_launch:
+            agent_app_devtools_launch = _report_to_dict(
+                (
+                    agent_app_devtools_owned_launch_runner
+                    or prepare_agent_app_devtools_owned_launch_fleet
+                )(
+                    output_root=root / "agent-app-devtools",
+                    resolution_report=app_devtools_resolution,
+                )
+            )
         effective_ide_bridge_urls = _effective_ide_bridge_urls(
             ide_bridge_urls,
             helper,
@@ -500,6 +547,10 @@ def run_major_scenario_real_no_loss(
         )
         effective_workspace_path = workspace_path or str(
             helper.get("workspace_path", "") or ""
+        )
+        effective_debugger_urls = _effective_agent_app_devtools_debugger_urls(
+            debugger_urls,
+            agent_app_devtools_launch,
         )
         app = _report_to_dict(
             (agent_app_runner or run_agent_app_real_no_loss)(
@@ -516,7 +567,7 @@ def run_major_scenario_real_no_loss(
                 bridge_message=app_bridge_message,
                 required_markers=tuple(app_bridge_required_markers or ()),
                 forbidden_markers=tuple(app_bridge_forbidden_markers or ()),
-                debugger_urls=tuple(debugger_urls or ()),
+                debugger_urls=effective_debugger_urls,
                 ide_bridge_urls=effective_ide_bridge_urls,
                 agent_native_bridge_urls=tuple(agent_native_bridge_urls or ()),
                 agent_native_bridge_registry_paths=effective_agent_native_bridge_registry_paths,
@@ -531,12 +582,11 @@ def run_major_scenario_real_no_loss(
                 timeout_sec=agent_cli_timeout_sec,
             )
         )
-        app_devtools_resolution = _build_agent_app_devtools_resolution_report(
-            tuple(agent_apps),
-            resolver=agent_app_devtools_resolver,
-        )
     finally:
         native_helper = _stop_agent_native_cdp_bridge_helper_if_needed(native_helper)
+        agent_app_devtools_launch = _stop_agent_app_devtools_owned_launch_if_needed(
+            agent_app_devtools_launch
+        )
         helper = _stop_owned_ide_bridge_helper_if_needed(helper)
 
     report = MajorScenarioRealNoLossReport(
@@ -548,6 +598,7 @@ def run_major_scenario_real_no_loss(
         agent_app_report=app,
         agent_cli_report=cli,
         agent_app_devtools_resolution_report=app_devtools_resolution,
+        agent_app_devtools_owned_launch_report=agent_app_devtools_launch,
         requirements=_build_requirements(primary, app, cli),
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
@@ -579,6 +630,11 @@ def format_major_scenario_real_no_loss_report(
             f"stops={report.owned_ide_bridge_stop_attempts}  "
             f"isolated probes={report.isolated_ide_command_probe_attempts}  "
             f"cleanup={str(report.owned_ide_bridge_cleanup_ok).lower()}"
+        ),
+        (
+            f"Agent app DevTools: launches={report.agent_app_devtools_launch_attempts}  "
+            f"stops={report.agent_app_devtools_stop_attempts}  "
+            f"cleanup={str(report.agent_app_devtools_cleanup_ok).lower()}"
         ),
     ]
     for requirement in report.requirements:
@@ -1384,6 +1440,155 @@ class AgentNativeCdpBridgeHelperReport:
         }
 
 
+@dataclasses.dataclass(frozen=True)
+class AgentAppDevToolsOwnedLaunchReport:
+    enabled: bool
+    output_root: str
+    helpers: tuple[dict, ...] = ()
+    ready: bool = False
+    cleanup_ok: bool = True
+    elapsed_ms: float = 0.0
+
+    @property
+    def mode(self) -> str:
+        return "agent-app-devtools-owned-launch-fleet"
+
+    @property
+    def safety_mode(self) -> str:
+        return "managed_background_helper_launch"
+
+    @property
+    def control_allowed(self) -> bool:
+        return False
+
+    @property
+    def control_attempts(self) -> int:
+        return 0
+
+    @property
+    def window_input_attempts(self) -> int:
+        return 0
+
+    @property
+    def launch_attempts(self) -> int:
+        return sum(_counter(helper, "launch_attempts") for helper in self.helpers)
+
+    @property
+    def stop_attempts(self) -> int:
+        return sum(_counter(helper, "stop_attempts") for helper in self.helpers)
+
+    @property
+    def debugger_urls(self) -> tuple[str, ...]:
+        urls: list[str] = []
+        for helper in self.helpers:
+            if not bool(helper.get("ready", False)):
+                continue
+            url = str(helper.get("debugger_url", "") or "").strip()
+            if url and url not in urls:
+                urls.append(url)
+        return tuple(urls)
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "safety_mode": self.safety_mode,
+            "control_allowed": self.control_allowed,
+            "control_attempts": self.control_attempts,
+            "window_input_attempts": self.window_input_attempts,
+            "enabled": self.enabled,
+            "ready": self.ready,
+            "cleanup_ok": self.cleanup_ok,
+            "output_root": self.output_root,
+            "helper_count": len(self.helpers),
+            "launch_attempts": self.launch_attempts,
+            "stop_attempts": self.stop_attempts,
+            "debugger_urls": list(self.debugger_urls),
+            "helpers": [dict(helper) for helper in self.helpers],
+            "elapsed_ms": round(self.elapsed_ms, 3),
+        }
+
+
+def prepare_agent_app_devtools_owned_launch_fleet(
+    *,
+    output_root: str | Path,
+    resolution_report: dict,
+    plan_executor: Callable[..., object] | None = None,
+) -> AgentAppDevToolsOwnedLaunchReport:
+    started = time.perf_counter()
+    root = Path(output_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    helpers: list[dict] = []
+    active_plan_executor = plan_executor or execute_session_readiness_plan
+
+    for index, case in enumerate(_agent_app_devtools_launchable_cases(resolution_report), start=1):
+        agent = str(case.get("agent", "") or "").strip()
+        agent_id = str(case.get("agent_id", "") or "").strip()
+        defaults = _agent_app_endpoint_defaults(agent or agent_id)
+        effective_agent_id = agent_id or defaults["agent_id"]
+        executable = str(case.get("executable_path", "") or "").strip()
+        debug_port = int(defaults.get("devtools_port", 19555) or 19555)
+        helper_root = root / f"{index:02d}-{_safe_path_component(effective_agent_id or agent)}"
+        user_data_dir = helper_root / "profile"
+        manifest_path = helper_root / "manifest.json"
+        readiness_url = f"http://127.0.0.1:{debug_port}"
+        launch_report: dict = {}
+        ready = False
+        error = ""
+        try:
+            plan = build_session_readiness_plan(
+                routes=("agent-app-devtools-owned",),
+                options=SessionReadinessPlanOptions(
+                    agent_app_executable=executable,
+                    agent_app_debug_port=debug_port,
+                    agent_app_user_data_dir=str(user_data_dir),
+                ),
+            )
+            launch_report = _report_to_dict(
+                active_plan_executor(
+                    plan,
+                    manifest_path=str(manifest_path),
+                )
+            )
+            ready = _counter(launch_report, "launch_attempts") > 0
+            readiness_url = _readiness_url_from_launch_report(
+                launch_report,
+                default=readiness_url,
+            )
+            if not ready:
+                error = "agent_app_devtools_owned_not_started"
+        except Exception as exc:
+            error = str(exc) or exc.__class__.__name__
+        helpers.append(
+            {
+                "mode": "agent-app-devtools-owned-launch",
+                "safety_mode": "managed_background_helper_launch",
+                "control_allowed": False,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "enabled": True,
+                "ready": ready,
+                "cleanup_ok": False,
+                "agent": agent or defaults["agent"],
+                "agent_id": effective_agent_id,
+                "executable_path": executable,
+                "debug_port": debug_port,
+                "debugger_url": readiness_url,
+                "user_data_dir": str(user_data_dir),
+                "manifest_path": str(manifest_path),
+                "launch_attempts": _counter(launch_report, "launch_attempts"),
+                "stop_attempts": 0,
+                "launch_report": launch_report,
+                "error": error,
+            }
+        )
+
+    return _agent_app_devtools_owned_launch_fleet_report(
+        output_root=str(root),
+        helpers=helpers,
+        elapsed_ms=(time.perf_counter() - started) * 1000,
+    )
+
+
 def prepare_agent_native_cdp_bridge_helper(
     *,
     output_root: str | Path,
@@ -1735,6 +1940,72 @@ def _disabled_agent_native_cdp_bridge_helper_report() -> dict:
     }
 
 
+def _disabled_agent_app_devtools_owned_launch_report() -> dict:
+    return {
+        "mode": "agent-app-devtools-owned-launch-fleet",
+        "safety_mode": "managed_background_helper_launch",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "enabled": False,
+        "ready": False,
+        "cleanup_ok": True,
+        "output_root": "",
+        "helper_count": 0,
+        "launch_attempts": 0,
+        "stop_attempts": 0,
+        "debugger_urls": [],
+        "helpers": [],
+    }
+
+
+def _agent_app_devtools_launchable_cases(
+    resolution_report: dict,
+) -> tuple[dict, ...]:
+    cases: list[dict] = []
+    for raw in resolution_report.get("cases", []) or []:
+        if not isinstance(raw, dict):
+            continue
+        executable = str(raw.get("executable_path", "") or "").strip()
+        if not bool(raw.get("executable_ready", False)) or not executable:
+            continue
+        cases.append(dict(raw))
+    return tuple(cases)
+
+
+def _readiness_url_from_launch_report(launch_report: dict, *, default: str) -> str:
+    for result in launch_report.get("results", []) or []:
+        if not isinstance(result, dict):
+            continue
+        url = str(result.get("readiness_url", "") or "").strip()
+        if url:
+            return url
+    return default
+
+
+def _agent_app_devtools_owned_launch_fleet_report(
+    *,
+    output_root: str,
+    helpers: list[dict],
+    elapsed_ms: float,
+) -> AgentAppDevToolsOwnedLaunchReport:
+    enabled = bool(helpers)
+    ready = enabled and all(bool(helper.get("ready", False)) for helper in helpers)
+    cleanup_ok = all(
+        (not bool(helper.get("enabled", False)))
+        or bool(helper.get("cleanup_ok", False))
+        for helper in helpers
+    )
+    return AgentAppDevToolsOwnedLaunchReport(
+        enabled=enabled,
+        output_root=output_root,
+        helpers=tuple(dict(helper) for helper in helpers),
+        ready=ready,
+        cleanup_ok=cleanup_ok,
+        elapsed_ms=elapsed_ms,
+    )
+
+
 def _normalize_agent_native_cdp_bridge_helper_specs(
     specs: Iterable[dict],
 ) -> tuple[dict, ...]:
@@ -1821,6 +2092,29 @@ def _effective_ide_bridge_urls(
     return tuple(urls)
 
 
+def _effective_agent_app_devtools_debugger_urls(
+    explicit_urls: Iterable[str],
+    owned_launch_report: dict,
+) -> tuple[str, ...]:
+    urls: list[str] = []
+    for value in explicit_urls or ():
+        text = str(value or "").strip()
+        if text and text not in urls:
+            urls.append(text)
+    if bool(owned_launch_report.get("ready", False)):
+        for value in owned_launch_report.get("debugger_urls", []) or []:
+            text = str(value or "").strip()
+            if text and text not in urls:
+                urls.append(text)
+    for helper in owned_launch_report.get("helpers", []) or []:
+        if not isinstance(helper, dict) or not bool(helper.get("ready", False)):
+            continue
+        text = str(helper.get("debugger_url", "") or "").strip()
+        if text and text not in urls:
+            urls.append(text)
+    return tuple(urls)
+
+
 def _effective_agent_native_bridge_registry_paths(
     explicit_paths: Iterable[str | Path],
     helper_report: dict,
@@ -1892,6 +2186,36 @@ def _stop_agent_native_cdp_bridge_helper_if_needed(helper_report: dict) -> dict:
         return dict(helper_report)
     stop_report = stop_session_readiness_manifest(manifest_path).to_dict()
     updated = dict(helper_report)
+    updated["stop_report"] = stop_report
+    updated["stop_attempts"] = _counter(stop_report, "stop_attempts")
+    updated["cleanup_ok"] = _stop_report_cleanup_ok(stop_report)
+    return updated
+
+
+def _stop_agent_app_devtools_owned_launch_if_needed(launch_report: dict) -> dict:
+    if not bool(launch_report.get("enabled", False)):
+        return launch_report
+    if str(launch_report.get("mode", "") or "") == "agent-app-devtools-owned-launch-fleet":
+        helpers = [
+            _stop_agent_app_devtools_owned_launch_if_needed(dict(helper))
+            for helper in launch_report.get("helpers", []) or []
+            if isinstance(helper, dict)
+        ]
+        return _report_to_dict(
+            _agent_app_devtools_owned_launch_fleet_report(
+                output_root=str(launch_report.get("output_root", "") or ""),
+                helpers=helpers,
+                elapsed_ms=float(launch_report.get("elapsed_ms", 0.0) or 0.0),
+            )
+        )
+    manifest_path = str(launch_report.get("manifest_path", "") or "").strip()
+    if not manifest_path:
+        return dict(launch_report)
+    existing_stop = launch_report.get("stop_report")
+    if isinstance(existing_stop, dict) and existing_stop:
+        return dict(launch_report)
+    stop_report = stop_session_readiness_manifest(manifest_path).to_dict()
+    updated = dict(launch_report)
     updated["stop_report"] = stop_report
     updated["stop_attempts"] = _counter(stop_report, "stop_attempts")
     updated["cleanup_ok"] = _stop_report_cleanup_ok(stop_report)
@@ -2296,6 +2620,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         default=[],
         help="JSON object describing one agent native CDP helper. Repeat for Codex/Claude/Cursor helpers.",
     )
+    parser.add_argument(
+        "--allow-agent-app-devtools-owned-launch",
+        action="store_true",
+        help="Launch resolved Codex/Claude/Cursor app surfaces with isolated profiles and local DevTools endpoints, then forward those endpoints to no-loss probes.",
+    )
     parser.add_argument("--allow-agent-cli-execution", action="store_true")
     parser.add_argument("--agent-cli-timeout-sec", type=float, default=90.0)
     args = parser.parse_args(argv)
@@ -2387,6 +2716,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             _parse_agent_native_cdp_bridge_helper_specs(
                 args.agent_native_cdp_bridge_helper_spec or ()
             )
+        ),
+        allow_agent_app_devtools_owned_launch=(
+            args.allow_agent_app_devtools_owned_launch
         ),
         allow_agent_cli_execution=args.allow_agent_cli_execution,
         agent_cli_timeout_sec=args.agent_cli_timeout_sec,
