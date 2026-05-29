@@ -6391,3 +6391,49 @@ When a new conversation starts in this repo:
     - this is the correct infrastructure for the final real-send step; the
       remaining gap is still actual owned app-side endpoints for those products
       instead of fake debugger URLs
+- 2026-05-29 added a machine-readable agent app endpoint acceptance package:
+  - implementation:
+    - `major_real_no_loss` now emits top-level
+      `agent_app_endpoint_acceptance`
+    - the package summarizes each Codex App / Claude Desktop / Cursor app
+      surface with `agent_id`, current status, endpoint readiness,
+      send-verification state, observed endpoint errors, no-focus requirement,
+      and `safe_to_send_now`
+    - each case now includes a reusable `helper_spec_template` for the
+      no-focus `--agent-native-cdp-bridge-helper-spec` path, including the
+      expected process name, bridge port, and placeholder owned DevTools URL
+    - helper fleet evidence is attached back to the matching agent case through
+      `helper_status`, so fake, unhealthy, or real helper state is visible next
+      to the endpoint acceptance decision
+  - official-doc basis:
+    - Python `dataclasses` docs were checked before extending the dataclass
+      report payload with a computed property
+  - validation:
+    - red test first:
+      `test_report_exposes_agent_app_endpoint_acceptance_package` failed with
+      missing `agent_app_endpoint_acceptance`
+    - targeted green:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_report_exposes_agent_app_endpoint_acceptance_package`: OK
+    - focused regression:
+      `python -m unittest tests.test_major_real_no_loss tests.test_agent_app_real_no_loss tests.test_agent_native_cdp_bridge tests.test_session_readiness_plan`: `62 tests OK`
+    - R39 real no-loss smoke:
+      `run_major_scenario_real_no_loss(... agent_apps=("codex app", "claude desktop", "cursor"), cli_agents=())`
+      wrote
+      `logs/runtime/major-real-no-loss-r39-agent-endpoint-acceptance/major-real-no-loss-report.json`
+      and produced `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `endpoint_total_cases=3`, and
+      `endpoint_safe_to_send_now=false`
+    - R39 reported all three app surfaces as
+      `provide_owned_debugger_url_or_install_agent_native_bridge`
+    - full verification:
+      `python -m unittest discover tests`: `518 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - the major acceptance report now tells the next runner or installer
+      exactly what each agent app needs before any app-chat send can be
+      attempted
+    - the system is still correctly not claiming unified precise background
+      app-chat control for Codex App / Claude Desktop / Cursor until a real
+      owned local DevTools/native endpoint is present and send readback passes

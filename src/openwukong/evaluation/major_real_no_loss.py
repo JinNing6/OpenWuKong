@@ -221,6 +221,13 @@ class MajorScenarioRealNoLossReport:
         return self.automation_focus_risk_attempts == 0
 
     @property
+    def agent_app_endpoint_acceptance(self) -> dict:
+        return _build_agent_app_endpoint_acceptance(
+            self.agent_app_report,
+            self.agent_native_cdp_bridge_helper_report,
+        )
+
+    @property
     def failed_runner_count(self) -> int:
         return sum(
             1
@@ -291,6 +298,7 @@ class MajorScenarioRealNoLossReport:
             "failed_runner_count": self.failed_runner_count,
             "goal_complete": self.goal_complete,
             "safe_run_ok": self.safe_run_ok,
+            "agent_app_endpoint_acceptance": self.agent_app_endpoint_acceptance,
             "unmet_requirements": list(self.unmet_requirements),
             "requirements": [
                 requirement.to_dict() for requirement in self.requirements
@@ -769,6 +777,250 @@ def _app_requirement(requirement_id: str, surface: str, case: dict) -> MajorRequ
         source_runner="agent_app_real_no_loss",
         blocking_reason=reason,
         evidence=_compact_case_evidence(case),
+    )
+
+
+def _build_agent_app_endpoint_acceptance(
+    app_report: dict,
+    native_helper_report: dict,
+) -> dict:
+    cases = [
+        _build_agent_app_endpoint_acceptance_case(case, native_helper_report)
+        for case in app_report.get("cases", []) or []
+        if isinstance(case, dict)
+    ]
+    safe_to_send_now = bool(cases) and all(
+        bool(case.get("safe_to_send_now", False)) for case in cases
+    )
+    return {
+        "mode": "agent-app-endpoint-acceptance",
+        "safety_mode": "real_no_loss",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "bridge_send_attempts": 0,
+        "no_focus_required": True,
+        "safe_to_send_now": safe_to_send_now,
+        "total_cases": len(cases),
+        "ready_endpoint_cases": sum(
+            1 for case in cases if bool(case.get("endpoint_ready", False))
+        ),
+        "send_verified_cases": sum(
+            1 for case in cases if bool(case.get("send_verified", False))
+        ),
+        "cases": cases,
+    }
+
+
+def _build_agent_app_endpoint_acceptance_case(
+    case: dict,
+    native_helper_report: dict,
+) -> dict:
+    agent = str(case.get("agent", "") or "").strip()
+    defaults = _agent_app_endpoint_defaults(agent)
+    agent_id = str(
+        case.get("agent_id", "")
+        or _details(case.get("probe", {})).get("agent_id", "")
+        or defaults["agent_id"]
+    ).strip()
+    status = str(case.get("status", "") or "").strip()
+    probe = _details(case.get("probe", {}))
+    endpoints = [
+        dict(endpoint)
+        for endpoint in probe.get("endpoints", []) or []
+        if isinstance(endpoint, dict)
+    ]
+    ready_endpoint_count = _counter(probe, "ready_endpoint_count")
+    if ready_endpoint_count <= 0:
+        ready_endpoint_count = sum(
+            1 for endpoint in endpoints if bool(endpoint.get("ready", False))
+        )
+    endpoint_ready = bool(case.get("native_ready", False)) or ready_endpoint_count > 0
+    send_verified = bool(
+        case.get("app_bridge_send_verified", False)
+        or case.get("uia_semantic_action_send_verified", False)
+        or status
+        in {
+            "app_bridge_send_accepted",
+            "uia_semantic_action_send_accepted",
+            "message_submitted_accepted",
+        }
+    )
+    helper_status = _agent_native_helper_status(native_helper_report, agent, agent_id)
+    return {
+        "agent": agent,
+        "agent_id": agent_id,
+        "status": status,
+        "native_ready": bool(case.get("native_ready", False)),
+        "endpoint_ready": endpoint_ready,
+        "send_verified": send_verified,
+        "safe_to_send_now": send_verified,
+        "required_endpoint_kind": _agent_app_required_endpoint_kind(
+            case,
+            endpoint_ready=endpoint_ready,
+            send_verified=send_verified,
+        ),
+        "next_action": _agent_app_endpoint_next_action(
+            case,
+            endpoint_ready=endpoint_ready,
+            send_verified=send_verified,
+        ),
+        "blocking_reason": _agent_app_endpoint_blocking_reason(
+            case,
+            endpoint_ready=endpoint_ready,
+            send_verified=send_verified,
+        ),
+        "no_focus_required": True,
+        "observed_endpoint_count": max(_counter(probe, "endpoint_count"), len(endpoints)),
+        "ready_endpoint_count": ready_endpoint_count,
+        "observed_endpoint_errors": _observed_endpoint_errors(endpoints),
+        "observed_endpoints": endpoints,
+        "helper_spec_template": {
+            "agent": agent or defaults["agent"],
+            "agent_id": agent_id or defaults["agent_id"],
+            "bridge_port": defaults["bridge_port"],
+            "debugger_url": "<required-owned-local-devtools-url>",
+            "process_name": defaults["process_name"],
+            "pid": 0,
+            "hwnd": 0,
+            "window_title": "",
+            "target_title": "",
+            "target_url": "",
+        },
+        "helper_status": helper_status,
+    }
+
+
+def _agent_app_endpoint_defaults(agent: str) -> dict:
+    key = str(agent or "").strip().lower()
+    if key.startswith("claude"):
+        return {
+            "agent": "claude desktop",
+            "agent_id": "claude",
+            "process_name": "Claude.exe",
+            "bridge_port": 18891,
+        }
+    if key.startswith("cursor"):
+        return {
+            "agent": "cursor",
+            "agent_id": "cursor",
+            "process_name": "Cursor.exe",
+            "bridge_port": 18892,
+        }
+    return {
+        "agent": "codex app",
+        "agent_id": "codex",
+        "process_name": "Codex.exe",
+        "bridge_port": 18890,
+    }
+
+
+def _agent_app_required_endpoint_kind(
+    case: dict,
+    *,
+    endpoint_ready: bool,
+    send_verified: bool,
+) -> str:
+    status = str(case.get("status", "") or "").strip()
+    if send_verified:
+        return "verified_app_bridge_or_uia_semantic_send"
+    if endpoint_ready:
+        return "ready_endpoint_send_acceptance"
+    if status == "unavailable":
+        return "app_surface_visibility_or_native_bridge"
+    return "owned_local_devtools_or_agent_native_bridge"
+
+
+def _agent_app_endpoint_next_action(
+    case: dict,
+    *,
+    endpoint_ready: bool,
+    send_verified: bool,
+) -> str:
+    status = str(case.get("status", "") or "").strip()
+    if send_verified:
+        return "none"
+    if endpoint_ready:
+        return "run_app_bridge_send_acceptance"
+    if status == "unavailable":
+        return "open_or_install_app_surface"
+    return "provide_owned_debugger_url_or_install_agent_native_bridge"
+
+
+def _agent_app_endpoint_blocking_reason(
+    case: dict,
+    *,
+    endpoint_ready: bool,
+    send_verified: bool,
+) -> str:
+    if send_verified:
+        return ""
+    status = str(case.get("status", "") or "").strip()
+    if endpoint_ready:
+        return "native_connector_ready_but_send_not_verified"
+    return status or "agent_app_endpoint_not_ready"
+
+
+def _observed_endpoint_errors(endpoints: list[dict]) -> list[str]:
+    errors: list[str] = []
+    for endpoint in endpoints:
+        error = str(endpoint.get("error", "") or "").strip()
+        if error and error not in errors:
+            errors.append(error)
+    return errors
+
+
+def _agent_native_helper_status(
+    helper_report: dict,
+    agent: str,
+    agent_id: str,
+) -> dict:
+    helper = _matching_agent_native_helper(helper_report, agent, agent_id)
+    if not helper:
+        return {}
+    result: dict = {}
+    for key in (
+        "agent",
+        "agent_id",
+        "ready",
+        "bridge_url",
+        "registry_path",
+        "manifest_path",
+        "launch_attempts",
+        "stop_attempts",
+        "cleanup_ok",
+        "error",
+    ):
+        if key in helper:
+            result[key] = helper[key]
+    return result
+
+
+def _matching_agent_native_helper(
+    helper_report: dict,
+    agent: str,
+    agent_id: str,
+) -> dict:
+    helpers = helper_report.get("helpers")
+    if isinstance(helpers, list):
+        for helper in helpers:
+            if not isinstance(helper, dict):
+                continue
+            if _agent_native_helper_matches(helper, agent, agent_id):
+                return dict(helper)
+    if _agent_native_helper_matches(helper_report, agent, agent_id):
+        return dict(helper_report)
+    return {}
+
+
+def _agent_native_helper_matches(helper: dict, agent: str, agent_id: str) -> bool:
+    expected_id = str(agent_id or "").strip().lower()
+    expected_agent = str(agent or "").strip().lower()
+    helper_id = str(helper.get("agent_id", "") or "").strip().lower()
+    helper_agent = str(helper.get("agent", "") or "").strip().lower()
+    return bool(
+        (expected_id and helper_id == expected_id)
+        or (expected_agent and helper_agent == expected_agent)
     )
 
 

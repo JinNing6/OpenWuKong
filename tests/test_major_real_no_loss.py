@@ -894,6 +894,127 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(data["control_attempts"], 0)
         self.assertEqual(data["window_input_attempts"], 0)
 
+    def test_report_exposes_agent_app_endpoint_acceptance_package(self):
+        report = _major_report(
+            app={
+                "mode": "agent-app-real-no-loss",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 0,
+                "agent_command_attempts": 0,
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "cases": [
+                    {
+                        "agent": "codex app",
+                        "status": "gated_native_endpoint_missing",
+                        "real_verified": True,
+                        "native_ready": False,
+                        "probe": {
+                            "agent_id": "codex",
+                            "ready_endpoint_count": 0,
+                            "endpoint_count": 0,
+                            "endpoints": [],
+                        },
+                    },
+                    {
+                        "agent": "claude desktop",
+                        "status": "agent_native_connector_endpoint_unhealthy",
+                        "real_verified": True,
+                        "native_ready": False,
+                        "probe": {
+                            "agent_id": "claude",
+                            "ready_endpoint_count": 0,
+                            "endpoint_count": 1,
+                            "endpoints": [
+                                {
+                                    "endpoint_type": "agent_native_bridge",
+                                    "ready": False,
+                                    "bridge_url": "http://127.0.0.1:18891",
+                                    "error": "cdp_endpoint_unhealthy",
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "agent": "cursor",
+                        "status": "native_connector_ready",
+                        "real_verified": True,
+                        "native_ready": True,
+                        "probe": {
+                            "agent_id": "cursor",
+                            "ready_endpoint_count": 1,
+                            "endpoint_count": 1,
+                            "endpoints": [
+                                {
+                                    "endpoint_type": "agent_native_bridge",
+                                    "ready": True,
+                                    "bridge_url": "http://127.0.0.1:18892",
+                                }
+                            ],
+                        },
+                    },
+                ],
+            },
+            native_helper={
+                "mode": "agent-native-cdp-bridge-helper-fleet",
+                "enabled": True,
+                "ready": False,
+                "cleanup_ok": True,
+                "launch_attempts": 3,
+                "stop_attempts": 3,
+                "helpers": [
+                    {
+                        "agent": "codex app",
+                        "agent_id": "codex",
+                        "bridge_url": "http://127.0.0.1:18890",
+                        "registry_path": "logs/runtime/codex/native-bridges.json",
+                        "ready": False,
+                        "error": "agent_native_connector_endpoint_unhealthy",
+                    }
+                ],
+            },
+        )
+
+        package = report.to_dict()["agent_app_endpoint_acceptance"]
+        cases = {item["agent_id"]: item for item in package["cases"]}
+
+        self.assertEqual(package["mode"], "agent-app-endpoint-acceptance")
+        self.assertFalse(package["safe_to_send_now"])
+        self.assertEqual(cases["codex"]["agent"], "codex app")
+        self.assertFalse(cases["codex"]["safe_to_send_now"])
+        self.assertEqual(
+            cases["codex"]["required_endpoint_kind"],
+            "owned_local_devtools_or_agent_native_bridge",
+        )
+        self.assertEqual(
+            cases["codex"]["next_action"],
+            "provide_owned_debugger_url_or_install_agent_native_bridge",
+        )
+        self.assertEqual(cases["codex"]["helper_spec_template"]["agent_id"], "codex")
+        self.assertEqual(
+            cases["codex"]["helper_spec_template"]["process_name"],
+            "Codex.exe",
+        )
+        self.assertEqual(
+            cases["codex"]["helper_spec_template"]["debugger_url"],
+            "<required-owned-local-devtools-url>",
+        )
+        self.assertEqual(
+            cases["codex"]["helper_status"]["bridge_url"],
+            "http://127.0.0.1:18890",
+        )
+        self.assertEqual(
+            cases["claude"]["observed_endpoint_errors"],
+            ["cdp_endpoint_unhealthy"],
+        )
+        self.assertEqual(
+            cases["cursor"]["next_action"],
+            "run_app_bridge_send_acceptance",
+        )
+        self.assertFalse(cases["cursor"]["safe_to_send_now"])
+        self.assertTrue(all(item["no_focus_required"] for item in package["cases"]))
+
     def test_prepare_agent_native_cdp_bridge_helper_launches_and_waits_for_registry(self):
         calls = []
 
