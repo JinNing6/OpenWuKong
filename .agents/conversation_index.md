@@ -6107,3 +6107,22 @@ When a new conversation starts in this repo:
     - the current live machine still did not expose those local app endpoints
       during R29, so real app chat remains gated rather than falling back to
       foreground keyboard, mouse, or clipboard
+  - additional live verification:
+    - R30 ran the owned-browser plus agent-CLI opt-in path:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r30-owned-browser-agent-cli --output logs\runtime\major-real-no-loss-r30-owned-browser-agent-cli\report.json --json --allow-owned-browser-helper-launch --owned-browser-debug-port 9488 --owned-browser-url "data:text/html,<title>OpenWukong Major R30</title><body>OpenWukong Major R30</body>" --allow-agent-cli-execution --agent-cli-timeout-sec 120`
+    - R30 produced `safe_run_ok=true`, `control_attempts=0`,
+      `external_communication_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=2`,
+      `owned_app_launch_attempts=1`,
+      `background_screenshot_success_count=6/6`, and
+      `automation_focus_safe=true`
+    - R30 verified:
+      `wechat_background_observation`, `word_background_document`,
+      `browser_background_research`, `file_background_search`, and
+      `codex_cli_background_task`
+    - R30 still gated:
+      `wechat_background_send` with `wechat_native_bridge_url_missing`,
+      `codex_app_background_chat`, `claude_desktop_background_chat`, and
+      `cursor_background_chat` with `gated_native_endpoint_missing`
+    - R30 still reports `claude_cli_background_task=auth_required` because
+      the local Claude CLI returned `Not logged in - Please run /login`
