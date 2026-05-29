@@ -48,6 +48,11 @@ class IDEBridgeCapabilityCaptureReport:
         return 0
 
     def to_dict(self) -> dict:
+        review_candidates = build_review_candidates(self.commands)
+        active_mapping = build_active_adapter_mapping(
+            self.adapter_mapping,
+            review_candidates,
+        )
         return {
             "mode": self.mode,
             "safety_mode": self.safety_mode,
@@ -62,6 +67,10 @@ class IDEBridgeCapabilityCaptureReport:
             "commands": list(self.commands),
             "chat_adapters": [dict(adapter) for adapter in self.chat_adapters],
             "adapter_mapping": self.adapter_mapping,
+            "active_mapping": active_mapping,
+            "cursor_review_candidates": review_candidates.get("cursor", []),
+            "copilot_review_candidates": review_candidates.get("copilot", []),
+            "codex_review_candidates": review_candidates.get("codex", []),
             "response": dict(self.response),
             "elapsed_ms": round(self.elapsed_ms, 3),
         }
@@ -150,6 +159,58 @@ def build_adapter_mapping(chat_adapters) -> dict:
     return mapping
 
 
+def build_review_candidates(commands: tuple[str, ...] | list[str]) -> dict:
+    command_set = set(str(command or "").strip() for command in commands if str(command or "").strip())
+    return {
+        "cursor": _select_known_candidates(
+            command_set,
+            [
+                "composer.startComposerPrompt",
+                "composer.startComposerPrompt2",
+                "composer.sendToAgent",
+                "composer.newAgentChat",
+                "composer.openComposer",
+                "composer.createNew",
+                "aichat.newchataction",
+                "workbench.action.chat.open",
+            ],
+        ),
+        "copilot": _select_known_candidates(
+            command_set,
+            [
+                "github.copilot.chat.open",
+                "workbench.panel.chat.view.copilot.focus",
+                "workbench.action.chat.open",
+            ],
+        ),
+        "codex": _stable_unique(
+            sorted(command for command in command_set if "codex" in command.lower())
+        ),
+    }
+
+
+def build_active_adapter_mapping(adapter_mapping: dict, review_candidates: dict) -> dict:
+    active: dict = {}
+    if isinstance(adapter_mapping, dict):
+        for adapter_id, value in adapter_mapping.items():
+            active[str(adapter_id)] = dict(value) if isinstance(value, dict) else {}
+    for adapter_id, candidates in review_candidates.items():
+        existing = active.get(adapter_id, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        merged_candidates = _stable_unique(
+            _string_list(existing.get("commandCandidates", [])) + list(candidates or [])
+        )
+        active[adapter_id] = {
+            "label": str(existing.get("label", "") or adapter_id),
+            "commandId": str(existing.get("commandId", "") or ""),
+            "commandCandidates": merged_candidates,
+            "available": bool(existing.get("available", False)),
+            "availableCandidates": _string_list(existing.get("availableCandidates", [])),
+        }
+    return active
+
+
 def _normalize_adapter(adapter: dict) -> dict:
     return {
         "adapter_id": str(adapter.get("adapter_id", "") or ""),
@@ -176,6 +237,10 @@ def _stable_unique(values) -> list[str]:
         seen.add(value)
         unique.append(value)
     return unique
+
+
+def _select_known_candidates(command_set: set[str], preferred_order: list[str]) -> list[str]:
+    return [command_id for command_id in preferred_order if command_id in command_set]
 
 
 def main(argv: Optional[list[str]] = None) -> int:

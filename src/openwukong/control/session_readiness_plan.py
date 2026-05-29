@@ -531,6 +531,7 @@ def _execute_action(
         )
     try:
         _prepare_isolated_profile_directories(argv)
+        _prepare_isolated_ide_settings(argv, action.settings_preview)
         pid = launcher.launch(argv)
     except Exception as exc:
         return SessionReadinessLaunchResult(
@@ -842,3 +843,35 @@ def _prepare_isolated_profile_directories(argv: tuple[str, ...]) -> None:
             path_text = text.split("=", 1)[1].strip()
             if path_text:
                 Path(path_text).mkdir(parents=True, exist_ok=True)
+
+
+def _prepare_isolated_ide_settings(
+    argv: tuple[str, ...],
+    settings_preview: dict | None,
+) -> None:
+    if not settings_preview:
+        return
+    user_data_dir = ""
+    for value in argv:
+        text = str(value or "")
+        if text.startswith("--user-data-dir="):
+            user_data_dir = text.split("=", 1)[1].strip()
+            break
+    if not user_data_dir:
+        return
+    settings_path = Path(user_data_dir) / "User" / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    existing: dict = {}
+    if settings_path.exists():
+        try:
+            parsed = json.loads(settings_path.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict):
+                existing = parsed
+        except Exception:
+            existing = {}
+    merged = dict(existing)
+    merged.update(dict(settings_preview))
+    settings_path.write_text(
+        json.dumps(merged, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )

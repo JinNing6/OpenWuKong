@@ -100,6 +100,50 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertEqual(report.decision, "app_bridge_target_not_ready")
         self.assertEqual(report.bridge_send_attempts, 0)
 
+    def test_ide_bridge_endpoint_metadata_can_satisfy_target_without_uia_match(self):
+        probe = _ready_ide_bridge_probe()
+        probe["decision"] = "agent_app_target_not_visible"
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "decision": "agent_app_task_not_visible",
+            "target_matched": False,
+            "semantic_composer_count": 0,
+            "matched_windows": [
+                {
+                    "process_name": "Cursor.exe",
+                    "pid": 16484,
+                    "window_title": "[Extension Development Host] workspace - Cursor",
+                    "hwnd": 2491830,
+                }
+            ],
+        }
+        probe["endpoints"][0]["metadata"] = {
+            "ide_name": "Cursor",
+            "workspaceFolders": [],
+            "activeTextEditor": {
+                "fsPath": "E:\\ideaProjects\\agent\\openwukong\\logs\\runtime\\ide-bridge-r14\\workspace\\README.md"
+            },
+        }
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="workspace",
+            task_name="isolated-ide-bridge",
+            message="Summarize the active task.",
+            composed_message="Project: workspace\nTask: isolated-ide-bridge",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=probe,
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_dry_run_ready")
+        self.assertTrue(data["request"]["target_ready"])
+        self.assertEqual(data["request"]["target"]["hwnd"], 2491830)
+        self.assertEqual(data["request"]["endpoint"]["preferred_chat_adapter"], "cursor")
+
     def test_dry_run_prefers_project_window_when_agent_has_multiple_windows(self):
         probe = _ready_ide_bridge_probe()
         probe["app_uia_probe"] = {

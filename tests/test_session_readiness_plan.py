@@ -238,6 +238,47 @@ class SessionReadinessPlanTests(unittest.TestCase):
             self.assertTrue(ide_profile.is_dir())
             self.assertTrue(ide_extensions.is_dir())
 
+    def test_execute_writes_ide_bridge_settings_into_isolated_user_data_before_launch(self):
+        class _AssertingLauncher:
+            def launch(self, argv, cwd=None):
+                del cwd
+                user_data_arg = next(
+                    item for item in argv if item.startswith("--user-data-dir=")
+                )
+                settings_path = Path(user_data_arg.split("=", 1)[1]) / "User" / "settings.json"
+                self.settings_path = settings_path
+                self.settings_existed_at_launch = settings_path.exists()
+                self.settings_at_launch = json.loads(settings_path.read_text(encoding="utf-8"))
+                return 6262
+
+        with tempfile.TemporaryDirectory() as tmp:
+            launcher = _AssertingLauncher()
+            user_data = Path(tmp) / "cursor-user-data"
+            extensions_dir = Path(tmp) / "cursor-extensions"
+            plan = build_session_readiness_plan(
+                routes=("ide-extension-connector",),
+                options=SessionReadinessPlanOptions(
+                    ide_executable="cursor.exe",
+                    ide_user_data_dir=str(user_data),
+                    ide_extensions_dir=str(extensions_dir),
+                    ide_extension_dir=str(Path(tmp) / "extension"),
+                    ide_bridge_host="127.0.0.1",
+                    ide_bridge_port=8791,
+                ),
+            )
+
+            report = execute_session_readiness_plan(
+                plan,
+                manifest_path=str(Path(tmp) / "manifest.json"),
+                launcher=launcher,
+            )
+
+        self.assertEqual(report.launch_attempts, 1)
+        self.assertTrue(launcher.settings_existed_at_launch)
+        self.assertEqual(launcher.settings_at_launch["openwukong.bridge.autoStart"], True)
+        self.assertEqual(launcher.settings_at_launch["openwukong.bridge.host"], "127.0.0.1")
+        self.assertEqual(launcher.settings_at_launch["openwukong.bridge.port"], 8791)
+
     def test_execute_rejects_non_isolated_command_actions(self):
         from openwukong.control.session_readiness_plan import SessionReadinessAction
 

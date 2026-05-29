@@ -5424,3 +5424,82 @@ When a new conversation starts in this repo:
       isolated or user-approved Cursor/VS Code extension host, configure a
       real chat adapter command, and rerun the same no-loss command expecting
       `cursor_background_chat` to flip from gated to verified
+- 2026-05-29 verified the Cursor IDE bridge path end to end in an isolated
+  extension host:
+  - implementation:
+    - `execute_session_readiness_plan` now writes the IDE bridge
+      `settings_preview` into the isolated `--user-data-dir/User/settings.json`
+      before launching the extension host, so `autoStart`, host, and port are
+      real launch-time settings rather than plan-only metadata
+    - `ide_bridge_capture` now infers read-only Cursor/Copilot/Codex review
+      candidates from raw command discovery and exposes `active_mapping` plus
+      `cursor_review_candidates` without enabling an adapter before validation
+    - app bridge target readiness can now be satisfied by a ready IDE bridge
+      endpoint whose metadata/active editor proves the requested project,
+      instead of requiring UIA `target_matched=true`
+  - official-doc basis:
+    - VS Code command docs and API docs were checked for command discovery and
+      `executeCommand`
+    - VS Code user/workspace settings docs were checked for settings file
+      behavior
+    - Python `dataclasses` and `unittest` docs were checked for the report and
+      regression-test patterns used here
+  - safe/real validation:
+    - isolated Cursor bridge launch:
+      `python -m openwukong.evaluation.session_readiness_plan --route ide-extension-connector ... --ide-bridge-port 8791 --execute ...`
+      launched an isolated Cursor extension host with PID `16484`
+    - readiness:
+      `http://127.0.0.1:8791/v1/ide/capabilities` returned `ok=true`,
+      `ide_name=Cursor`, `command_count=3204`, and the written settings file
+      contained `openwukong.bridge.autoStart=true`, host `127.0.0.1`, port
+      `8791`
+    - candidate discovery:
+      `capabilities-v2.json` inferred Cursor candidates including
+      `composer.startComposerPrompt`, `composer.startComposerPrompt2`, and
+      `composer.sendToAgent` while keeping the adapter disabled until probe
+    - contract probe:
+      before allowlisting, `composer.startComposerPrompt` was blocked by
+      `command_not_allowlisted`; after allowlisting only that command in the
+      isolated profile, the probe accepted `object_message`, changed no
+      workspace files, and produced validated mapping
+      `cursor -> composer.startComposerPrompt`
+    - validated capabilities:
+      `capabilities-v3-validated.json` reported the Cursor adapter as
+      `available=true` with command `composer.startComposerPrompt`
+    - no-loss dry-run:
+      `agent-app-real-no-loss-r14-isolated-ide-bridge-readonly-v2` reported
+      `passed_cases=1/1`, `native_ready_cases=1`,
+      `app_bridge_dry_run.decision=app_bridge_dry_run_ready`,
+      `control_attempts=0`, `window_input_attempts=0`, and
+      `background_screenshot_focus_stable=true`
+    - opt-in real bridge send:
+      `agent-app-real-no-loss-r14-isolated-ide-bridge-send` reported
+      `passed_cases=1/1`, `app_bridge_send_verified_cases=1`,
+      `bridge_send_attempts=1`, `command_id=composer.startComposerPrompt`,
+      `control_attempts=0`, `window_input_attempts=0`, and
+      `background_screenshot_focus_stable=true`
+    - post-send read-only check:
+      `agent-app-real-no-loss-r14-isolated-ide-bridge-post-send-readonly`
+      again reported `passed_cases=1/1`, `native_ready_cases=1`, and
+      `background_screenshot_focus_stable=true`
+    - cleanup:
+      `session-readiness-stop` stopped manifest-owned PID `16484`; port
+      `8791` then reported `TcpTestSucceeded=false`
+  - verification:
+    - targeted red/green:
+      `python -m unittest tests.test_ide_bridge_capture.IDEBridgeCaptureTests.test_capture_infers_cursor_review_candidates_from_raw_commands_without_enabling_adapter`: RED then OK
+    - targeted red/green:
+      `python -m unittest tests.test_agent_app_bridge.AgentAppBridgeTests.test_ide_bridge_endpoint_metadata_can_satisfy_target_without_uia_match`: RED then OK
+    - targeted suite:
+      `python -m unittest tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe tests.test_ide_bridge_capture tests.test_session_readiness_plan`: `51 tests OK`
+    - full suite:
+      `python -m unittest discover tests`: `456 tests OK`
+    - `python -m compileall -q src tests`: OK
+  - current conclusion:
+    - Cursor app-surface background control is now verified through the
+      connector-first route in an isolated real Cursor extension host:
+      extension bridge discovery -> command contract probe -> validated
+      adapter -> no-loss opt-in send
+    - this does not yet mean every Cursor/Codex/Claude app window is solved;
+      normal user-profile Cursor bridge installation, Codex app bridge, and
+      Claude Desktop bridge/auth remain separate surfaces

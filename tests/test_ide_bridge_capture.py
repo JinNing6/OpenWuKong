@@ -132,6 +132,54 @@ class IDEBridgeCaptureTests(unittest.TestCase):
         self.assertEqual(mapping["commandId"], "")
         self.assertEqual(mapping["commandCandidates"], ["github.copilot.chat.open"])
 
+    def test_capture_infers_cursor_review_candidates_from_raw_commands_without_enabling_adapter(self):
+        class _RawCursorCommandClient:
+            def read_capabilities(self, bridge_url, target):
+                del bridge_url, target
+                return {
+                    "ok": True,
+                    "metadata": {"ide_name": "Cursor"},
+                    "commands": [
+                        "workbench.action.files.save",
+                        "composer.openComposer",
+                        "composer.startComposerPrompt",
+                        "composer.sendToAgent",
+                        "aichat.newchataction",
+                    ],
+                    "chat_adapters": [
+                        {
+                            "adapter_id": "cursor",
+                            "label": "Cursor Chat",
+                            "command_id": "",
+                            "command_candidates": [],
+                            "available": False,
+                            "available_candidates": [],
+                        }
+                    ],
+                }
+
+        report = capture_ide_bridge_capabilities(
+            "http://127.0.0.1:8791",
+            bridge_client=_RawCursorCommandClient(),
+        )
+        data = report.to_dict()
+
+        self.assertEqual(
+            data["cursor_review_candidates"],
+            [
+                "composer.startComposerPrompt",
+                "composer.sendToAgent",
+                "composer.openComposer",
+                "aichat.newchataction",
+            ],
+        )
+        self.assertEqual(
+            data["active_mapping"]["cursor"]["commandCandidates"],
+            data["cursor_review_candidates"],
+        )
+        self.assertEqual(data["active_mapping"]["cursor"]["commandId"], "")
+        self.assertFalse(data["active_mapping"]["cursor"]["available"])
+
     def test_cli_writes_capture_report_json(self):
         with tempfile.TemporaryDirectory() as td:
             output_path = Path(td) / "ide_bridge_capabilities.json"

@@ -44,12 +44,18 @@ class AgentAppBridgeRequest:
 
     @property
     def target_ready(self) -> bool:
-        return bool(
+        uia_target_ready = bool(
             self.app_uia_probe.get("target_matched", False)
             and (
                 int(self.app_uia_probe.get("semantic_composer_count", 0) or 0) > 0
                 or _endpoint_supports_ide_chat(self.endpoint)
             )
+        )
+        if uia_target_ready:
+            return True
+        return bool(
+            _endpoint_supports_ide_chat(self.endpoint)
+            and _endpoint_matches_project(self.endpoint, self.project_name)
         )
 
     @property
@@ -787,6 +793,37 @@ def _endpoint_supports_ide_chat(endpoint: dict) -> bool:
             if command_id and bool(item.get("available", False)):
                 return True
     return False
+
+
+def _endpoint_matches_project(endpoint: dict, project_name: str) -> bool:
+    project = str(project_name or "").strip().lower()
+    if not project:
+        return False
+    metadata = endpoint.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    haystack: list[str] = []
+    folders = metadata.get("workspaceFolders")
+    if isinstance(folders, list):
+        for folder in folders:
+            if not isinstance(folder, dict):
+                continue
+            haystack.extend(
+                [
+                    str(folder.get("name", "") or ""),
+                    str(folder.get("fsPath", "") or ""),
+                    str(folder.get("uri", "") or ""),
+                ]
+            )
+    active_editor = metadata.get("activeTextEditor")
+    if isinstance(active_editor, dict):
+        haystack.extend(
+            [
+                str(active_editor.get("fsPath", "") or ""),
+                str(active_editor.get("uri", "") or ""),
+            ]
+        )
+    return any(project in text.lower().replace("\\", "/") for text in haystack if text)
 
 
 def _select_ide_chat_adapter(endpoint: dict, agent_id: str) -> str:
