@@ -7361,3 +7361,22 @@ When a new conversation starts in this repo:
       Codex/Claude app surfaces, or route Codex/Claude background execution
       through their proven CLI surfaces while keeping desktop-app status
       separately reported
+- 2026-05-30 clarified the correct Cursor real-test route:
+  - the correct user-profile Cursor entry is the Start Menu shortcut:
+    `C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Cursor\Cursor.lnk`
+  - the shortcut resolves on this machine to:
+    `E:\cursor\cursor\cursor\Cursor.exe`
+  - the earlier unlogged Cursor behavior is classified as an isolated-profile
+    test-mode artifact, not a failure of the correct Cursor route
+  - R75 remains the authoritative successful Cursor app-chat evidence:
+    `logs/runtime/major-real-no-loss-r75-cursor-real-send-verified-submit/major-real-no-loss-report.json`
+    used the default user profile with DevTools on `127.0.0.1:19557`, sent
+    `OPENWUKONG_CURSOR_REAL_SEND_R75`, verified readback, and kept
+    `control_attempts=0` and `window_input_attempts=0`
+  - future Cursor app-chat validation must use
+    `--allow-agent-app-devtools-default-profile-launch` for signed-in tests;
+    isolated-profile launches are only valid for cold-start or unauthenticated
+    negative evidence
+  - no duplicate real Cursor send was run in this clarification pass, because
+    repeating the R75 send would write another test message into the real
+    Cursor chat while adding little new evidence
