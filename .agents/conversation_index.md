@@ -7380,3 +7380,43 @@ When a new conversation starts in this repo:
   - no duplicate real Cursor send was run in this clarification pass, because
     repeating the R75 send would write another test message into the real
     Cursor chat while adding little new evidence
+- 2026-05-30 added current real no-loss evidence for Codex/Claude CLI
+  background execution while keeping desktop App status separate:
+  - dry-run route check:
+    `logs/runtime/agent-cli-real-no-loss-r79-dry-run/report.json`
+    confirmed the current machine resolves:
+    - Codex CLI:
+      `C:\Users\Zhangjinqian\AppData\Local\OpenAI\Codex\bin\958d608b5e0546a5\codex.exe`
+      with `codex-cli-managed-terminal`
+    - Codex Desktop Shell:
+      `C:\Program Files\WindowsApps\OpenAI.Codex_26.519.11010.0_x64__2p2nqsd0c76g0\app\Codex.exe`
+      as a separate non-background-send desktop surface
+    - Claude Code CLI:
+      `C:\Users\Zhangjinqian\.local\bin\Claude.exe`
+      with `claude-code-cli-managed-terminal`
+    - Claude Desktop Shell:
+      `C:\Program Files\WindowsApps\Claude_1.9659.2.0_x64__pzs8sxrjxfjjc\app\claude.exe`
+      as a separate native-bridge-required desktop surface
+  - real run:
+    `logs/runtime/agent-cli-real-no-loss-r79-real/report.json`
+    produced `total_cases=2`, `passed_cases=2`, `verified_cases=1`,
+    `agent_command_attempts=2`, `window_input_attempts=0`,
+    `control_attempts=0`, `foreground_focus_stable=true`, and clean owned
+    temporary workspaces for both agents
+  - Codex CLI is now current verified real background execution:
+    `status=verified`, `real_verified=true`, `accepted=true`,
+    command family `codex exec`, exact safety flags
+    `--sandbox read-only --ask-for-approval never -C <owned-temp-workspace>
+    exec --skip-git-repo-check --ephemeral --ignore-rules --json`, exit code
+    `0`, and required marker `OPENWUKONG_AGENT_CLI_NO_LOSS: PASS`
+    was observed
+  - Claude CLI was attempted through the safe non-interactive route but is not
+    current verified because this machine returned
+    `Not logged in · Please run /login`; it is classified as
+    `cli_auth_required`, with `real_verified=false`, not as a control-layer or
+    routing failure
+  - desktop App status remains unchanged and separate:
+    Codex app and Claude Desktop can be observed/background-captured, but
+    precise app-side background task/chat submission still requires a native,
+    DevTools, or extension endpoint; CLI success must not be used as proof of
+    desktop App chat capability
