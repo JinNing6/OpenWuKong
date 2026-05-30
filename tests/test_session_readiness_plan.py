@@ -178,6 +178,27 @@ class SessionReadinessPlanTests(unittest.TestCase):
             "openwukong://workspace/E:/ideaProjects/agent/openwukong",
         )
 
+    def test_agent_app_devtools_owned_plan_can_open_workspace_context(self):
+        options = SessionReadinessPlanOptions(
+            agent_app_executable="C:/Users/me/AppData/Local/Programs/Cursor/Cursor.exe",
+            agent_app_debug_port=9557,
+            agent_app_user_data_dir="logs/runtime/openwukong-cursor-app-profile",
+            agent_app_workspace_path="E:/ideaProjects/agent/openwukong",
+        )
+
+        report = build_session_readiness_plan(
+            routes=("agent-app-devtools-owned",),
+            options=options,
+        )
+        action = report.to_dict()["actions"][0]
+
+        workspace_arg = action["argv"][-1]
+        self.assertEqual(
+            Path(workspace_arg).resolve(),
+            Path("E:/ideaProjects/agent/openwukong").resolve(),
+        )
+        self.assertIn("E:/ideaProjects/agent/openwukong", action["command"])
+
     def test_execute_allows_agent_app_devtools_owned_and_writes_manifest(self):
         class _FakeLauncher:
             def __init__(self):

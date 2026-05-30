@@ -7,8 +7,10 @@ from types import SimpleNamespace
 from openwukong.control.app_resolution import (
     AppResolutionCandidate,
     AppPathVerifier,
+    StartMenuAppCandidateProvider,
     StaticAppCandidateProvider,
     WindowsAppResolver,
+    WindowsShortcutTargetResolver,
     WindowsStartAppsCandidateProvider,
 )
 
@@ -132,6 +134,73 @@ class AppResolutionModuleTests(unittest.TestCase):
         self.assertEqual(
             [candidate["display_name"] for candidate in data["candidates"]],
             ["Google Chrome"],
+        )
+
+    def test_start_menu_shortcut_target_becomes_launchable_executable_candidate(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td) / "Programs"
+            root.mkdir()
+            link = root / "Cursor.lnk"
+            link.write_text("shortcut placeholder", encoding="utf-8")
+            target = Path(td) / "Cursor.exe"
+            target.write_text("fake cursor exe", encoding="utf-8")
+            calls = []
+
+            def _shortcut_resolver(path):
+                calls.append(path)
+                return {
+                    "target_path": str(target),
+                    "arguments": "--profile test",
+                    "working_directory": str(target.parent),
+                }
+
+            provider = StartMenuAppCandidateProvider(
+                (root,),
+                shortcut_target_resolver=_shortcut_resolver,
+            )
+
+            report = WindowsAppResolver(candidate_providers=(provider,)).resolve("cursor")
+            data = report.to_dict()
+
+        self.assertTrue(report.ok)
+        self.assertEqual(Path(report.path).name, "Cursor.exe")
+        self.assertEqual(calls, [str(link)])
+        self.assertEqual(
+            data["selected_candidate"]["metadata"]["shortcut_path"],
+            str(link),
+        )
+        self.assertEqual(
+            data["selected_candidate"]["metadata"]["shortcut_arguments"],
+            "--profile test",
+        )
+
+    def test_windows_shortcut_target_resolver_does_not_pass_path_as_powershell_tail_arg(self):
+        calls = []
+
+        def _runner(command):
+            calls.append(tuple(command))
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "target_path": "C:/Apps/Cursor/Cursor.exe",
+                        "arguments": "",
+                        "working_directory": "C:/Apps/Cursor",
+                    }
+                ).encode("utf-8"),
+                stderr=b"",
+            )
+
+        resolver = WindowsShortcutTargetResolver(command_runner=_runner)
+
+        data = resolver("C:/ProgramData/Microsoft/Windows/Start Menu/Programs/Cursor.lnk")
+
+        self.assertEqual(data["target_path"], "C:/Apps/Cursor/Cursor.exe")
+        command = calls[0]
+        self.assertEqual(command[-2], "-Command")
+        self.assertNotEqual(
+            command[-1],
+            "C:/ProgramData/Microsoft/Windows/Start Menu/Programs/Cursor.lnk",
         )
 
     def test_codex_resolution_supports_desktop_and_cli_candidates(self):

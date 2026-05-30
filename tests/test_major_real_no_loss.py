@@ -1267,6 +1267,160 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertIn("--user-data-dir", " ".join(calls[0]["action"]["argv"]))
         self.assertEqual(data["helpers"][0]["agent_id"], "codex")
 
+    def test_agent_app_devtools_resolution_accepts_start_menu_shortcut_target_exe(self):
+        class _Resolver:
+            def resolve(self, agent):
+                self.agent = agent
+                return _FakeReport(
+                    {
+                        "mode": "app-resolution",
+                        "ok": True,
+                        "decision": "resolved",
+                        "source": "start-menu",
+                        "path": "C:/Users/me/AppData/Local/Programs/Cursor/Cursor.exe",
+                        "selected_candidate": {
+                            "source": "start-menu",
+                            "display_name": "Cursor",
+                            "path": "C:/Users/me/AppData/Local/Programs/Cursor/Cursor.exe",
+                            "executable_name": "Cursor.exe",
+                            "metadata": {
+                                "shortcut_path": "C:/ProgramData/Microsoft/Windows/Start Menu/Programs/Cursor/Cursor.lnk"
+                            },
+                        },
+                    }
+                )
+
+        report = major_real_no_loss._build_agent_app_devtools_resolution_report(
+            ("cursor",),
+            resolver=_Resolver(),
+        )
+        case = report["cases"][0]
+
+        self.assertEqual(case["status"], "resolved")
+        self.assertTrue(case["executable_ready"])
+        self.assertEqual(
+            case["executable_path"],
+            "C:/Users/me/AppData/Local/Programs/Cursor/Cursor.exe",
+        )
+
+    def test_agent_app_devtools_resolution_falls_back_to_launchable_candidate_when_selected_is_pathless(self):
+        class _Resolver:
+            def resolve(self, agent):
+                self.agent = agent
+                return _FakeReport(
+                    {
+                        "mode": "app-resolution",
+                        "ok": True,
+                        "decision": "resolved",
+                        "source": "start-apps",
+                        "path": "",
+                        "selected_candidate": {
+                            "source": "start-apps",
+                            "display_name": "Cursor",
+                            "path": "",
+                            "metadata": {"app_id": "Anysphere.Cursor"},
+                        },
+                        "candidates": [
+                            {
+                                "source": "start-apps",
+                                "display_name": "Cursor",
+                                "path": "",
+                                "metadata": {"app_id": "Anysphere.Cursor"},
+                            },
+                            {
+                                "source": "start-menu",
+                                "display_name": "Cursor",
+                                "path": "E:/cursor/cursor/cursor/Cursor.exe",
+                                "executable_name": "Cursor.exe",
+                                "metadata": {
+                                    "shortcut_path": "C:/ProgramData/Microsoft/Windows/Start Menu/Programs/Cursor/Cursor.lnk"
+                                },
+                            },
+                        ],
+                    }
+                )
+
+        report = major_real_no_loss._build_agent_app_devtools_resolution_report(
+            ("cursor",),
+            resolver=_Resolver(),
+        )
+        case = report["cases"][0]
+
+        self.assertEqual(case["status"], "resolved")
+        self.assertTrue(case["executable_ready"])
+        self.assertEqual(case["executable_path"], "E:/cursor/cursor/cursor/Cursor.exe")
+
+    def test_prepare_agent_app_devtools_owned_launch_fleet_forwards_workspace_to_cursor_launch(self):
+        calls = []
+
+        def _execute_plan(plan, **kwargs):
+            action = plan.to_dict()["actions"][0]
+            calls.append({"action": action, "kwargs": dict(kwargs)})
+            return _FakeReport(
+                {
+                    "mode": "session-readiness-execution",
+                    "safety_mode": "isolated_helper_launch",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "launch_attempts": 1,
+                    "manifest_path": kwargs["manifest_path"],
+                    "results": [
+                        {
+                            "status": "started",
+                            "pid": 5157,
+                            "readiness_url": action["readiness_url"],
+                        }
+                    ],
+                }
+            )
+
+        class _HTTPProbe:
+            def get_json(self, url, timeout=0.2):
+                if url.endswith("/json/version"):
+                    return {"Browser": "Cursor/1.0", "Protocol-Version": "1.3"}
+                if url.endswith("/json/list"):
+                    return [
+                        {
+                            "id": "cursor-page",
+                            "type": "page",
+                            "title": "openwukong - Cursor",
+                            "url": "vscode-file://vscode-app/E:/ideaProjects/agent/openwukong",
+                            "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/page/cursor-page",
+                        }
+                    ]
+                raise AssertionError(url)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = major_real_no_loss.prepare_agent_app_devtools_owned_launch_fleet(
+                output_root=Path(tmp) / "agent-app-devtools",
+                resolution_report={
+                    "mode": "agent-app-devtools-resolution",
+                    "cases": [
+                        {
+                            "agent": "cursor",
+                            "agent_id": "cursor",
+                            "status": "resolved",
+                            "executable_ready": True,
+                            "executable_path": "C:/Apps/Cursor.exe",
+                        }
+                    ],
+                },
+                workspace_path="E:/ideaProjects/agent/openwukong",
+                plan_executor=_execute_plan,
+                http_probe=_HTTPProbe(),
+                endpoint_wait_timeout_sec=0.2,
+            )
+            data = report.to_dict()
+
+        self.assertTrue(data["ready"])
+        argv = calls[0]["action"]["argv"]
+        self.assertIn("E:/ideaProjects/agent/openwukong", argv)
+        self.assertIn(
+            "E:/ideaProjects/agent/openwukong",
+            calls[0]["action"]["command"],
+        )
+        self.assertEqual(data["helpers"][0]["workspace_path"], "E:/ideaProjects/agent/openwukong")
+
     def test_prepare_agent_app_devtools_owned_launch_fleet_waits_for_endpoint_health(self):
         http_calls = []
 
@@ -1428,6 +1582,52 @@ class MajorRealNoLossTests(unittest.TestCase):
             devtools_client.calls,
             [("http://127.0.0.1:19557", "Target.getTargets", {})],
         )
+
+    def test_stop_agent_app_devtools_owned_launch_removes_isolated_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            helper_root = Path(tmp) / "agent-app-devtools" / "01-cursor"
+            profile = helper_root / "profile"
+            profile.mkdir(parents=True)
+            (profile / "state.json").write_text("{}", encoding="utf-8")
+            manifest = helper_root / "manifest.json"
+            manifest.write_text("{}", encoding="utf-8")
+
+            stop_report = _FakeReport(
+                {
+                    "mode": "session-readiness-stop",
+                    "safety_mode": "manifest_pid_tree_stop",
+                    "control_attempts": 0,
+                    "stop_attempts": 1,
+                    "results": [
+                        {
+                            "action_id": "launch_agent_app_devtools_owned",
+                            "status": "stopped",
+                            "error": "",
+                        }
+                    ],
+                }
+            )
+            launch_report = {
+                "mode": "agent-app-devtools-owned-launch",
+                "enabled": True,
+                "ready": True,
+                "manifest_path": str(manifest),
+                "user_data_dir": str(profile),
+                "cleanup_ok": False,
+            }
+
+            with patch(
+                "openwukong.evaluation.major_real_no_loss.stop_session_readiness_manifest",
+                return_value=stop_report,
+            ):
+                updated = major_real_no_loss._stop_agent_app_devtools_owned_launch_if_needed(
+                    launch_report
+                )
+
+            self.assertFalse(profile.exists())
+            self.assertTrue(updated["profile_cleanup_attempted"])
+            self.assertTrue(updated["profile_cleanup_ok"])
+            self.assertTrue(updated["cleanup_ok"])
 
     def test_runner_forwards_owned_devtools_process_provider_and_urls_by_agent(self):
         app_calls = []

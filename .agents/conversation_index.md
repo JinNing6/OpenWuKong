@@ -6971,3 +6971,67 @@ When a new conversation starts in this repo:
     - next concrete action: implement/install the Codex App desktop native
       bridge or equivalent product-specific instrumentation, then rerun the
       same dry-run until `native_endpoint_ready=true` before any real send
+- 2026-05-30 advanced the Cursor/Codex-style owned DevTools path without
+  treating an unlogged isolated Cursor as the user's real signed-in app:
+  - implementation:
+    - Start Menu `.lnk` entries are now resolved through a read-only Windows
+      shortcut target resolver before app launch planning; on the current
+      machine
+      `C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Cursor\Cursor.lnk`
+      resolves to `E:\cursor\cursor\cursor\Cursor.exe`
+    - agent-app owned DevTools launch planning now forwards the requested
+      workspace path as a VS Code/Cursor-compatible folder argument for
+      Cursor-like surfaces
+    - DevTools launch resolution can fall back from a pathless `Get-StartApps`
+      selected candidate to a launchable `.exe` candidate discovered from the
+      Start Menu shortcut
+    - isolated agent-app owned profiles are now removed after the helper is
+      stopped, and profile cleanup participates in `cleanup_ok`
+  - official-doc basis:
+    - VS Code command-line folder opening and Cursor command-line folder
+      opening docs were checked before forwarding the workspace as a positional
+      folder argument
+    - Windows shortcut target access was implemented through `WScript.Shell`
+      / shortcut `TargetPath` semantics, with the shortcut path embedded in the
+      PowerShell script rather than passed as a fragile tail argument
+  - validation:
+    - red tests first covered missing `agent_app_workspace_path`, missing
+      fleet `workspace_path` forwarding, Start Menu shortcut target extraction,
+      pathless `Get-StartApps` fallback to a launchable candidate, and isolated
+      profile cleanup
+    - focused regression:
+      `python -m unittest tests.test_app_resolution tests.test_desktop_task_runner tests.test_major_real_no_loss tests.test_session_readiness_plan tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe tests.test_agent_app_transport_matrix`:
+      `129 tests OK`
+    - R56 real Cursor isolated owned launch:
+      `logs/runtime/major-real-no-loss-r56-cursor-owned-workspace-real-launch/major-real-no-loss-report.json`
+      showed the correct Start Menu-derived executable was launched with
+      `E:\ideaProjects\agent\openwukong` as the workspace, with
+      `launch_attempts=1`, `stop_attempts=1`, `cleanup_ok=true`,
+      `control_attempts=0`, and `window_input_attempts=0`; the transport
+      matrix stayed honest with `background_read_only_cases=1`,
+      `background_send_ready_cases=0`, and `status=gated_native_endpoint_missing`
+    - R57 real Cursor isolated owned launch verified the new cleanup fields:
+      `profile_cleanup_attempted=true`, `profile_cleanup_ok=true`, profile
+      directory absent after stop, and no residual owned Cursor debug-port
+      process
+    - a separate no-send default user-profile Cursor probe using the same
+      Start Menu-derived executable and `--remote-debugging-port=19558`
+      confirmed `ready=true`, `focus_stable=true`, a Cursor 3.5.33 CDP endpoint,
+      and no residual probe process; this proves a signed-in/default-profile
+      attach route is viable, but it is not yet wired into the reusable harness
+      as a safe product capability
+    - full verification:
+      `python -m unittest discover tests`: `547 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - the previous "wrong/unlogged Cursor" behavior came from intentionally
+      using an isolated `--user-data-dir`; this is safe for no-loss testing but
+      cannot reuse the user's signed-in Cursor state
+    - the correct system design should split Cursor into two background routes:
+      isolated owned helper for clean read-only/DevTools health tests, and a
+      default-profile/existing-process attach route for signed-in app-side
+      validation, both still requiring zero keyboard/mouse/window input
+    - next concrete action: formalize the default-profile/existing Cursor
+      attach route in the harness, then add target-context/readback validation
+      before any Cursor app-side send can be called complete

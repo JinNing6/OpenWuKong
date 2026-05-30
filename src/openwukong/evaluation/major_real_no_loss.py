@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -554,6 +555,7 @@ def run_major_scenario_real_no_loss(
                 )(
                     output_root=root / "agent-app-devtools",
                     resolution_report=app_devtools_resolution,
+                    workspace_path=workspace_path,
                 )
             )
         effective_ide_bridge_urls = _effective_ide_bridge_urls(
@@ -1070,7 +1072,29 @@ def _build_agent_app_devtools_resolution_case(
 def _launchable_agent_app_executable_path(resolution: dict) -> str:
     path = str(resolution.get("path", "") or "").strip()
     source = str(resolution.get("source", "") or "").strip()
-    if not path or source in {"start-menu", "start-apps"}:
+    selected_path = _launchable_agent_app_candidate_path(
+        {"path": path, "source": source}
+    )
+    if selected_path:
+        return selected_path
+    selected = resolution.get("selected_candidate", {})
+    if isinstance(selected, dict):
+        selected_candidate_path = _launchable_agent_app_candidate_path(selected)
+        if selected_candidate_path:
+            return selected_candidate_path
+    for candidate in resolution.get("candidates", []) or []:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_path = _launchable_agent_app_candidate_path(candidate)
+        if candidate_path:
+            return candidate_path
+    return ""
+
+
+def _launchable_agent_app_candidate_path(candidate: dict) -> str:
+    path = str(candidate.get("path", "") or "").strip()
+    source = str(candidate.get("source", "") or "").strip()
+    if not path or source == "start-apps":
         return ""
     if Path(path).suffix.lower() != ".exe":
         return ""
@@ -1118,6 +1142,11 @@ def _agent_app_endpoint_defaults(agent: str) -> dict:
         "bridge_port": 18890,
         "devtools_port": 19555,
     }
+
+
+def _agent_app_accepts_workspace_argument(agent: str) -> bool:
+    key = str(agent or "").strip().lower()
+    return key.startswith("cursor") or key in {"vscode", "vs code", "code"}
 
 
 def _owned_devtools_launch_plan_template(
@@ -1545,6 +1574,7 @@ def prepare_agent_app_devtools_owned_launch_fleet(
     *,
     output_root: str | Path,
     resolution_report: dict,
+    workspace_path: str = "",
     plan_executor: Callable[..., object] | None = None,
     http_probe: object | None = None,
     devtools_client: object | None = None,
@@ -1568,6 +1598,11 @@ def prepare_agent_app_devtools_owned_launch_fleet(
         effective_agent_id = agent_id or defaults["agent_id"]
         executable = str(case.get("executable_path", "") or "").strip()
         debug_port = int(defaults.get("devtools_port", 19555) or 19555)
+        helper_workspace_path = (
+            str(workspace_path or "").strip()
+            if _agent_app_accepts_workspace_argument(effective_agent_id or agent)
+            else ""
+        )
         helper_root = root / f"{index:02d}-{_safe_path_component(effective_agent_id or agent)}"
         user_data_dir = helper_root / "profile"
         manifest_path = helper_root / "manifest.json"
@@ -1585,6 +1620,7 @@ def prepare_agent_app_devtools_owned_launch_fleet(
                     agent_app_executable=executable,
                     agent_app_debug_port=debug_port,
                     agent_app_user_data_dir=str(user_data_dir),
+                    agent_app_workspace_path=helper_workspace_path,
                 ),
             )
             launch_report = _report_to_dict(
@@ -1632,6 +1668,7 @@ def prepare_agent_app_devtools_owned_launch_fleet(
                 "debug_port": debug_port,
                 "debugger_url": readiness_url,
                 "user_data_dir": str(user_data_dir),
+                "workspace_path": helper_workspace_path,
                 "manifest_path": str(manifest_path),
                 "command": command,
                 "launch_attempts": _counter(launch_report, "launch_attempts"),
@@ -2512,11 +2549,64 @@ def _stop_agent_app_devtools_owned_launch_if_needed(launch_report: dict) -> dict
     if isinstance(existing_stop, dict) and existing_stop:
         return dict(launch_report)
     stop_report = stop_session_readiness_manifest(manifest_path).to_dict()
+    profile_cleanup = _remove_agent_app_owned_profile_dir(
+        launch_report,
+        manifest_path=manifest_path,
+    )
     updated = dict(launch_report)
     updated["stop_report"] = stop_report
     updated["stop_attempts"] = _counter(stop_report, "stop_attempts")
-    updated["cleanup_ok"] = _stop_report_cleanup_ok(stop_report)
+    updated["profile_cleanup_attempted"] = profile_cleanup["attempted"]
+    updated["profile_cleanup_ok"] = profile_cleanup["ok"]
+    updated["profile_cleanup_error"] = profile_cleanup["error"]
+    updated["cleanup_ok"] = _stop_report_cleanup_ok(stop_report) and bool(
+        profile_cleanup["ok"]
+    )
     return updated
+
+
+def _remove_agent_app_owned_profile_dir(
+    launch_report: dict,
+    *,
+    manifest_path: str,
+) -> dict:
+    profile_text = str(launch_report.get("user_data_dir", "") or "").strip()
+    if not profile_text:
+        return {"attempted": False, "ok": True, "error": ""}
+    try:
+        profile_path = Path(profile_text).expanduser().resolve()
+        manifest_parent = Path(manifest_path).expanduser().resolve().parent
+        if profile_path == manifest_parent or not _path_is_relative_to(
+            profile_path,
+            manifest_parent,
+        ):
+            return {
+                "attempted": True,
+                "ok": False,
+                "error": "profile_outside_owned_helper_dir",
+            }
+        if not profile_path.exists():
+            return {"attempted": True, "ok": True, "error": ""}
+        shutil.rmtree(profile_path)
+        return {
+            "attempted": True,
+            "ok": not profile_path.exists(),
+            "error": "" if not profile_path.exists() else "profile_still_exists",
+        }
+    except Exception as exc:
+        return {
+            "attempted": True,
+            "ok": False,
+            "error": str(exc) or exc.__class__.__name__,
+        }
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _stop_report_cleanup_ok(stop_report: dict) -> bool:

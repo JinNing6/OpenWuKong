@@ -9,6 +9,7 @@ blocks ambiguous same-priority candidates instead of launching a nearby product.
 from __future__ import annotations
 
 import dataclasses
+import base64
 import json
 import os
 import shutil
@@ -405,15 +406,25 @@ class LocalCacheAppCandidateProvider:
 
 
 class StartMenuAppCandidateProvider:
-    def __init__(self, roots: tuple[str | Path, ...] = ()):
+    def __init__(
+        self,
+        roots: tuple[str | Path, ...] = (),
+        *,
+        shortcut_target_resolver: object | None = None,
+    ):
         self.roots = tuple(Path(root) for root in roots) or default_start_menu_roots()
+        self.shortcut_target_resolver = (
+            shortcut_target_resolver
+            if shortcut_target_resolver is not None
+            else WindowsShortcutTargetResolver()
+        )
 
     def candidates(
         self,
         app_name: str,
         identity: AppIdentity,
     ) -> tuple[AppResolutionCandidate, ...]:
-        del app_name, identity
+        del app_name
         items: list[AppResolutionCandidate] = []
         for root in self.roots:
             if not root.exists():
@@ -422,6 +433,10 @@ class StartMenuAppCandidateProvider:
                 if path.is_dir():
                     continue
                 if path.suffix.lower() not in {".lnk", ".url", ".exe"}:
+                    continue
+                resolved = self._resolved_shortcut_candidate(path, identity)
+                if resolved is not None:
+                    items.append(resolved)
                     continue
                 items.append(
                     AppResolutionCandidate(
@@ -432,6 +447,103 @@ class StartMenuAppCandidateProvider:
                     )
                 )
         return tuple(items)
+
+    def _resolved_shortcut_candidate(
+        self,
+        path: Path,
+        identity: AppIdentity,
+    ) -> AppResolutionCandidate | None:
+        if path.suffix.lower() != ".lnk":
+            return None
+        if not _start_menu_name_matches_identity(path.stem, identity):
+            return None
+        resolver = self.shortcut_target_resolver
+        if not callable(resolver):
+            return None
+        try:
+            shortcut = resolver(str(path))
+        except Exception:
+            return None
+        if not isinstance(shortcut, dict):
+            return None
+        target_path = str(
+            shortcut.get("target_path", "") or shortcut.get("TargetPath", "") or ""
+        ).strip()
+        if not target_path or Path(target_path).suffix.lower() != ".exe":
+            return None
+        return AppResolutionCandidate(
+            source="start-menu",
+            display_name=path.stem,
+            path=target_path,
+            executable_name=Path(target_path).name,
+            metadata={
+                "shortcut_path": str(path),
+                "shortcut_arguments": str(
+                    shortcut.get("arguments", "") or shortcut.get("Arguments", "") or ""
+                ),
+                "shortcut_working_directory": str(
+                    shortcut.get("working_directory", "")
+                    or shortcut.get("WorkingDirectory", "")
+                    or ""
+                ),
+            },
+        )
+
+
+class WindowsShortcutTargetResolver:
+    def __init__(self, *, command_runner: object | None = None, timeout_sec: float = 5.0):
+        self.command_runner = command_runner
+        self.timeout_sec = float(timeout_sec)
+
+    def __call__(self, path: str) -> dict:
+        if os.name != "nt":
+            return {}
+        path_b64 = base64.b64encode(str(path or "").encode("utf-8")).decode("ascii")
+        command = [
+            "powershell.exe",
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            (
+                "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+                f"$path = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{path_b64}')); "
+                "$shell = New-Object -ComObject WScript.Shell; "
+                "$shortcut = $shell.CreateShortcut($path); "
+                "[pscustomobject]@{"
+                "target_path=[string]$shortcut.TargetPath;"
+                "arguments=[string]$shortcut.Arguments;"
+                "working_directory=[string]$shortcut.WorkingDirectory"
+                "} | ConvertTo-Json -Compress"
+            ),
+        ]
+        try:
+            if callable(self.command_runner):
+                completed = self.command_runner(command)
+            else:
+                completed = subprocess.run(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=False,
+                    timeout=self.timeout_sec,
+                    check=False,
+                )
+        except Exception:
+            return {}
+        if completed.returncode != 0:
+            return {}
+        stdout = _decode_command_output(getattr(completed, "stdout", b"")).strip()
+        if not stdout:
+            return {}
+        try:
+            payload = json.loads(stdout)
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
 
 class WindowsStartAppsCandidateProvider:
@@ -801,6 +913,18 @@ def candidate_matches_identity(candidate: AppResolutionCandidate, identity: AppI
     return False
 
 
+def _start_menu_name_matches_identity(name: str, identity: AppIdentity) -> bool:
+    normalized = normalize_app_name(name)
+    if not normalized:
+        return False
+    accepted = {
+        normalize_app_name(item)
+        for item in (*identity.exact_names, *identity.aliases)
+        if normalize_app_name(item)
+    }
+    return normalized in accepted
+
+
 def requested_agent_surface_kind(app_name: str, identity: AppIdentity) -> str:
     if identity.app_id not in {"claude", "codex"}:
         return ""
@@ -1089,6 +1213,7 @@ __all__ = [
     "WindowsStartAppsCandidateProvider",
     "WindowsAppResolver",
     "WindowsRunningProcessCandidateProvider",
+    "WindowsShortcutTargetResolver",
     "candidate_excluded",
     "claude_candidate_surface_kind",
     "candidate_key",

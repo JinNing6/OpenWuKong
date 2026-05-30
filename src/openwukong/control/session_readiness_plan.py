@@ -33,6 +33,7 @@ class SessionReadinessPlanOptions:
     agent_app_debug_port: int = 9555
     agent_app_user_data_dir: str = "logs/runtime/agent-app-devtools-profile"
     agent_app_url: str = ""
+    agent_app_workspace_path: str = ""
     ide_executable: str = "cursor.exe"
     ide_user_data_dir: str = "logs/runtime/ide-bridge-user-data"
     ide_extensions_dir: str = "logs/runtime/ide-bridge-extensions"
@@ -780,6 +781,13 @@ def _agent_app_devtools_owned_action(
         "--disable-crash-reporter",
     ]
     app_url = str(options.agent_app_url or "").strip()
+    workspace_path = (
+        _normalized_path(options.agent_app_workspace_path)
+        if options.agent_app_workspace_path
+        else ""
+    )
+    if workspace_path:
+        argv_parts.append(workspace_path)
     if app_url:
         argv_parts.append(app_url)
     argv = tuple(part for part in argv_parts if part)
