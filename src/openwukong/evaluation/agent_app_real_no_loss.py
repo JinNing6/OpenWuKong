@@ -726,7 +726,6 @@ def _case_from_probe(
     forbidden_markers: tuple[str, ...] = (),
 ) -> AgentAppRealNoLossCase:
     decision = str(probe.get("decision", "") or "")
-    transport_matrix = build_agent_app_transport_matrix(probe).to_dict()
     native_ready = int(probe.get("ready_endpoint_count", 0) or 0) > 0
     app_probe = _app_uia_probe(probe)
     matched_window_count = _counter(app_probe, "matched_window_count")
@@ -743,6 +742,11 @@ def _case_from_probe(
         allow_app_bridge_send=allow_app_bridge_send,
         app_bridge_sender=app_bridge_sender,
     )
+    transport_matrix = build_agent_app_transport_matrix(
+        probe,
+        app_bridge_composer_probe=app_bridge_composer_probe,
+        app_bridge_send_report=app_bridge_send_report,
+    ).to_dict()
     semantic_action_dry_run, semantic_action_send_report = _run_uia_semantic_action_path(
         agent=agent,
         probe=probe,

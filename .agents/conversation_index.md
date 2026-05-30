@@ -7236,3 +7236,46 @@ When a new conversation starts in this repo:
       transport matrix as a verified app-send capability, then continue the
       same no-focus proof pattern for Codex/Claude app chat or browser/file
       tasks
+- 2026-05-30 tightened the unified app transport matrix and refreshed Word
+  real background evidence:
+  - implementation:
+    - `app-devtools-page-target` no longer becomes background send-ready from
+      page-target context alone; it now requires either a ready
+      `app_bridge_composer_probe` or a verified `app_bridge_send_report`
+    - matrix evidence now records composer probe decision, product composer
+      contract, app bridge send decision, send verification, and submit button
+      contract when those proofs exist
+    - `agent_app_real_no_loss` now rebuilds the transport matrix after the
+      app bridge composer/send path, so reports distinguish:
+      target page available, composer not proven, composer ready, and send
+      verified
+  - official-doc basis:
+    - Chrome DevTools Protocol Runtime/Target documentation was checked before
+      changing the CDP page-target readiness contract
+  - validation:
+    - red tests first showed the old matrix incorrectly marked a matching
+      Cursor DevTools page target as send-ready without a composer probe
+    - green focused regression:
+      `python -m unittest tests.test_agent_app_transport_matrix`:
+      `6 tests OK`
+    - broader focused regression:
+      `python -m unittest tests.test_agent_app_real_no_loss tests.test_agent_app_transport_matrix tests.test_major_real_no_loss`:
+      `57 tests OK`
+    - real Word R76:
+      `logs/runtime/word-real-r76/report.json` verified hidden Word COM
+      creation of an owned temporary document with
+      `decision=word_background_probe_verified`, `save_verified=true`,
+      `readback_verified=true`, `visible_requested=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `office_com_attempts=1`, and marker `OPENWUKONG_WORD_REAL_R76`
+    - post-run process scan found no residual `WINWORD.EXE`
+  - current conclusion:
+    - Cursor's real background send proof is now represented more honestly in
+      the unified matrix: target context alone is not enough, composer/send
+      evidence is required
+    - Word owned-document background operation is currently verified on this
+      machine through hidden COM without foreground input or residual process
+    - next concrete actions:
+      1. run the strict full verification suite for this matrix change
+      2. continue the same no-focus proof pattern for browser current real
+         owned-helper action and Codex/Claude app chat surfaces

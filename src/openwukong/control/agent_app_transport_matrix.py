@@ -149,8 +149,15 @@ class AgentAppTransportMatrixReport:
         }
 
 
-def build_agent_app_transport_matrix(probe: dict | object) -> AgentAppTransportMatrixReport:
+def build_agent_app_transport_matrix(
+    probe: dict | object,
+    *,
+    app_bridge_composer_probe: dict | object | None = None,
+    app_bridge_send_report: dict | object | None = None,
+) -> AgentAppTransportMatrixReport:
     data = _dict_from_report(probe)
+    composer_probe = _dict_from_report(app_bridge_composer_probe)
+    send_report = _dict_from_report(app_bridge_send_report)
     app_uia_probe = _dict_value(data.get("app_uia_probe"))
     agent = str(data.get("agent", "") or app_uia_probe.get("agent", "") or "").strip()
     agent_id = str(
@@ -166,6 +173,8 @@ def build_agent_app_transport_matrix(probe: dict | object) -> AgentAppTransportM
                 app_uia_probe=app_uia_probe,
                 project_name=project_name,
                 task_name=task_name,
+                app_bridge_composer_probe=composer_probe,
+                app_bridge_send_report=send_report,
             )
         )
         + _uia_candidates(app_uia_probe)
@@ -186,6 +195,8 @@ def _endpoint_candidates(
     app_uia_probe: dict,
     project_name: str,
     task_name: str,
+    app_bridge_composer_probe: dict,
+    app_bridge_send_report: dict,
 ) -> tuple[AgentAppTransportCandidate, ...]:
     endpoint_list = tuple(_dict_value(endpoint) for endpoint in endpoints)
     candidates: list[AgentAppTransportCandidate] = []
@@ -231,6 +242,8 @@ def _endpoint_candidates(
                     project_name=project_name,
                     task_name=task_name,
                 ),
+                app_bridge_composer_probe=app_bridge_composer_probe,
+                app_bridge_send_report=app_bridge_send_report,
             )
         )
         browser_candidate = _devtools_browser_candidate(devtools)
@@ -267,6 +280,8 @@ def _devtools_page_candidate(
     endpoints: Iterable[dict],
     *,
     target_context_verified: bool,
+    app_bridge_composer_probe: dict,
+    app_bridge_send_report: dict,
 ) -> AgentAppTransportCandidate:
     endpoint_list = tuple(_dict_value(endpoint) for endpoint in endpoints)
     ready_endpoints = [
@@ -275,7 +290,19 @@ def _devtools_page_candidate(
         if bool(endpoint.get("ready", False)) and _target_count(endpoint) > 0
     ]
     transport_ready = bool(ready_endpoints)
-    send_ready = bool(transport_ready and target_context_verified)
+    target_ready = bool(transport_ready and target_context_verified)
+    composer_ready = _app_bridge_composer_ready(app_bridge_composer_probe)
+    send_verified = _app_bridge_send_verified(app_bridge_send_report)
+    send_ready = bool(target_ready and (composer_ready or send_verified))
+    evidence = _endpoint_evidence(endpoint_list)
+    evidence.update(
+        _app_bridge_evidence(
+            app_bridge_composer_probe,
+            app_bridge_send_report,
+            composer_ready=composer_ready,
+            send_verified=send_verified,
+        )
+    )
     return AgentAppTransportCandidate(
         transport_id="app-devtools-page-target",
         transport_channel="cdp_page_target",
@@ -284,26 +311,28 @@ def _devtools_page_candidate(
         ready=transport_ready,
         can_send_without_focus=send_ready,
         requires_user_confirmation=True,
-        blocking_reason=(
-            ""
-            if send_ready
-            else (
-                "target_context_not_verified"
-                if transport_ready
-                else _first_error(endpoint_list) or "page_target_missing"
-            )
+        blocking_reason=_devtools_page_blocking_reason(
+            endpoint_list,
+            transport_ready=transport_ready,
+            target_context_verified=target_context_verified,
+            composer_probe=app_bridge_composer_probe,
+            send_ready=send_ready,
         ),
         verification_requirements=(
             "page_target_websocket",
             "target_context_verification",
+            "composer_probe_ready",
             "dom_bridge_result",
             "readback_markers",
             "no_window_input",
         ),
-        risk_flags=()
-        if send_ready
-        else (("target_context_not_verified",) if transport_ready else ("page_target_missing",)),
-        evidence=_endpoint_evidence(endpoint_list),
+        risk_flags=_devtools_page_risk_flags(
+            transport_ready=transport_ready,
+            target_context_verified=target_context_verified,
+            composer_probe=app_bridge_composer_probe,
+            send_ready=send_ready,
+        ),
+        evidence=evidence,
     )
 
 
@@ -330,6 +359,120 @@ def _devtools_browser_candidate(
         risk_flags=("browser_target_not_control_surface",),
         evidence=_endpoint_evidence(browser_endpoints),
     )
+
+
+def _devtools_page_blocking_reason(
+    endpoints: Iterable[dict],
+    *,
+    transport_ready: bool,
+    target_context_verified: bool,
+    composer_probe: dict,
+    send_ready: bool,
+) -> str:
+    endpoint_list = tuple(_dict_value(endpoint) for endpoint in endpoints)
+    if send_ready:
+        return ""
+    if not transport_ready:
+        return _first_error(endpoint_list) or "page_target_missing"
+    if not target_context_verified:
+        return "target_context_not_verified"
+    if not composer_probe:
+        return "composer_probe_required"
+    return str(composer_probe.get("decision", "") or "composer_probe_not_ready")
+
+
+def _devtools_page_risk_flags(
+    *,
+    transport_ready: bool,
+    target_context_verified: bool,
+    composer_probe: dict,
+    send_ready: bool,
+) -> tuple[str, ...]:
+    if send_ready:
+        return ()
+    if not transport_ready:
+        return ("page_target_missing",)
+    if not target_context_verified:
+        return ("target_context_not_verified",)
+    if not composer_probe:
+        return ("composer_probe_required",)
+    return ("composer_not_verified",)
+
+
+def _app_bridge_composer_ready(report: dict) -> bool:
+    if not report:
+        return False
+    return bool(
+        report.get("ok", False)
+        and str(report.get("decision", "") or "") == "app_bridge_composer_ready"
+        and _counter(report, "control_attempts") == 0
+        and _counter(report, "window_input_attempts") == 0
+        and _counter(report, "bridge_send_attempts") == 0
+    )
+
+
+def _app_bridge_send_verified(report: dict) -> bool:
+    if not report:
+        return False
+    return bool(
+        report.get("ok", False)
+        and str(report.get("decision", "") or "") == "app_bridge_send_accepted"
+        and _counter(report, "control_attempts") == 0
+        and _counter(report, "window_input_attempts") == 0
+        and _counter(report, "bridge_send_attempts") == 1
+        and _counter(report, "native_call_attempts") == 1
+    )
+
+
+def _app_bridge_evidence(
+    composer_probe: dict,
+    send_report: dict,
+    *,
+    composer_ready: bool,
+    send_verified: bool,
+) -> dict:
+    evidence = {
+        "composer_probe_decision": str(composer_probe.get("decision", "") or ""),
+        "composer_probe_ready": composer_ready,
+        "app_bridge_send_decision": str(send_report.get("decision", "") or ""),
+        "app_bridge_send_verified": send_verified,
+    }
+    product_contract = _first_nested_text(
+        composer_probe,
+        (
+            ("action_result", "selectedComposer", "productComposerContract"),
+            ("action_result", "productComposerContract"),
+        ),
+    ) or _first_nested_text(
+        send_report,
+        (
+            ("action_result", "productComposerContract"),
+            ("action_result", "selectedComposer", "productComposerContract"),
+        ),
+    )
+    send_button_contract = _first_nested_text(
+        send_report,
+        (("action_result", "sendButtonContract"),),
+    )
+    if product_contract:
+        evidence["product_composer_contract"] = product_contract
+    if send_button_contract:
+        evidence["send_button_contract"] = send_button_contract
+    return evidence
+
+
+def _first_nested_text(data: dict, paths: Iterable[tuple[str, ...]]) -> str:
+    for path in paths:
+        value: object = data
+        for key in path:
+            if not isinstance(value, dict):
+                value = ""
+                break
+            value = value.get(key, "")
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
 
 
 def _uia_candidates(app_uia_probe: dict) -> list[AgentAppTransportCandidate]:
@@ -514,6 +657,13 @@ def _first_error(endpoints: Iterable[dict]) -> str:
         if error:
             return error
     return ""
+
+
+def _counter(data: dict, key: str) -> int:
+    try:
+        return int(data.get(key, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _dict_from_report(value: object) -> dict:

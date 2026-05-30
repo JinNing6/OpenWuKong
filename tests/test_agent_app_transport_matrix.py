@@ -101,8 +101,12 @@ class AgentAppTransportMatrixTests(unittest.TestCase):
             matrix["selected_send_transport"]["transport_channel"],
             "agent_native_bridge",
         )
-        self.assertTrue(
+        self.assertFalse(
             _candidate(matrix, "app-devtools-page-target")["can_send_without_focus"]
+        )
+        self.assertEqual(
+            _candidate(matrix, "app-devtools-page-target")["blocking_reason"],
+            "composer_probe_required",
         )
         self.assertTrue(
             _candidate(matrix, "uia-semantic-draft")["can_draft_without_focus"]
@@ -154,12 +158,127 @@ class AgentAppTransportMatrixTests(unittest.TestCase):
         self.assertEqual(candidate["blocking_reason"], "target_context_not_verified")
         self.assertEqual(matrix["summary"]["background_send_ready"], 0)
 
+    def test_page_target_cdp_requires_composer_probe_before_send_ready(self):
+        matrix = build_agent_app_transport_matrix(
+            _cursor_devtools_probe(target_title="openwukong - Cursor")
+        ).to_dict()
+
+        self.assertFalse(matrix["send_ready"])
+        self.assertEqual(matrix["selected_send_transport"], {})
+        candidate = _candidate(matrix, "app-devtools-page-target")
+        self.assertTrue(candidate["ready"])
+        self.assertFalse(candidate["can_send_without_focus"])
+        self.assertEqual(candidate["blocking_reason"], "composer_probe_required")
+        self.assertIn("composer_probe_required", candidate["risk_flags"])
+        self.assertEqual(matrix["summary"]["background_send_ready"], 0)
+
+    def test_page_target_cdp_with_ready_composer_is_background_send_ready(self):
+        matrix = build_agent_app_transport_matrix(
+            _cursor_devtools_probe(target_title="openwukong - Cursor"),
+            app_bridge_composer_probe={
+                "ok": True,
+                "decision": "app_bridge_composer_ready",
+                "action_result": {
+                    "selectedComposer": {
+                        "productComposerContract": (
+                            "cursor-agent-chat-aislash-editor-input"
+                        )
+                    }
+                },
+            },
+        ).to_dict()
+
+        self.assertTrue(matrix["send_ready"])
+        candidate = _candidate(matrix, "app-devtools-page-target")
+        self.assertTrue(candidate["can_send_without_focus"])
+        self.assertEqual(candidate["blocking_reason"], "")
+        self.assertEqual(
+            candidate["evidence"]["composer_probe_decision"],
+            "app_bridge_composer_ready",
+        )
+        self.assertEqual(
+            candidate["evidence"]["product_composer_contract"],
+            "cursor-agent-chat-aislash-editor-input",
+        )
+        self.assertEqual(
+            matrix["selected_send_transport"]["transport_id"],
+            "app-devtools-page-target",
+        )
+        self.assertEqual(matrix["summary"]["background_send_ready"], 1)
+
+    def test_page_target_cdp_records_verified_app_bridge_send(self):
+        matrix = build_agent_app_transport_matrix(
+            _cursor_devtools_probe(target_title="openwukong - Cursor"),
+            app_bridge_send_report={
+                "ok": True,
+                "decision": "app_bridge_send_accepted",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 1,
+                "native_call_attempts": 1,
+                "action_result": {
+                    "productComposerContract": (
+                        "cursor-agent-chat-aislash-editor-input"
+                    ),
+                    "sendButtonContract": "cursor-arrow-up-two-submit",
+                },
+            },
+        ).to_dict()
+
+        candidate = _candidate(matrix, "app-devtools-page-target")
+        self.assertTrue(matrix["send_ready"])
+        self.assertTrue(candidate["evidence"]["app_bridge_send_verified"])
+        self.assertEqual(
+            candidate["evidence"]["app_bridge_send_decision"],
+            "app_bridge_send_accepted",
+        )
+        self.assertEqual(
+            candidate["evidence"]["send_button_contract"],
+            "cursor-arrow-up-two-submit",
+        )
+
 
 def _candidate(matrix, transport_id):
     for item in matrix["candidates"]:
         if item["transport_id"] == transport_id:
             return item
     raise AssertionError(f"missing candidate {transport_id}: {matrix['candidates']}")
+
+
+def _cursor_devtools_probe(*, target_title):
+    return {
+        "agent": "cursor",
+        "agent_id": "cursor",
+        "project_name": "openwukong",
+        "task_name": "",
+        "ready_endpoint_count": 1,
+        "endpoints": [
+            {
+                "endpoint_type": "devtools",
+                "debugger_url": "http://127.0.0.1:19557",
+                "ready": True,
+                "target_count": 1,
+                "targets": [
+                    {
+                        "target_id": "cursor-workbench",
+                        "id": "cursor-workbench",
+                        "type": "page",
+                        "title": target_title,
+                        "url": "vscode-file://vscode-app/e:/cursor/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html",
+                        "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/page/cursor-workbench",
+                        "ready": True,
+                    }
+                ],
+            }
+        ],
+        "app_uia_probe": {
+            "target_matched": False,
+            "matched_window_count": 1,
+            "semantic_composer_count": 0,
+            "submit_candidate_count": 0,
+            "background_screenshot_focus_stable": True,
+        },
+    }
 
 
 if __name__ == "__main__":
