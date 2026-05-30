@@ -7279,3 +7279,85 @@ When a new conversation starts in this repo:
       1. run the strict full verification suite for this matrix change
       2. continue the same no-focus proof pattern for browser current real
          owned-helper action and Codex/Claude app chat surfaces
+- 2026-05-30 refreshed browser, WeChat, file, Word, Codex app, and Claude
+  app no-focus evidence against the current desktop:
+  - real primary R77:
+    `logs/runtime/primary-real-no-loss-r77-browser-owned`
+    - command ran the L1 primary scenario fixture with an explicit owned
+      browser helper on DevTools port `9460`, isolated profile, and
+      `about:blank#openwukong-primary-smoke`
+    - suite result:
+      `passed_cases=5/5`, `failed_cases=0`, `real_verified_cases=4`,
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `real_user_filesystem_scan_attempts=0`,
+      `user_file_modification_attempts=0`, `owned_app_launch_attempts=1`,
+      `background_screenshot_count=1`,
+      `background_screenshot_focus_stable=true`
+    - browser helper artifact:
+      `logs/runtime/primary-real-no-loss-r77-browser-owned/owned_browser_primary_smoke/owned_browser_helpers/browser_research_collect_sources/helper.json`
+      verified:
+      `status=started_and_stopped`, exact target match for
+      `about:blank#openwukong-primary-smoke`,
+      `owned_browser_action.decision=executed`,
+      `owned_browser_action.action_report.action=read_page`,
+      `owned_browser_action_control_attempts=0`,
+      `readiness_stop.stop_attempts=1`,
+      `profile_cleanup.attempted=true`, and
+      `profile_cleanup.deleted=true`
+    - post-run cleanup checks:
+      no `chrome.exe` / `msedge.exe` process remained with
+      `--remote-debugging-port=9460` or the owned profile path, and the owned
+      profile directory was absent
+    - WeChat in R77:
+      current personal WeChat/Weixin window was found and background-captured
+      through `PrintWindow` with focus stable; write remained correctly blocked
+      because UIA/MSAA exposed no deterministic semantic input and no native
+      bridge URL was configured
+    - Word in R77:
+      hidden COM owned-document path passed again with
+      `decision=word_background_probe_verified`, `save_verified=true`,
+      `readback_verified=true`, `visible_requested=false`,
+      `control_attempts=0`, and `window_input_attempts=0`
+    - file search in R77:
+      owned temp-file index search passed with no real user filesystem scan and
+      no user file modification
+    - Codex project task draft in R77:
+      current IDE bridge at `http://127.0.0.1:8787` was unavailable, so the
+      Codex primary scenario remains `real_verified=false` for task draft;
+      this is a bridge availability gap, not a control-layer send attempt
+  - real agent-app R78:
+    `logs/runtime/agent-app-real-no-loss-r78-codex-claude-readonly`
+    - ran read-only background probes for `codex app` and `claude desktop`
+      with background screenshots
+    - suite result:
+      `passed_cases=2/2`, `failed_cases=0`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=0`,
+      `background_screenshot_count=2`,
+      `background_screenshot_success_count=2`,
+      `background_screenshot_focus_stable=true`,
+      `background_send_ready_cases=0`, `background_draft_ready_cases=0`
+    - Codex app:
+      desktop app surface and `openwukong` project were visible, background
+      screenshot succeeded, but no native endpoint was exposed and no semantic
+      composer was verified; status remained
+      `gated_native_endpoint_missing`
+    - Claude Desktop:
+      app surface was visible and background screenshot succeeded, but the
+      requested `openwukong` project/task was not visible and no native endpoint
+      or semantic composer was exposed; status remained
+      `gated_native_endpoint_missing`
+  - current conclusion:
+    - browser owned-helper background control is now current and verified on
+      this machine with exact target creation, CDP read action, process stop,
+      and profile cleanup
+    - WeChat can currently be observed and background-captured, but precise
+      background send remains blocked without a WeChat-native bridge or a
+      stronger semantic input surface
+    - Codex app and Claude Desktop can be observed/captured in the background,
+      but precise app-side background task/chat submission remains blocked by
+      missing native/DevTools/extension endpoints
+    - next concrete action: implement or install a native/extension bridge for
+      Codex/Claude app surfaces, or route Codex/Claude background execution
+      through their proven CLI surfaces while keeping desktop-app status
+      separately reported
