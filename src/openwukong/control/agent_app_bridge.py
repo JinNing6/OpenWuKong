@@ -56,6 +56,7 @@ class AgentAppBridgeRequest:
             (
                 _endpoint_supports_ide_chat(endpoint, self.agent_id)
                 or _endpoint_supports_agent_native_bridge(endpoint, self.agent_id)
+                or _endpoint_supports_app_devtools(endpoint, self.agent_id)
             )
             and _endpoint_matches_project(endpoint, self.project_name)
             and _endpoint_matches_task(endpoint, self.task_name)
@@ -1136,6 +1137,8 @@ def _endpoint_matches_project(endpoint: dict, project_name: str) -> bool:
     project = str(project_name or "").strip().lower()
     if not project:
         return True
+    if _endpoint_targets_match_query(endpoint, project):
+        return True
     metadata = endpoint.get("metadata")
     if not isinstance(metadata, dict):
         return False
@@ -1185,6 +1188,8 @@ def _endpoint_matches_task(endpoint: dict, task_name: str) -> bool:
     task = str(task_name or "").strip().lower()
     if not task:
         return True
+    if _endpoint_targets_match_query(endpoint, task):
+        return True
     if _endpoint_is_ide_bridge(endpoint):
         return True
     metadata = endpoint.get("metadata")
@@ -1213,6 +1218,25 @@ def _endpoint_matches_task(endpoint: dict, task_name: str) -> bool:
                 ]
             )
     return any(task in text.lower() for text in haystack if text)
+
+
+def _endpoint_targets_match_query(endpoint: dict, query: str) -> bool:
+    needle = str(query or "").strip().lower()
+    if not needle:
+        return True
+    targets = endpoint.get("targets")
+    if not isinstance(targets, list):
+        return False
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        haystack = " ".join(
+            str(target.get(key, "") or "")
+            for key in ("title", "url", "target_id", "id")
+        ).lower()
+        if needle in haystack:
+            return True
+    return False
 
 
 def _select_ide_chat_adapter(endpoint: dict, agent_id: str) -> str:

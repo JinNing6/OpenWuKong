@@ -476,6 +476,130 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertTrue(data["request"]["target_ready"])
         self.assertTrue(data["request"]["native_endpoint_ready"])
 
+    def test_devtools_page_target_project_can_satisfy_target_without_uia_match(self):
+        probe = _ready_probe()
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "target_matched": False,
+            "semantic_composer_count": 0,
+        }
+        probe["endpoints"][0]["process"] = {
+            "process_name": "Cursor.exe",
+            "pid": 13592,
+            "executable_path": "E:/cursor/cursor/cursor/Cursor.exe",
+        }
+        probe["endpoints"][0]["targets"] = [
+            {
+                "target_id": "cursor-workbench",
+                "id": "cursor-workbench",
+                "type": "page",
+                "title": "openwukong - Cursor",
+                "url": "vscode-file://vscode-app/e:/cursor/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/page/cursor-workbench",
+                "ready": True,
+            }
+        ]
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="openwukong",
+            task_name="",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\n\nMessage:\nSummarize the active task.",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=probe,
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(data["decision"], "app_bridge_dry_run_ready")
+        self.assertTrue(data["request"]["target_ready"])
+        self.assertTrue(data["request"]["native_endpoint_ready"])
+
+    def test_devtools_page_target_without_project_context_stays_blocked(self):
+        probe = _ready_probe()
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "target_matched": False,
+            "semantic_composer_count": 0,
+        }
+        probe["endpoints"][0]["process"] = {
+            "process_name": "Cursor.exe",
+            "pid": 13592,
+        }
+        probe["endpoints"][0]["targets"] = [
+            {
+                "target_id": "cursor-workbench",
+                "id": "cursor-workbench",
+                "type": "page",
+                "title": "other-project - Cursor",
+                "url": "vscode-file://vscode-app/e:/cursor/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/page/cursor-workbench",
+                "ready": True,
+            }
+        ]
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="openwukong",
+            task_name="",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\n\nMessage:\nSummarize the active task.",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=probe,
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_target_not_ready")
+        self.assertFalse(data["request"]["target_ready"])
+        self.assertTrue(data["request"]["native_endpoint_ready"])
+
+    def test_devtools_page_target_without_task_context_stays_blocked(self):
+        probe = _ready_probe()
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "target_matched": False,
+            "semantic_composer_count": 0,
+        }
+        probe["endpoints"][0]["process"] = {
+            "process_name": "Cursor.exe",
+            "pid": 13592,
+        }
+        probe["endpoints"][0]["targets"] = [
+            {
+                "target_id": "cursor-workbench",
+                "id": "cursor-workbench",
+                "type": "page",
+                "title": "openwukong - Cursor",
+                "url": "vscode-file://vscode-app/e:/cursor/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/page/cursor-workbench",
+                "ready": True,
+            }
+        ]
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="openwukong",
+            task_name="missing-task",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: missing-task",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=probe,
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_target_not_ready")
+        self.assertFalse(data["request"]["target_ready"])
+        self.assertTrue(data["request"]["native_endpoint_ready"])
+
     def test_cdp_adapter_prefers_target_matching_project_or_task(self):
         devtools = _FakeDevToolsClient(
             {

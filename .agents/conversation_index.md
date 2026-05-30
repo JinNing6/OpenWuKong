@@ -7081,3 +7081,47 @@ When a new conversation starts in this repo:
     - this is still not app-chat completion: the next required proof is a
       verified Cursor conversation target plus app-bridge send/readback
       acceptance; until that exists, `goal_complete` must remain false
+- 2026-05-30 advanced Cursor from read-only DevTools attach to project-level
+  app-bridge readiness without sending:
+  - implementation:
+    - `AgentAppBridgeRequest.target_ready` now accepts a bound
+      `app-devtools-page-target` when the endpoint process binding matches the
+      requested agent app and the DevTools target title/URL/id proves the
+      requested project/task context
+    - project and task matching now read DevTools page target `title`, `url`,
+      `target_id`, and `id`, not only endpoint metadata or UIA tree matches
+    - app-bridge dry-run remains strict: a missing task query still blocks the
+      request, and a nonmatching project target still returns
+      `app_bridge_target_not_ready`
+  - validation:
+    - red tests first covered:
+      a Cursor DevTools page target titled `openwukong - Cursor` satisfying
+      project-level target readiness without UIA match; a nonmatching project
+      staying blocked; and a missing task context staying blocked
+    - focused regression:
+      `python -m unittest tests.test_agent_app_bridge tests.test_agent_app_transport_matrix tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_agent_native_connector_probe`:
+      `93 tests OK`
+    - R60 real no-loss Cursor default-profile project-context run:
+      `logs/runtime/major-real-no-loss-r60-cursor-devtools-project-context/major-real-no-loss-report.json`
+      showed `safe_run_ok=true`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `background_screenshot_focus_stable=true`, app bridge dry-run
+      `ok=true`, `decision=app_bridge_dry_run_ready`,
+      `target_ready=true`, and transport matrix selected
+      `app-devtools-page-target` as a background send candidate
+    - an additional real read-only Cursor DOM inventory over the same
+      default-profile DevTools route showed the workbench body contained
+      `openwukong`, `New Agent`, and `Loading Chat`, but
+      `composerCandidateCount=0`, `safeComposerCandidateCount=0`, and no send
+      button candidates; no message was sent, and no matching residual
+      `--remote-debugging-port=19557` Cursor process remained
+  - current conclusion:
+    - Cursor can now be selected as a no-focus project-level background app
+      bridge target through DevTools page target evidence
+    - current Cursor chat DOM was still loading and exposed no safe composer,
+      so the correct behavior is to stop before send rather than write into an
+      unsafe or nonexistent input
+    - next concrete action: add a first-class CDP composer-readiness probe to
+      the app bridge report, then only allow real send when that probe finds a
+      safe chat composer and readback markers can be verified without window
+      input
