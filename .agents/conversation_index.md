@@ -1,6 +1,6 @@
 # Conversation Index
 
-Last updated: 2026-05-29
+Last updated: 2026-05-30
 
 ## North Star
 
@@ -6837,3 +6837,93 @@ When a new conversation starts in this repo:
       native/extension bridge for at least one app-agent surface, then rerun
       the matrix until it shows a verified `selected_send_transport` with
       readback markers and zero window input
+- 2026-05-30 reran real no-loss probes for the currently prioritized app
+  surfaces after narrowing the immediate focus away from VS Code/Cursor:
+  - R49 agent app read-only probe:
+    `python -m openwukong.evaluation.agent_app_real_no_loss --agent "codex app" --agent "claude desktop" --project-name openwukong --task-name "agent-app-background-readonly-r49" ...`
+    wrote
+    `logs/runtime/agent-app-readonly-r49/report.json`
+  - R49 evidence:
+    - `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=0`
+    - background capture succeeded for the Codex App window through
+      `PrintWindow`, with `background_screenshot_focus_stable=true`
+    - Codex App was detected as a real desktop shell, but the requested
+      `openwukong` project/task context was not visible in the app surface,
+      no semantic composer was exposed, and no native endpoint was present
+    - Claude Desktop resolved through Start Apps, but no Claude window was
+      currently open, so no app-side action could be attempted
+    - transport matrix stayed honest:
+      `background_send_ready_cases=0`,
+      `background_draft_ready_cases=0`,
+      `selected_send_transport_counts.none=2`
+  - R49 Word COM background probe:
+    `python -m openwukong.evaluation.office_word_runner --document-path logs/runtime/word-real-r49/openwukong-word-r49.docx --marker OPENWUKONG_WORD_REAL_R49 ...`
+    wrote
+    `logs/runtime/word-real-r49/report.json`
+  - R49 Word evidence:
+    - `decision=word_background_probe_verified`, `word_started=true`,
+      `visible_requested=false`, `save_verified=true`,
+      `readback_verified=true`, `control_attempts=0`,
+      `window_input_attempts=0`, `office_com_attempts=1`
+    - residual `WINWORD` scan found no leftover Word process after quit
+    - this explains why Word may not appear as a normal visible program icon
+      during this test: the validated route is hidden Office COM automation on
+      an owned temporary document, not foreground UI automation
+  - regression:
+    `python -m unittest tests.test_office_word_runner tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe`:
+    `38 tests OK`
+  - current conclusion:
+    - Word background control is verified on this machine for owned documents
+      through hidden COM automation
+    - Codex App / Claude Desktop app-side chat is still not verified for
+      background send/readback; the blocker is not the safety harness but lack
+      of target-visible composer/native bridge evidence on the current desktop
+    - next concrete action: build a first product-specific app bridge or app
+      instrumentation path for Codex App or Claude Desktop, then require the
+      same readback-marker and no-window-input proof before marking app-side
+      agent chat complete
+- 2026-05-30 added an explicit capability-completion gate to the standalone
+  agent-app real no-loss report:
+  - implementation:
+    - `AgentAppRealNoLossReport` now exposes `goal_complete`,
+      `background_send_ready_cases`, `background_draft_ready_cases`, and
+      `app_side_send_verified_cases`
+    - `goal_complete` is true only when every requested app-side case has a
+      verified send/readback path, all cases pass, window input remains zero,
+      agent command attempts remain zero, and background screenshot focus stays
+      stable
+    - this keeps `passed_cases` scoped to no-loss execution safety, while
+      `goal_complete` records whether the product capability was actually
+      proven
+  - official-doc basis:
+    - Python dataclasses documentation was checked before adding report-level
+      derived properties and serialization fields
+  - validation:
+    - red tests first:
+      `test_runs_agent_app_probes_without_control_attempts_and_writes_artifacts`
+      and
+      `test_allow_app_bridge_send_executes_ready_native_bridge_without_window_input`
+      failed because `goal_complete` and `app_side_send_verified_cases` did not
+      exist
+    - targeted green:
+      the same two tests passed after the report fields were added
+    - focused regression:
+      `python -m unittest tests.test_agent_app_real_no_loss tests.test_agent_app_transport_matrix tests.test_major_real_no_loss tests.test_agent_native_connector_probe`:
+      `64 tests OK`
+    - R50 real app read-only probe:
+      `logs/runtime/agent-app-readonly-r50-goal-gate/report.json` now reports
+      `goal_complete=false`, `background_send_ready_cases=0`,
+      `background_draft_ready_cases=0`,
+      `app_side_send_verified_cases=0`, `control_attempts=0`, and
+      `window_input_attempts=0`
+    - full verification:
+      `python -m unittest discover tests`: `539 tests OK`
+      `python -m compileall -q src tests`: OK
+      `git diff --check`: OK
+  - current conclusion:
+    - future app-agent reports can no longer be confused: a safe no-loss probe
+      can pass while `goal_complete=false` until real app-side send/readback is
+      verified
+    - next concrete action remains the product-specific app bridge or
+      instrumentation path for Codex App / Claude Desktop

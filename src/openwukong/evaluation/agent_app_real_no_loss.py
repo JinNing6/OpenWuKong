@@ -308,6 +308,30 @@ class AgentAppRealNoLossReport:
         return sum(1 for case in self.cases if case.app_bridge_send_verified)
 
     @property
+    def app_side_send_verified_cases(self) -> int:
+        return self.app_bridge_send_verified_cases + self.uia_semantic_action_send_verified_cases
+
+    @property
+    def background_send_ready_cases(self) -> int:
+        return _counter(self.transport_matrix_summary, "background_send_ready_cases")
+
+    @property
+    def background_draft_ready_cases(self) -> int:
+        return _counter(self.transport_matrix_summary, "background_draft_ready_cases")
+
+    @property
+    def goal_complete(self) -> bool:
+        return bool(
+            self.total_cases > 0
+            and self.app_side_send_verified_cases == self.total_cases
+            and self.failed_cases == 0
+            and self.control_attempts == 0
+            and self.window_input_attempts == 0
+            and self.agent_command_attempts == 0
+            and self.background_screenshot_focus_stable
+        )
+
+    @property
     def gated_cases(self) -> int:
         return sum(1 for case in self.cases if case.status.startswith("gated_"))
 
@@ -341,11 +365,15 @@ class AgentAppRealNoLossReport:
             "total_cases": self.total_cases,
             "passed_cases": self.passed_cases,
             "failed_cases": self.failed_cases,
+            "goal_complete": self.goal_complete,
             "native_ready_cases": self.native_ready_cases,
+            "background_send_ready_cases": self.background_send_ready_cases,
+            "background_draft_ready_cases": self.background_draft_ready_cases,
             "uia_semantic_action_ready_cases": self.uia_semantic_action_ready_cases,
             "uia_semantic_action_send_verified_cases": self.uia_semantic_action_send_verified_cases,
             "uia_semantic_draft_verified_cases": self.uia_semantic_draft_verified_cases,
             "app_bridge_send_verified_cases": self.app_bridge_send_verified_cases,
+            "app_side_send_verified_cases": self.app_side_send_verified_cases,
             "gated_cases": self.gated_cases,
             "real_verified_cases": self.real_verified_cases,
             "transport_matrix_summary": self.transport_matrix_summary,
