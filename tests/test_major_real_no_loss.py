@@ -1494,6 +1494,78 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertTrue(data["helpers"][0]["uses_default_profile"])
         self.assertEqual(data["helpers"][0]["user_data_dir"], "")
 
+    def test_prepare_agent_app_devtools_launch_fleet_can_use_default_profile_without_workspace_arg(self):
+        calls = []
+
+        def _execute_plan(plan, **kwargs):
+            action = plan.to_dict()["actions"][0]
+            calls.append({"action": action, "kwargs": dict(kwargs)})
+            return _FakeReport(
+                {
+                    "mode": "session-readiness-execution",
+                    "safety_mode": "isolated_helper_launch",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "launch_attempts": 1,
+                    "manifest_path": kwargs["manifest_path"],
+                    "results": [
+                        {
+                            "status": "started",
+                            "pid": 6182,
+                            "readiness_url": action["readiness_url"],
+                        }
+                    ],
+                }
+            )
+
+        class _HTTPProbe:
+            def get_json(self, url, timeout=0.2):
+                if url.endswith("/json/version"):
+                    return {"Browser": "Codex/1.0", "Protocol-Version": "1.3"}
+                if url.endswith("/json/list"):
+                    return [
+                        {
+                            "id": "codex-page",
+                            "type": "page",
+                            "title": "Codex",
+                            "url": "app://codex/index.html",
+                            "webSocketDebuggerUrl": "ws://127.0.0.1:19555/devtools/page/codex-page",
+                        }
+                    ]
+                raise AssertionError(url)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = major_real_no_loss.prepare_agent_app_devtools_owned_launch_fleet(
+                output_root=Path(tmp) / "agent-app-devtools",
+                resolution_report={
+                    "mode": "agent-app-devtools-resolution",
+                    "cases": [
+                        {
+                            "agent": "codex app",
+                            "agent_id": "codex",
+                            "status": "resolved",
+                            "executable_ready": True,
+                            "executable_path": "C:/Apps/Codex.exe",
+                        }
+                    ],
+                },
+                workspace_path="E:/ideaProjects/agent/openwukong",
+                default_profile_agents=("codex app",),
+                plan_executor=_execute_plan,
+                http_probe=_HTTPProbe(),
+                endpoint_wait_timeout_sec=0.2,
+            )
+            data = report.to_dict()
+
+        argv = calls[0]["action"]["argv"]
+        self.assertTrue(data["ready"])
+        self.assertFalse(calls[0]["action"]["creates_isolated_profile"])
+        self.assertNotIn("--user-data-dir=", " ".join(argv))
+        self.assertNotIn("E:/ideaProjects/agent/openwukong", argv)
+        self.assertEqual(data["helpers"][0]["profile_mode"], "default-user-profile")
+        self.assertTrue(data["helpers"][0]["uses_default_profile"])
+        self.assertEqual(data["helpers"][0]["workspace_path"], "")
+
     def test_prepare_agent_app_devtools_owned_launch_fleet_waits_for_endpoint_health(self):
         http_calls = []
 
@@ -2029,6 +2101,8 @@ class MajorRealNoLossTests(unittest.TestCase):
                 cli_agents=(),
                 workspace_path="E:/ideaProjects/agent/openwukong",
                 allow_agent_app_devtools_default_profile_launch=True,
+                agent_app_devtools_endpoint_wait_timeout_sec=16.0,
+                agent_app_devtools_request_timeout_sec=1.5,
                 agent_app_devtools_owned_launch_runner=_devtools_launch_runner,
                 primary_runner=_primary_runner,
                 agent_app_runner=_agent_app_runner,
@@ -2037,10 +2111,13 @@ class MajorRealNoLossTests(unittest.TestCase):
             )
 
         self.assertEqual(launch_calls[0]["default_profile_agents"], ("cursor",))
+        self.assertEqual(launch_calls[0]["endpoint_wait_timeout_sec"], 16.0)
+        self.assertEqual(launch_calls[0]["request_timeout"], 1.5)
         self.assertEqual(
             app_calls[0]["debugger_urls_by_agent"]["cursor"],
             ("http://127.0.0.1:19557",),
         )
+        self.assertEqual(app_calls[0]["request_timeout"], 1.5)
 
     def test_report_exposes_agent_app_endpoint_acceptance_package(self):
         report = _major_report(
@@ -2555,6 +2632,42 @@ class MajorRealNoLossTests(unittest.TestCase):
             calls[0]["workspace_path"],
             "E:/ideaProjects/agent/openwukong",
         )
+
+    def test_cli_forwards_agent_app_devtools_endpoint_timeouts(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--allow-agent-app-devtools-default-profile-launch",
+                    "--agent-app-devtools-endpoint-wait-timeout-sec",
+                    "17.5",
+                    "--agent-app-devtools-request-timeout-sec",
+                    "1.25",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0]["agent_app_devtools_endpoint_wait_timeout_sec"], 17.5)
+        self.assertEqual(calls[0]["agent_app_devtools_request_timeout_sec"], 1.25)
 
     def test_runner_passes_uia_semantic_options_and_marks_app_requirement_verified(self):
         app_calls = []

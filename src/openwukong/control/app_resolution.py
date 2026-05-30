@@ -736,7 +736,7 @@ class WindowsAppResolver:
         ranked = sorted(
             deduped,
             key=lambda candidate: (
-                source_priority(candidate.source),
+                candidate_selection_priority(candidate),
                 -candidate_score(candidate, identity),
                 candidate_key(candidate),
             ),
@@ -745,7 +745,7 @@ class WindowsAppResolver:
         ties = [
             candidate
             for candidate in ranked
-            if source_priority(candidate.source) == source_priority(best.source)
+            if candidate_selection_priority(candidate) == candidate_selection_priority(best)
             and candidate_score(candidate, identity) == candidate_score(best, identity)
             and candidate_unique_value(candidate) != candidate_unique_value(best)
         ]
@@ -1103,6 +1103,12 @@ def source_priority(source: str) -> int:
     return order.get(str(source or ""), 99)
 
 
+def candidate_selection_priority(candidate: AppResolutionCandidate) -> int:
+    if candidate.source == "start-apps" and not str(candidate.path or "").strip():
+        return 98
+    return source_priority(candidate.source)
+
+
 def candidate_unique_value(candidate: AppResolutionCandidate) -> str:
     if candidate.path:
         return str(Path(candidate.path).as_posix()).lower()
@@ -1220,6 +1226,7 @@ __all__ = [
     "candidate_matches_identity",
     "candidate_names",
     "candidate_score",
+    "candidate_selection_priority",
     "candidate_unique_value",
     "codex_candidate_surface_kind",
     "dedupe_candidates",

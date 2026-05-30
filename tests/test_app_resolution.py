@@ -174,6 +174,39 @@ class AppResolutionModuleTests(unittest.TestCase):
             "--profile test",
         )
 
+    def test_launchable_start_menu_candidate_beats_pathless_start_apps_entry(self):
+        provider = StaticAppCandidateProvider(
+            [
+                AppResolutionCandidate(
+                    source="start-apps",
+                    display_name="Cursor",
+                    metadata={"app_id": "Anysphere.Cursor"},
+                ),
+                AppResolutionCandidate(
+                    source="start-menu",
+                    display_name="Cursor",
+                    path="E:/cursor/cursor/cursor/Cursor.exe",
+                    executable_name="Cursor.exe",
+                    metadata={
+                        "shortcut_path": (
+                            "C:/ProgramData/Microsoft/Windows/Start Menu/Programs/"
+                            "Cursor/Cursor.lnk"
+                        ),
+                    },
+                ),
+            ]
+        )
+
+        report = WindowsAppResolver(candidate_providers=(provider,)).resolve("cursor")
+
+        self.assertTrue(report.ok)
+        self.assertEqual(report.source, "start-menu")
+        self.assertEqual(report.path, "E:/cursor/cursor/cursor/Cursor.exe")
+        self.assertEqual(
+            report.selected_candidate.metadata["shortcut_path"],
+            "C:/ProgramData/Microsoft/Windows/Start Menu/Programs/Cursor/Cursor.lnk",
+        )
+
     def test_windows_shortcut_target_resolver_does_not_pass_path_as_powershell_tail_arg(self):
         calls = []
 

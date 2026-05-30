@@ -7445,3 +7445,53 @@ When a new conversation starts in this repo:
     Codex/Claude desktop App surfaces have strong no-focus observation and
     screenshot evidence, but no precise background App-side task/chat control
     until a native/extension/DevTools endpoint is available or installed
+- 2026-05-30 tightened Cursor app resolution and Codex/Claude default-profile
+  DevTools probes:
+  - implementation:
+    - `WindowsAppResolver` now ranks pathless `Get-StartApps` entries below
+      launchable path candidates, so Cursor resolves to the Start Menu
+      shortcut target instead of selecting `Anysphere.Cursor` with an empty
+      path when both are present
+    - current local Cursor resolution now selects:
+      `C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Cursor\Cursor.lnk`
+      -> `E:\cursor\cursor\cursor\Cursor.exe`
+    - agent app DevTools owned launch now allows default-profile launches for
+      non-workspace desktop app surfaces such as Codex and Claude Desktop, not
+      only Cursor/VS Code-like apps
+    - added CLI knobs:
+      `--agent-app-devtools-endpoint-wait-timeout-sec` and
+      `--agent-app-devtools-request-timeout-sec`
+  - official-doc basis:
+    - Microsoft `Get-StartApps` documentation confirms the cmdlet returns app
+      names and AppUserModelIDs, not executable paths; executable shortcut
+      resolution must therefore remain separate from StartApps identity
+      evidence
+  - validation:
+    - red regression first proved pathless `start-apps` incorrectly beat
+      launchable Start Menu Cursor evidence
+    - targeted green regression:
+      `python -m unittest tests.test_app_resolution.AppResolutionModuleTests.test_launchable_start_menu_candidate_beats_pathless_start_apps_entry`
+      passed
+    - current resolver check now reports `source=start-menu` and
+      `path=E:\cursor\cursor\cursor\Cursor.exe` for `cursor`
+    - Codex/Claude R83:
+      `logs/runtime/major-real-no-loss-r83-codex-claude-default-profile-devtools-propagated-timeout/major-real-no-loss-report.json`
+      launched both desktop apps with default profiles and local ports
+      `19555/19556`, kept `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `background_screenshot_success_count=3/3`, and cleaned owned launches
+      after the probe
+    - R83 also proved the Codex/Claude Desktop HTTP DevTools endpoints are not
+      usable on this machine even with request timeout increased to `2.0s`;
+      they still time out on `/json/version`, so desktop app chat send remains
+      gated by missing native/extension/product endpoint rather than by our
+      timeout wiring
+    - post-run process scan found no residual Codex/Claude DevTools helpers
+      except the scan process itself
+  - current conclusion:
+    - Cursor's correct signed-in route is the Start Menu shortcut/default user
+      profile route; the earlier unlogged Cursor evidence was isolated-profile
+      negative evidence
+    - Codex/Claude Desktop default-profile probe infrastructure is now
+      correct and audited, but desktop-app precise background send is still
+      not achieved without a real connector endpoint

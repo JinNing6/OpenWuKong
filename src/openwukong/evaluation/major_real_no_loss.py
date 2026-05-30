@@ -441,6 +441,8 @@ def run_major_scenario_real_no_loss(
     agent_native_cdp_bridge_helper_specs: Iterable[dict] = (),
     allow_agent_app_devtools_owned_launch: bool = False,
     allow_agent_app_devtools_default_profile_launch: bool = False,
+    agent_app_devtools_endpoint_wait_timeout_sec: float = 10.0,
+    agent_app_devtools_request_timeout_sec: float = 0.2,
     allow_agent_cli_execution: bool = False,
     agent_cli_timeout_sec: float = 90.0,
     primary_runner: PrimaryRunner | None = None,
@@ -563,6 +565,8 @@ def run_major_scenario_real_no_loss(
                         if allow_agent_app_devtools_default_profile_launch
                         else ()
                     ),
+                    endpoint_wait_timeout_sec=agent_app_devtools_endpoint_wait_timeout_sec,
+                    request_timeout=agent_app_devtools_request_timeout_sec,
                 )
             )
         effective_ide_bridge_urls = _effective_ide_bridge_urls(
@@ -605,6 +609,7 @@ def run_major_scenario_real_no_loss(
                     agent_app_process_provider,
                     agent_app_devtools_launch,
                 ),
+                request_timeout=agent_app_devtools_request_timeout_sec,
             )
         )
         cli = _report_to_dict(
@@ -1672,11 +1677,8 @@ def prepare_agent_app_devtools_owned_launch_fleet(
         executable = str(case.get("executable_path", "") or "").strip()
         debug_port = int(defaults.get("devtools_port", 19555) or 19555)
         default_profile_requested = (
-            _agent_app_accepts_workspace_argument(effective_agent_id or agent)
-            and (
-                str(effective_agent_id).lower() in default_profile_keys
-                or str(agent).lower() in default_profile_keys
-            )
+            str(effective_agent_id).lower() in default_profile_keys
+            or str(agent).lower() in default_profile_keys
         )
         profile_mode = (
             "default-user-profile"
@@ -3103,7 +3105,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--allow-agent-app-devtools-default-profile-launch",
         action="store_true",
-        help="Launch Cursor-like app surfaces with the user's default profile plus a local DevTools endpoint, then forward the endpoint to no-loss probes.",
+        help="Launch agent app surfaces with the user's default profile plus a local DevTools endpoint, then forward the endpoint to no-loss probes.",
+    )
+    parser.add_argument(
+        "--agent-app-devtools-endpoint-wait-timeout-sec",
+        type=float,
+        default=10.0,
+    )
+    parser.add_argument(
+        "--agent-app-devtools-request-timeout-sec",
+        type=float,
+        default=0.2,
     )
     parser.add_argument("--allow-agent-cli-execution", action="store_true")
     parser.add_argument("--agent-cli-timeout-sec", type=float, default=90.0)
@@ -3202,6 +3214,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
         allow_agent_app_devtools_default_profile_launch=(
             args.allow_agent_app_devtools_default_profile_launch
+        ),
+        agent_app_devtools_endpoint_wait_timeout_sec=(
+            args.agent_app_devtools_endpoint_wait_timeout_sec
+        ),
+        agent_app_devtools_request_timeout_sec=(
+            args.agent_app_devtools_request_timeout_sec
         ),
         allow_agent_cli_execution=args.allow_agent_cli_execution,
         agent_cli_timeout_sec=args.agent_cli_timeout_sec,
