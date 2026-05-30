@@ -75,6 +75,40 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertTrue(data["request"]["target_ready"])
         self.assertFalse(data["request"]["native_endpoint_ready"])
 
+    def test_target_visible_without_composer_reports_only_native_endpoint_missing(self):
+        probe = _ready_probe()
+        probe["decision"] = "agent_native_connector_not_exposed"
+        probe["endpoint_count"] = 0
+        probe["ready_endpoint_count"] = 0
+        probe["endpoints"] = []
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "decision": "agent_app_uia_target_visible_input_not_found",
+            "target_matched": True,
+            "semantic_composer_count": 0,
+            "composer_candidates": [],
+            "submit_candidate_count": 3,
+        }
+        request = build_agent_app_bridge_request(
+            agent="codex app",
+            agent_id="codex",
+            project_name="openwukong",
+            task_name="",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\n\nMessage:\nSummarize the active task.",
+            selected_transport={"transport_id": "codex-desktop-shell"},
+            app_surface_probe=probe,
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_native_connector_not_ready")
+        self.assertTrue(data["request"]["target_ready"])
+        self.assertFalse(data["request"]["native_endpoint_ready"])
+        self.assertEqual(data["validation_errors"], ["native_endpoint_not_ready"])
+
     def test_dry_run_reports_target_missing_even_when_endpoint_exists(self):
         probe = _ready_probe()
         probe["app_uia_probe"] = {

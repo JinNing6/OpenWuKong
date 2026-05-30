@@ -6927,3 +6927,47 @@ When a new conversation starts in this repo:
       verified
     - next concrete action remains the product-specific app bridge or
       instrumentation path for Codex App / Claude Desktop
+- 2026-05-30 tightened app-bridge dry-run diagnostics for target-visible app
+  shells without a native endpoint:
+  - implementation:
+    - `AgentAppBridgeRequest.target_ready` now means the requested app/window
+      context is bound, not that UIA composer or native endpoint control is
+      ready
+    - when UIA proves the target context is visible but no native bridge exists,
+      app bridge dry-run now reports
+      `app_bridge_native_connector_not_ready` with only
+      `native_endpoint_not_ready` in validation errors
+    - this separates the two next actions cleanly:
+      target/context work vs product-specific bridge installation
+  - official-doc basis:
+    - Python built-in `property` documentation was checked before adjusting
+      report-level derived readiness semantics
+  - validation:
+    - red test first:
+      `test_target_visible_without_composer_reports_only_native_endpoint_missing`
+      failed because the bridge dry-run incorrectly returned
+      `app_bridge_target_not_ready`
+    - targeted green:
+      the new test plus existing target-missing and endpoint-missing bridge
+      tests passed after the readiness split
+    - focused regression:
+      `python -m unittest tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe tests.test_agent_app_transport_matrix`:
+      `56 tests OK`
+    - R51/R52 real Codex App read-only probes:
+      - `logs/runtime/codex-app-readonly-r51-project-only/report.json`
+        proved the current Codex App surface can be background-captured and can
+        show `openwukong` project context with `target_matched=true`, but has
+        no semantic composer and no endpoint
+      - `logs/runtime/codex-app-readonly-r52-bridge-diagnostics/report.json`
+        now reports `app_bridge_dry_run.decision=app_bridge_native_connector_not_ready`,
+        `request.target_ready=true`,
+        `request.native_endpoint_ready=false`,
+        `control_attempts=0`, `window_input_attempts=0`, and
+        `background_screenshot_focus_stable=true`
+  - current conclusion:
+    - Codex App is no longer blocked at target discovery for this visible
+      thread; it is specifically blocked at native bridge/instrumentation
+      availability
+    - next concrete action: implement/install the Codex App desktop native
+      bridge or equivalent product-specific instrumentation, then rerun the
+      same dry-run until `native_endpoint_ready=true` before any real send

@@ -49,16 +49,7 @@ class AgentAppBridgeRequest:
 
     @property
     def target_ready(self) -> bool:
-        uia_target_ready = bool(
-            self.app_uia_probe.get("target_matched", False)
-            and (
-                int(self.app_uia_probe.get("semantic_composer_count", 0) or 0) > 0
-                or _endpoint_supports_ide_chat(self.endpoint, self.agent_id)
-                or _endpoint_supports_agent_native_bridge(self.endpoint, self.agent_id)
-                or _endpoint_supports_app_devtools(self.endpoint, self.agent_id)
-            )
-        )
-        if uia_target_ready:
+        if bool(self.app_uia_probe.get("target_matched", False)):
             return True
         endpoint = self.endpoint
         return bool(
