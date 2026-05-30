@@ -7035,3 +7035,49 @@ When a new conversation starts in this repo:
     - next concrete action: formalize the default-profile/existing Cursor
       attach route in the harness, then add target-context/readback validation
       before any Cursor app-side send can be called complete
+- 2026-05-30 formalized the signed-in/default-profile Cursor DevTools route
+  and corrected the report contract so it no longer confuses that route with
+  an isolated unlogged Cursor:
+  - implementation:
+    - `SessionReadinessPlanOptions` now has
+      `agent_app_use_default_profile`; when enabled for Cursor-like app
+      surfaces, the owned DevTools launch omits `--user-data-dir` and records
+      `creates_isolated_profile=false`
+    - `prepare_agent_app_devtools_owned_launch_fleet` now accepts
+      `default_profile_agents`, records `profile_mode`,
+      `uses_default_profile`, and leaves `user_data_dir=""` for default
+      profile helpers
+    - the major no-loss CLI now exposes
+      `--allow-agent-app-devtools-default-profile-launch`
+    - `agent_app_endpoint_acceptance` now uses the actual launch helper report
+      when building `owned_devtools_launch_plan_template`, so the acceptance
+      package shows the true command, profile mode, workspace path, and argv
+      instead of a stale isolated-profile template
+  - validation:
+    - red tests first covered default-profile plan generation, fleet
+      forwarding, CLI flag forwarding, and the acceptance-template mismatch
+      where a real default-profile helper was still reported as
+      `--user-data-dir` isolated
+    - focused regression:
+      `python -m unittest tests.test_session_readiness_plan tests.test_major_real_no_loss tests.test_app_resolution tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe tests.test_agent_app_transport_matrix`:
+      `120 tests OK`
+    - R59 real no-loss Cursor default-profile launch:
+      `logs/runtime/major-real-no-loss-r59-cursor-default-profile-report-template/major-real-no-loss-report.json`
+      showed `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `profile_mode=default-user-profile`, `uses_default_profile=true`,
+      `user_data_dir=""`, and the command:
+      `E:\cursor\cursor\cursor\Cursor.exe --remote-debugging-port=19557 --no-first-run --disable-crash-reporter E:/ideaProjects/agent/openwukong`
+    - the R59 acceptance template now matches the actual route:
+      no `--user-data-dir`, readiness URL `http://127.0.0.1:19557`, workspace
+      argument `E:\ideaProjects\agent\openwukong`, and no matching residual
+      Cursor debug-port process after cleanup
+  - current conclusion:
+    - the correct Cursor executable path is already derived from the Start
+      Menu shortcut; the earlier unlogged behavior was specifically caused by
+      the isolated `--user-data-dir` test mode
+    - Cursor default-profile background attachment is now reusable and
+      reportable as a no-focus read-only route
+    - this is still not app-chat completion: the next required proof is a
+      verified Cursor conversation target plus app-bridge send/readback
+      acceptance; until that exists, `goal_complete` must remain false

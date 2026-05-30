@@ -199,6 +199,29 @@ class SessionReadinessPlanTests(unittest.TestCase):
         )
         self.assertIn("E:/ideaProjects/agent/openwukong", action["command"])
 
+    def test_agent_app_devtools_default_profile_plan_omits_user_data_dir(self):
+        options = SessionReadinessPlanOptions(
+            agent_app_executable="C:/Users/me/AppData/Local/Programs/Cursor/Cursor.exe",
+            agent_app_debug_port=9558,
+            agent_app_use_default_profile=True,
+            agent_app_workspace_path="E:/ideaProjects/agent/openwukong",
+        )
+
+        report = build_session_readiness_plan(
+            routes=("agent-app-devtools-owned",),
+            options=options,
+        )
+        action = report.to_dict()["actions"][0]
+
+        self.assertFalse(action["creates_isolated_profile"])
+        self.assertTrue(action["managed_background_helper"])
+        self.assertIn("--remote-debugging-port=9558", action["argv"])
+        self.assertNotIn("--user-data-dir=", " ".join(action["argv"]))
+        self.assertEqual(
+            Path(action["argv"][-1]).resolve(),
+            Path("E:/ideaProjects/agent/openwukong").resolve(),
+        )
+
     def test_execute_allows_agent_app_devtools_owned_and_writes_manifest(self):
         class _FakeLauncher:
             def __init__(self):

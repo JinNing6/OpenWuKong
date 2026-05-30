@@ -34,6 +34,7 @@ class SessionReadinessPlanOptions:
     agent_app_user_data_dir: str = "logs/runtime/agent-app-devtools-profile"
     agent_app_url: str = ""
     agent_app_workspace_path: str = ""
+    agent_app_use_default_profile: bool = False
     ide_executable: str = "cursor.exe"
     ide_user_data_dir: str = "logs/runtime/ide-bridge-user-data"
     ide_extensions_dir: str = "logs/runtime/ide-bridge-extensions"
@@ -771,15 +772,21 @@ def _browser_action(options: SessionReadinessPlanOptions) -> SessionReadinessAct
 def _agent_app_devtools_owned_action(
     options: SessionReadinessPlanOptions,
 ) -> SessionReadinessAction:
-    user_data_dir = _normalized_path(options.agent_app_user_data_dir)
+    use_default_profile = bool(options.agent_app_use_default_profile)
+    user_data_dir = (
+        ""
+        if use_default_profile
+        else _normalized_path(options.agent_app_user_data_dir)
+    )
     debug_port = int(options.agent_app_debug_port)
     argv_parts = [
         str(options.agent_app_executable or "").strip(),
         f"--remote-debugging-port={debug_port}",
-        f"--user-data-dir={user_data_dir}",
         "--no-first-run",
         "--disable-crash-reporter",
     ]
+    if user_data_dir:
+        argv_parts.insert(2, f"--user-data-dir={user_data_dir}")
     app_url = str(options.agent_app_url or "").strip()
     workspace_path = (
         _normalized_path(options.agent_app_workspace_path)
@@ -799,7 +806,7 @@ def _agent_app_devtools_owned_action(
         command=_join_command([_quote(part) for part in argv]),
         argv=argv,
         readiness_url=f"http://127.0.0.1:{debug_port}",
-        creates_isolated_profile=True,
+        creates_isolated_profile=not use_default_profile,
         managed_background_helper=True,
         foreground_required=False,
     )

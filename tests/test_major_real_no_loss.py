@@ -32,6 +32,7 @@ def _major_report(
     helper=None,
     native_helper=None,
     app_devtools_resolution=None,
+    app_devtools_launch=None,
 ):
     return MajorScenarioRealNoLossReport(
         output_root="",
@@ -42,6 +43,7 @@ def _major_report(
         agent_app_report=dict(app or {}),
         agent_cli_report=dict(cli or {}),
         agent_app_devtools_resolution_report=dict(app_devtools_resolution or {}),
+        agent_app_devtools_owned_launch_report=dict(app_devtools_launch or {}),
         requirements=(),
     )
 
@@ -1421,6 +1423,77 @@ class MajorRealNoLossTests(unittest.TestCase):
         )
         self.assertEqual(data["helpers"][0]["workspace_path"], "E:/ideaProjects/agent/openwukong")
 
+    def test_prepare_agent_app_devtools_launch_fleet_can_use_cursor_default_profile(self):
+        calls = []
+
+        def _execute_plan(plan, **kwargs):
+            action = plan.to_dict()["actions"][0]
+            calls.append({"action": action, "kwargs": dict(kwargs)})
+            return _FakeReport(
+                {
+                    "mode": "session-readiness-execution",
+                    "safety_mode": "isolated_helper_launch",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "launch_attempts": 1,
+                    "manifest_path": kwargs["manifest_path"],
+                    "results": [
+                        {
+                            "status": "started",
+                            "pid": 5158,
+                            "readiness_url": action["readiness_url"],
+                        }
+                    ],
+                }
+            )
+
+        class _HTTPProbe:
+            def get_json(self, url, timeout=0.2):
+                if url.endswith("/json/version"):
+                    return {"Browser": "Cursor/1.0", "Protocol-Version": "1.3"}
+                if url.endswith("/json/list"):
+                    return [
+                        {
+                            "id": "cursor-page",
+                            "type": "page",
+                            "title": "openwukong - Cursor",
+                            "url": "vscode-file://vscode-app/E:/cursor/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html",
+                            "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/page/cursor-page",
+                        }
+                    ]
+                raise AssertionError(url)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = major_real_no_loss.prepare_agent_app_devtools_owned_launch_fleet(
+                output_root=Path(tmp) / "agent-app-devtools",
+                resolution_report={
+                    "mode": "agent-app-devtools-resolution",
+                    "cases": [
+                        {
+                            "agent": "cursor",
+                            "agent_id": "cursor",
+                            "status": "resolved",
+                            "executable_ready": True,
+                            "executable_path": "C:/Apps/Cursor.exe",
+                        }
+                    ],
+                },
+                workspace_path="E:/ideaProjects/agent/openwukong",
+                default_profile_agents=("cursor",),
+                plan_executor=_execute_plan,
+                http_probe=_HTTPProbe(),
+                endpoint_wait_timeout_sec=0.2,
+            )
+            data = report.to_dict()
+
+        argv = calls[0]["action"]["argv"]
+        self.assertTrue(data["ready"])
+        self.assertFalse(calls[0]["action"]["creates_isolated_profile"])
+        self.assertNotIn("--user-data-dir=", " ".join(argv))
+        self.assertEqual(data["helpers"][0]["profile_mode"], "default-user-profile")
+        self.assertTrue(data["helpers"][0]["uses_default_profile"])
+        self.assertEqual(data["helpers"][0]["user_data_dir"], "")
+
     def test_prepare_agent_app_devtools_owned_launch_fleet_waits_for_endpoint_health(self):
         http_calls = []
 
@@ -1872,6 +1945,103 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(owned_processes[0]["process_name"], "Cursor.exe")
         self.assertEqual(owned_processes[0]["listening_ports"], [19557])
 
+    def test_runner_forwards_default_profile_agents_to_devtools_launch(self):
+        launch_calls = []
+        app_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _devtools_launch_runner(**kwargs):
+            launch_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-devtools-owned-launch-fleet",
+                    "enabled": True,
+                    "ready": True,
+                    "cleanup_ok": True,
+                    "launch_attempts": 1,
+                    "stop_attempts": 1,
+                    "debugger_urls": ["http://127.0.0.1:19557"],
+                    "helpers": [
+                        {
+                            "agent": "cursor",
+                            "agent_id": "cursor",
+                            "ready": True,
+                            "cleanup_ok": True,
+                            "profile_mode": "default-user-profile",
+                            "uses_default_profile": True,
+                            "debugger_url": "http://127.0.0.1:19557",
+                            "debug_port": 19557,
+                            "executable_path": "C:/Apps/Cursor.exe",
+                            "pid": 5158,
+                            "launch_attempts": 1,
+                            "stop_attempts": 1,
+                        }
+                    ],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("cursor",),
+                cli_agents=(),
+                workspace_path="E:/ideaProjects/agent/openwukong",
+                allow_agent_app_devtools_default_profile_launch=True,
+                agent_app_devtools_owned_launch_runner=_devtools_launch_runner,
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+                agent_app_process_provider=lambda: (),
+            )
+
+        self.assertEqual(launch_calls[0]["default_profile_agents"], ("cursor",))
+        self.assertEqual(
+            app_calls[0]["debugger_urls_by_agent"]["cursor"],
+            ("http://127.0.0.1:19557",),
+        )
+
     def test_report_exposes_agent_app_endpoint_acceptance_package(self):
         report = _major_report(
             app={
@@ -2053,6 +2223,80 @@ class MajorRealNoLossTests(unittest.TestCase):
         )
         self.assertFalse(cases["cursor"]["safe_to_send_now"])
         self.assertTrue(all(item["no_focus_required"] for item in package["cases"]))
+
+    def test_endpoint_acceptance_uses_actual_default_profile_devtools_launch_report(self):
+        report = _major_report(
+            app={
+                "mode": "agent-app-real-no-loss",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 0,
+                "agent_command_attempts": 0,
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "cases": [
+                    {
+                        "agent": "cursor",
+                        "status": "native_connector_ready",
+                        "real_verified": True,
+                        "native_ready": True,
+                        "probe": {
+                            "agent_id": "cursor",
+                            "ready_endpoint_count": 1,
+                            "endpoint_count": 1,
+                            "endpoints": [
+                                {
+                                    "endpoint_type": "agent_native_bridge",
+                                    "ready": True,
+                                    "bridge_url": "http://127.0.0.1:19557",
+                                }
+                            ],
+                        },
+                    },
+                ],
+            },
+            app_devtools_resolution={
+                "mode": "agent-app-devtools-resolution",
+                "cases": [
+                    {
+                        "agent": "cursor",
+                        "agent_id": "cursor",
+                        "status": "resolved",
+                        "executable_ready": True,
+                        "executable_path": "E:/cursor/cursor/cursor/Cursor.exe",
+                    }
+                ],
+            },
+            app_devtools_launch={
+                "mode": "agent-app-devtools-owned-launch-fleet",
+                "enabled": True,
+                "ready": True,
+                "cleanup_ok": True,
+                "helpers": [
+                    {
+                        "agent": "cursor",
+                        "agent_id": "cursor",
+                        "profile_mode": "default-user-profile",
+                        "uses_default_profile": True,
+                        "user_data_dir": "",
+                        "debug_port": 19557,
+                        "debugger_url": "http://127.0.0.1:19557",
+                        "executable_path": "E:/cursor/cursor/cursor/Cursor.exe",
+                        "workspace_path": "E:/ideaProjects/agent/openwukong",
+                    }
+                ],
+            },
+        )
+
+        package = report.to_dict()["agent_app_endpoint_acceptance"]
+        template = package["cases"][0]["owned_devtools_launch_plan_template"]
+
+        self.assertEqual(template["profile_mode"], "default-user-profile")
+        self.assertTrue(template["uses_default_profile"])
+        self.assertEqual(template["user_data_dir"], "")
+        self.assertEqual(template["executable"], "E:/cursor/cursor/cursor/Cursor.exe")
+        self.assertEqual(template["readiness_url"], "http://127.0.0.1:19557")
+        self.assertNotIn("--user-data-dir=", " ".join(template["argv"]))
 
     def test_prepare_agent_native_cdp_bridge_helper_launches_and_waits_for_registry(self):
         calls = []
@@ -2271,6 +2515,46 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(calls[0]["allow_agent_app_devtools_owned_launch"])
         self.assertEqual(calls[0]["agent_apps"], ("codex app",))
+
+    def test_cli_forwards_agent_app_devtools_default_profile_launch_option(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--allow-agent-app-devtools-default-profile-launch",
+                    "--agent-app",
+                    "cursor",
+                    "--workspace-path",
+                    "E:/ideaProjects/agent/openwukong",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0]["allow_agent_app_devtools_default_profile_launch"])
+        self.assertEqual(calls[0]["agent_apps"], ("cursor",))
+        self.assertEqual(
+            calls[0]["workspace_path"],
+            "E:/ideaProjects/agent/openwukong",
+        )
 
     def test_runner_passes_uia_semantic_options_and_marks_app_requirement_verified(self):
         app_calls = []

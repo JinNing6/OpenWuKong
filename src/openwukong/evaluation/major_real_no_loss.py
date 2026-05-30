@@ -260,6 +260,7 @@ class MajorScenarioRealNoLossReport:
             self.agent_app_report,
             self.agent_native_cdp_bridge_helper_report,
             self.agent_app_devtools_resolution_report,
+            self.agent_app_devtools_owned_launch_report,
         )
 
     @property
@@ -439,6 +440,7 @@ def run_major_scenario_real_no_loss(
     agent_native_cdp_bridge_registry_wait_timeout_sec: float = 5.0,
     agent_native_cdp_bridge_helper_specs: Iterable[dict] = (),
     allow_agent_app_devtools_owned_launch: bool = False,
+    allow_agent_app_devtools_default_profile_launch: bool = False,
     allow_agent_cli_execution: bool = False,
     agent_cli_timeout_sec: float = 90.0,
     primary_runner: PrimaryRunner | None = None,
@@ -547,7 +549,7 @@ def run_major_scenario_real_no_loss(
                         registry_wait_timeout_sec=agent_native_cdp_bridge_registry_wait_timeout_sec,
                     )
                 )
-        if allow_agent_app_devtools_owned_launch:
+        if allow_agent_app_devtools_owned_launch or allow_agent_app_devtools_default_profile_launch:
             agent_app_devtools_launch = _report_to_dict(
                 (
                     agent_app_devtools_owned_launch_runner
@@ -556,6 +558,11 @@ def run_major_scenario_real_no_loss(
                     output_root=root / "agent-app-devtools",
                     resolution_report=app_devtools_resolution,
                     workspace_path=workspace_path,
+                    default_profile_agents=(
+                        tuple(agent_apps)
+                        if allow_agent_app_devtools_default_profile_launch
+                        else ()
+                    ),
                 )
             )
         effective_ide_bridge_urls = _effective_ide_bridge_urls(
@@ -883,12 +890,14 @@ def _build_agent_app_endpoint_acceptance(
     app_report: dict,
     native_helper_report: dict,
     app_devtools_resolution_report: dict | None = None,
+    app_devtools_launch_report: dict | None = None,
 ) -> dict:
     cases = [
         _build_agent_app_endpoint_acceptance_case(
             case,
             native_helper_report,
             app_devtools_resolution_report or {},
+            app_devtools_launch_report or {},
         )
         for case in app_report.get("cases", []) or []
         if isinstance(case, dict)
@@ -920,6 +929,7 @@ def _build_agent_app_endpoint_acceptance_case(
     case: dict,
     native_helper_report: dict,
     app_devtools_resolution_report: dict,
+    app_devtools_launch_report: dict,
 ) -> dict:
     agent = str(case.get("agent", "") or "").strip()
     defaults = _agent_app_endpoint_defaults(agent)
@@ -954,6 +964,11 @@ def _build_agent_app_endpoint_acceptance_case(
     helper_status = _agent_native_helper_status(native_helper_report, agent, agent_id)
     devtools_resolution = _agent_app_devtools_resolution_status(
         app_devtools_resolution_report,
+        agent=agent,
+        agent_id=agent_id,
+    )
+    devtools_launch_helper = _agent_app_devtools_launch_helper_status(
+        app_devtools_launch_report,
         agent=agent,
         agent_id=agent_id,
     )
@@ -1002,6 +1017,7 @@ def _build_agent_app_endpoint_acceptance_case(
             agent_id=agent_id or defaults["agent_id"],
             defaults=defaults,
             resolution=devtools_resolution,
+            launch_helper=devtools_launch_helper,
         ),
         "helper_status": helper_status,
     }
@@ -1112,6 +1128,24 @@ def _agent_app_devtools_resolution_status(
             continue
         item_agent_id = str(item.get("agent_id", "") or "").strip().lower()
         item_agent = str(item.get("agent", "") or "").strip().lower()
+        requested_agent_id = str(agent_id or "").strip().lower()
+        requested_agent = str(agent or "").strip().lower()
+        if item_agent_id == requested_agent_id or item_agent == requested_agent:
+            return dict(item)
+    return {}
+
+
+def _agent_app_devtools_launch_helper_status(
+    report: dict,
+    *,
+    agent: str,
+    agent_id: str,
+) -> dict:
+    for item in report.get("helpers", []) or []:
+        if not isinstance(item, dict):
+            continue
+        item_agent_id = str(item.get("agent_id", "") or "").strip().lower()
+        item_agent = str(item.get("agent", "") or "").strip().lower()
         if item_agent_id == str(agent_id or "").strip().lower() or item_agent == str(agent or "").strip().lower():
             return dict(item)
     return {}
@@ -1155,15 +1189,51 @@ def _owned_devtools_launch_plan_template(
     agent_id: str,
     defaults: dict,
     resolution: dict | None = None,
+    launch_helper: dict | None = None,
 ) -> dict:
-    port = int(defaults.get("devtools_port", 19555) or 19555)
+    helper = dict(launch_helper or {})
+    port = int(
+        helper.get("debug_port") or defaults.get("devtools_port", 19555) or 19555
+    )
     process_name = str(defaults.get("process_name", "") or "").strip()
-    user_data_dir = f"logs/runtime/agent-app-devtools/{agent_id or 'agent'}/profile"
+    uses_default_profile = bool(helper.get("uses_default_profile", False)) or str(
+        helper.get("profile_mode", "") or ""
+    ).strip().lower() == "default-user-profile"
+    profile_mode = str(
+        helper.get("profile_mode", "")
+        or ("default-user-profile" if uses_default_profile else "isolated-owned-profile")
+    )
+    fallback_user_data_dir = f"logs/runtime/agent-app-devtools/{agent_id or 'agent'}/profile"
+    user_data_dir = (
+        ""
+        if uses_default_profile
+        else str(helper.get("user_data_dir", "") or fallback_user_data_dir).strip()
+    )
     resolved = dict(resolution or {})
-    executable = str(resolved.get("executable_path", "") or "").strip()
-    executable_ready = bool(resolved.get("executable_ready", False) and executable)
+    executable = str(
+        helper.get("executable_path", "") or resolved.get("executable_path", "") or ""
+    ).strip()
+    executable_ready = bool(
+        executable and (bool(helper) or bool(resolved.get("executable_ready", False)))
+    )
     if not executable:
         executable = f"<path-to-{process_name or 'agent-app.exe'}>"
+    readiness_url = str(helper.get("debugger_url", "") or f"http://127.0.0.1:{port}")
+    argv = [
+        executable,
+        f"--remote-debugging-port={port}",
+    ]
+    if user_data_dir:
+        argv.append(f"--user-data-dir={user_data_dir}")
+    argv.extend(
+        [
+            "--no-first-run",
+            "--disable-crash-reporter",
+        ]
+    )
+    workspace_path = str(helper.get("workspace_path", "") or "").strip()
+    if workspace_path and _agent_app_accepts_workspace_argument(agent_id or agent):
+        argv.append(workspace_path)
     return {
         "route_id": "agent-app-devtools-owned",
         "agent": agent,
@@ -1172,16 +1242,13 @@ def _owned_devtools_launch_plan_template(
         "executable_ready": executable_ready,
         "executable_resolution_status": str(resolved.get("status", "") or "not_resolved"),
         "debug_port": port,
+        "profile_mode": profile_mode,
+        "uses_default_profile": uses_default_profile,
         "user_data_dir": user_data_dir,
-        "readiness_url": f"http://127.0.0.1:{port}",
+        "readiness_url": readiness_url,
         "startup_mode": "minimized_no_activate",
-        "argv": [
-            executable,
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={user_data_dir}",
-            "--no-first-run",
-            "--disable-crash-reporter",
-        ],
+        "workspace_path": workspace_path,
+        "argv": argv,
     }
 
 
@@ -1575,6 +1642,7 @@ def prepare_agent_app_devtools_owned_launch_fleet(
     output_root: str | Path,
     resolution_report: dict,
     workspace_path: str = "",
+    default_profile_agents: Iterable[str] = (),
     plan_executor: Callable[..., object] | None = None,
     http_probe: object | None = None,
     devtools_client: object | None = None,
@@ -1590,6 +1658,11 @@ def prepare_agent_app_devtools_owned_launch_fleet(
     active_devtools_client = devtools_client or BrowserDevToolsClient(
         request_timeout=max(0.05, float(request_timeout))
     )
+    default_profile_keys = {
+        str(item or "").strip().lower()
+        for item in default_profile_agents or ()
+        if str(item or "").strip()
+    }
 
     for index, case in enumerate(_agent_app_devtools_launchable_cases(resolution_report), start=1):
         agent = str(case.get("agent", "") or "").strip()
@@ -1598,6 +1671,18 @@ def prepare_agent_app_devtools_owned_launch_fleet(
         effective_agent_id = agent_id or defaults["agent_id"]
         executable = str(case.get("executable_path", "") or "").strip()
         debug_port = int(defaults.get("devtools_port", 19555) or 19555)
+        default_profile_requested = (
+            _agent_app_accepts_workspace_argument(effective_agent_id or agent)
+            and (
+                str(effective_agent_id).lower() in default_profile_keys
+                or str(agent).lower() in default_profile_keys
+            )
+        )
+        profile_mode = (
+            "default-user-profile"
+            if default_profile_requested
+            else "isolated-owned-profile"
+        )
         helper_workspace_path = (
             str(workspace_path or "").strip()
             if _agent_app_accepts_workspace_argument(effective_agent_id or agent)
@@ -1621,6 +1706,7 @@ def prepare_agent_app_devtools_owned_launch_fleet(
                     agent_app_debug_port=debug_port,
                     agent_app_user_data_dir=str(user_data_dir),
                     agent_app_workspace_path=helper_workspace_path,
+                    agent_app_use_default_profile=default_profile_requested,
                 ),
             )
             launch_report = _report_to_dict(
@@ -1667,7 +1753,9 @@ def prepare_agent_app_devtools_owned_launch_fleet(
                 "pid": pid,
                 "debug_port": debug_port,
                 "debugger_url": readiness_url,
-                "user_data_dir": str(user_data_dir),
+                "profile_mode": profile_mode,
+                "uses_default_profile": default_profile_requested,
+                "user_data_dir": "" if default_profile_requested else str(user_data_dir),
                 "workspace_path": helper_workspace_path,
                 "manifest_path": str(manifest_path),
                 "command": command,
@@ -3012,6 +3100,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="store_true",
         help="Launch resolved Codex/Claude/Cursor app surfaces with isolated profiles and local DevTools endpoints, then forward those endpoints to no-loss probes.",
     )
+    parser.add_argument(
+        "--allow-agent-app-devtools-default-profile-launch",
+        action="store_true",
+        help="Launch Cursor-like app surfaces with the user's default profile plus a local DevTools endpoint, then forward the endpoint to no-loss probes.",
+    )
     parser.add_argument("--allow-agent-cli-execution", action="store_true")
     parser.add_argument("--agent-cli-timeout-sec", type=float, default=90.0)
     args = parser.parse_args(argv)
@@ -3106,6 +3199,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         ),
         allow_agent_app_devtools_owned_launch=(
             args.allow_agent_app_devtools_owned_launch
+        ),
+        allow_agent_app_devtools_default_profile_launch=(
+            args.allow_agent_app_devtools_default_profile_launch
         ),
         allow_agent_cli_execution=args.allow_agent_cli_execution,
         agent_cli_timeout_sec=args.agent_cli_timeout_sec,
