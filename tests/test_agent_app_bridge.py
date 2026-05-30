@@ -415,13 +415,16 @@ class AgentAppBridgeTests(unittest.TestCase):
 
     def test_cdp_adapter_sends_message_to_ready_endpoint_and_verifies_markers(self):
         devtools = _FakeDevToolsClient(
-            {
-                "composerFound": True,
-                "messageSet": True,
-                "submitAttempted": True,
-                "submitVerified": True,
-                "readbackText": "OPENWUKONG_ACCEPTANCE: PASS\nSummarize the active task.",
-            }
+            [
+                _ready_cdp_composer_probe(),
+                {
+                    "composerFound": True,
+                    "messageSet": True,
+                    "submitAttempted": True,
+                    "submitVerified": True,
+                    "readbackText": "OPENWUKONG_ACCEPTANCE: PASS\nSummarize the active task.",
+                },
+            ]
         )
         request = build_agent_app_bridge_request(
             agent="claude desktop",
@@ -442,12 +445,53 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertEqual(data["decision"], "app_bridge_send_accepted")
         self.assertEqual(data["bridge_send_attempts"], 1)
         self.assertEqual(data["native_call_attempts"], 1)
+        self.assertEqual(data["native_probe_attempts"], 1)
         self.assertEqual(data["control_attempts"], 0)
         self.assertEqual(data["window_input_attempts"], 0)
         self.assertEqual(data["target"]["target_id"], "page-1")
         self.assertEqual(devtools.evaluate_calls[0][0], "http://127.0.0.1:9333")
         self.assertEqual(devtools.evaluate_calls[0][1].target_id, "page-1")
-        self.assertIn("Summarize the active task.", devtools.evaluate_calls[0][2])
+        self.assertTrue(data["composer_probe_report"]["ok"])
+        self.assertEqual(data["composer_probe_report"]["decision"], "app_bridge_composer_ready")
+        self.assertIn("composerSelectors", devtools.evaluate_calls[0][2])
+        self.assertIn("Summarize the active task.", devtools.evaluate_calls[1][2])
+
+    def test_cdp_adapter_does_not_send_without_safe_composer(self):
+        devtools = _FakeDevToolsClient(
+            {
+                "composerFound": False,
+                "composerCandidateCount": 0,
+                "safeComposerCandidateCount": 0,
+                "readbackText": "New Agent\nLoading Chat",
+            }
+        )
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="openwukong",
+            task_name="",
+            message="OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
+            composed_message="Project: openwukong\n\nMessage:\nOPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=_ready_cursor_devtools_probe(),
+            required_markers=("OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",),
+        )
+
+        report = AgentAppBridgeCdpAdapter(devtools_client=devtools).send(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_composer_not_ready")
+        self.assertEqual(data["bridge_send_attempts"], 0)
+        self.assertEqual(data["native_call_attempts"], 0)
+        self.assertEqual(data["native_probe_attempts"], 1)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(len(devtools.evaluate_calls), 1)
+        self.assertEqual(
+            data["composer_probe_report"]["decision"],
+            "app_bridge_composer_not_ready",
+        )
 
     def test_bound_devtools_endpoint_is_ready_without_uia_semantic_composer(self):
         probe = _ready_probe()
@@ -602,13 +646,16 @@ class AgentAppBridgeTests(unittest.TestCase):
 
     def test_cdp_adapter_prefers_target_matching_project_or_task(self):
         devtools = _FakeDevToolsClient(
-            {
-                "composerFound": True,
-                "messageSet": True,
-                "submitAttempted": True,
-                "submitVerified": True,
-                "readbackText": "OPENWUKONG_ACCEPTANCE: PASS\nTarget matched.",
-            }
+            [
+                _ready_cdp_composer_probe(),
+                {
+                    "composerFound": True,
+                    "messageSet": True,
+                    "submitAttempted": True,
+                    "submitVerified": True,
+                    "readbackText": "OPENWUKONG_ACCEPTANCE: PASS\nTarget matched.",
+                },
+            ]
         )
         probe = _ready_probe()
         probe["endpoints"][0]["targets"] = [
@@ -676,13 +723,16 @@ class AgentAppBridgeTests(unittest.TestCase):
 
     def test_cdp_adapter_reports_acceptance_pending_after_verified_submit(self):
         devtools = _FakeDevToolsClient(
-            {
-                "composerFound": True,
-                "messageSet": True,
-                "submitAttempted": True,
-                "submitVerified": True,
-                "readbackText": "Task submitted but result is still pending.",
-            }
+            [
+                _ready_cdp_composer_probe(),
+                {
+                    "composerFound": True,
+                    "messageSet": True,
+                    "submitAttempted": True,
+                    "submitVerified": True,
+                    "readbackText": "Task submitted but result is still pending.",
+                },
+            ]
         )
         request = build_agent_app_bridge_request(
             agent="claude desktop",
@@ -746,12 +796,13 @@ class AgentAppBridgeTests(unittest.TestCase):
 
 class _FakeDevToolsClient:
     def __init__(self, value):
-        self.value = dict(value)
+        self.values = list(value) if isinstance(value, list) else [dict(value)]
         self.evaluate_calls = []
 
     def evaluate(self, debugger_url, target, expression):
         self.evaluate_calls.append((debugger_url, target, expression))
-        return {"type": "object", "value": dict(self.value)}
+        value = self.values.pop(0) if len(self.values) > 1 else self.values[0]
+        return {"type": "object", "value": dict(value)}
 
 
 class _FakeIDEBridgeClient:
@@ -835,6 +886,58 @@ def _ready_probe():
             ],
         },
     }
+
+
+def _ready_cdp_composer_probe():
+    return {
+        "composerFound": True,
+        "safeComposerFound": True,
+        "composerCandidateCount": 1,
+        "safeComposerCandidateCount": 1,
+        "selectedComposer": {
+            "tag": "TEXTAREA",
+            "placeholder": "Plan, Build, / for commands, @ for context",
+            "safeChatHint": True,
+        },
+        "readbackText": "New Agent\nPlan, Build, / for commands, @ for context",
+    }
+
+
+def _ready_cursor_devtools_probe():
+    probe = _ready_probe()
+    probe["agent"] = "cursor"
+    probe["agent_id"] = "cursor"
+    probe["project_name"] = "openwukong"
+    probe["task_name"] = ""
+    probe["endpoints"] = [
+        {
+            "endpoint_type": "devtools",
+            "debugger_url": "http://127.0.0.1:19557",
+            "ready": True,
+            "process": {
+                "process_name": "Cursor.exe",
+                "pid": 13592,
+                "executable_path": "E:/cursor/cursor/cursor/Cursor.exe",
+            },
+            "targets": [
+                {
+                    "target_id": "cursor-workbench",
+                    "id": "cursor-workbench",
+                    "type": "page",
+                    "title": "openwukong - Cursor",
+                    "url": "vscode-file://vscode-app/e:/cursor/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/page/cursor-workbench",
+                    "ready": True,
+                }
+            ],
+        }
+    ]
+    probe["app_uia_probe"] = {
+        **probe["app_uia_probe"],
+        "target_matched": False,
+        "semantic_composer_count": 0,
+    }
+    return probe
 
 
 def _ready_ide_bridge_probe():

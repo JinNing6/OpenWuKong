@@ -50,9 +50,12 @@ class AgentAppBridgeFixtureSmokeReport:
 
     @property
     def ok(self) -> bool:
+        composer_probe = self.bridge_send_report.get("composer_probe_report") or {}
         return bool(
             self.bridge_send_report.get("ok", False)
-            and int(self.fixture.get("cdp_request_count", 0) or 0) == 1
+            and int(self.fixture.get("cdp_request_count", 0) or 0) >= 2
+            and int(self.bridge_send_report.get("native_probe_attempts", 0) or 0) >= 1
+            and composer_probe.get("decision") == "app_bridge_composer_ready"
             and int(self.bridge_send_report.get("window_input_attempts", 0) or 0) == 0
         )
 
@@ -263,7 +266,14 @@ class _LocalAppBridgeDevToolsFixture:
         )
         value = {
             "composerFound": True,
+            "safeComposerFound": True,
             "composerCandidateCount": 1,
+            "safeComposerCandidateCount": 1,
+            "selectedComposer": {
+                "tag": "TEXTAREA",
+                "placeholder": "Agent chat message",
+                "safeChatHint": True,
+            },
             "messageSet": message_set,
             "submitAttempted": message_set,
             "submitVerified": message_set,

@@ -7125,3 +7125,52 @@ When a new conversation starts in this repo:
       the app bridge report, then only allow real send when that probe finds a
       safe chat composer and readback markers can be verified without window
       input
+- 2026-05-30 added the first-class CDP composer-readiness gate for Cursor-style
+  app bridges:
+  - implementation:
+    - `AgentAppBridgeCdpAdapter` now runs a read-only
+      `agent-app-bridge-cdp-composer-probe` before any CDP send expression
+    - the probe inventories visible textbox/contenteditable/input candidates,
+      rejects code-editor-like targets, records safe composer counts, and
+      returns `app_bridge_composer_not_ready` before any send when no safe chat
+      composer is proven
+    - app real no-loss reports now attach `app_bridge_composer_probe`
+      separately from `app_bridge_send_report`, so dry-run target readiness and
+      actual composer readiness are no longer conflated
+    - the local DevTools fixture smoke now requires the two-step CDP sequence:
+      read-only composer probe first, send second, with zero window input
+  - validation:
+    - red tests first covered a ready composer probe before send, a blocked
+      no-safe-composer route with `bridge_send_attempts=0`, and fixture smoke
+      moving from one CDP request to two
+    - focused regression:
+      `python -m unittest tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_agent_app_transport_matrix tests.test_major_real_no_loss tests.test_agent_native_connector_probe tests.test_agent_app_bridge_fixture_smoke`:
+      `97 tests OK`
+    - R61 real Cursor default-profile no-loss run:
+      `logs/runtime/major-real-no-loss-r61-cursor-composer-readiness/major-real-no-loss-report.json`
+      used the Start Menu shortcut
+      `C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Cursor\Cursor.lnk`,
+      resolved it to `E:\cursor\cursor\cursor\Cursor.exe`, and launched the
+      default-profile helper with DevTools on `127.0.0.1:19557`
+    - R61 evidence:
+      `safe_run_ok=true`, `goal_complete=false`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `background_screenshot_focus_stable=true`, launch attempts `1`, stop
+      attempts `1`, cleanup OK, and no residual Cursor debug-port process
+    - the real CDP page target was `openwukong - Cursor`; the read-only
+      composer probe found one visible textbox candidate with class
+      `aislash-editor-input`, but it lacked a safe chat semantic hint, so the
+      system correctly stopped at `app_bridge_composer_not_ready` without
+      setting text or submitting
+  - current conclusion:
+    - the correct signed-in Cursor route is now the default-profile Start Menu
+      shortcut route, not the isolated unlogged profile route
+    - Cursor can be targeted in the background by project context and probed
+      without stealing focus
+    - the remaining blocker for real Cursor chat send is a stricter selector
+      or product bridge that can prove `aislash-editor-input` is the intended
+      chat composer and verify readback after send; until that proof exists,
+      `goal_complete` must remain false
+    - next concrete action: add a Cursor-specific chat-composer contract for
+      `aislash-editor-input` with readback-marker verification, then run an
+      explicit opt-in real send test only after the probe reports ready

@@ -59,6 +59,7 @@ class AgentAppRealNoLossCase:
     uia_semantic_draft_dry_run: dict = dataclasses.field(default_factory=dict)
     uia_semantic_draft_report: dict = dataclasses.field(default_factory=dict)
     app_bridge_dry_run: dict = dataclasses.field(default_factory=dict)
+    app_bridge_composer_probe: dict = dataclasses.field(default_factory=dict)
     app_bridge_send_report: dict = dataclasses.field(default_factory=dict)
     transport_matrix: dict = dataclasses.field(default_factory=dict)
     artifact_path: str = ""
@@ -208,6 +209,7 @@ class AgentAppRealNoLossCase:
             "uia_semantic_draft_report": dict(self.uia_semantic_draft_report),
             "app_bridge_send_verified": self.app_bridge_send_verified,
             "app_bridge_dry_run": dict(self.app_bridge_dry_run),
+            "app_bridge_composer_probe": dict(self.app_bridge_composer_probe),
             "app_bridge_send_report": dict(self.app_bridge_send_report),
             "transport_matrix": dict(self.transport_matrix),
             "background_screenshot_count": self.background_screenshot_count,
@@ -730,7 +732,7 @@ def _case_from_probe(
     matched_window_count = _counter(app_probe, "matched_window_count")
     target_matched = bool(app_probe.get("target_matched", False))
     real_verified = bool(native_ready or matched_window_count > 0 or target_matched)
-    app_bridge_dry_run, app_bridge_send_report = _run_app_bridge_path(
+    app_bridge_dry_run, app_bridge_composer_probe, app_bridge_send_report = _run_app_bridge_path(
         agent=agent,
         probe=probe,
         project_name=project_name,
@@ -874,6 +876,7 @@ def _case_from_probe(
         uia_semantic_draft_dry_run=semantic_draft_dry_run,
         uia_semantic_draft_report=semantic_draft_report,
         app_bridge_dry_run=app_bridge_dry_run,
+        app_bridge_composer_probe=app_bridge_composer_probe,
         app_bridge_send_report=app_bridge_send_report,
         transport_matrix=transport_matrix,
         errors=tuple(errors),
@@ -891,7 +894,7 @@ def _run_app_bridge_path(
     forbidden_markers: tuple[str, ...],
     allow_app_bridge_send: bool,
     app_bridge_sender: object | None,
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, dict]:
     request = build_agent_app_bridge_request(
         agent=agent,
         agent_id=str(probe.get("agent_id", "") or _agent_id_from_name(agent)),
@@ -911,16 +914,22 @@ def _run_app_bridge_path(
         forbidden_markers=tuple(forbidden_markers or ()),
     )
     dry_run = AgentAppBridgeDryRunAdapter().prepare(request).to_dict()
+    composer_probe: dict = {}
+    if bool(dry_run.get("ok", False)):
+        sender = app_bridge_sender or _default_app_bridge_sender()
+        probe_composer = getattr(sender, "probe_composer", None)
+        if callable(probe_composer):
+            composer_probe = _report_to_dict(probe_composer(request))
     if not allow_app_bridge_send or not bool(dry_run.get("ok", False)):
-        return dry_run, {}
+        return dry_run, composer_probe, {}
     sender = app_bridge_sender or _default_app_bridge_sender()
     try:
         send = getattr(sender, "send", None)
         if callable(send):
-            return dry_run, _report_to_dict(send(request))
+            return dry_run, composer_probe, _report_to_dict(send(request))
         if callable(sender):
-            return dry_run, _report_to_dict(sender(request))
-        return dry_run, {
+            return dry_run, composer_probe, _report_to_dict(sender(request))
+        return dry_run, composer_probe, {
             "mode": "agent-app-bridge-send",
             "safety_mode": "native_bridge_execute",
             "ok": False,
@@ -931,7 +940,7 @@ def _run_app_bridge_path(
             "native_call_attempts": 0,
         }
     except Exception as exc:
-        return dry_run, {
+        return dry_run, composer_probe, {
             "mode": "agent-app-bridge-send",
             "safety_mode": "native_bridge_execute",
             "ok": False,

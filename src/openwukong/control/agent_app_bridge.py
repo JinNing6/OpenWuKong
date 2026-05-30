@@ -222,7 +222,9 @@ class AgentAppBridgeSendReport:
     request: AgentAppBridgeRequest
     dry_run_report: AgentAppBridgeDryRunReport
     target: BrowserDevToolsTarget | None = None
+    composer_probe_report: dict = dataclasses.field(default_factory=dict)
     action_result: dict = dataclasses.field(default_factory=dict)
+    native_probe_attempts: int = 0
     native_call_attempts: int = 0
     error: str = ""
     elapsed_ms: float = 0.0
@@ -237,7 +239,12 @@ class AgentAppBridgeSendReport:
 
     @property
     def control_allowed(self) -> bool:
-        return bool(self.dry_run_report.ok and self.target is not None and not self.error)
+        return bool(
+            self.dry_run_report.ok
+            and self.target is not None
+            and not self.error
+            and self.native_call_attempts > 0
+        )
 
     @property
     def control_attempts(self) -> int:
@@ -284,6 +291,11 @@ class AgentAppBridgeSendReport:
     def decision(self) -> str:
         if not self.dry_run_report.ok:
             return "app_bridge_request_not_ready"
+        if self.composer_probe_report and not bool(self.composer_probe_report.get("ok", False)):
+            return str(
+                self.composer_probe_report.get("decision", "")
+                or "app_bridge_composer_not_ready"
+            )
         if self.error:
             return "app_bridge_send_failed"
         if self.target is None:
@@ -313,9 +325,89 @@ class AgentAppBridgeSendReport:
             "control_attempts": self.control_attempts,
             "window_input_attempts": self.window_input_attempts,
             "bridge_send_attempts": self.bridge_send_attempts,
+            "native_probe_attempts": int(self.native_probe_attempts or 0),
             "native_call_attempts": int(self.native_call_attempts or 0),
             "missing_required_markers": list(self.missing_required_markers),
             "present_forbidden_markers": list(self.present_forbidden_markers),
+            "target": _devtools_target_to_dict(self.target),
+            "composer_probe_report": dict(self.composer_probe_report),
+            "action_result": dict(self.action_result),
+            "error": self.error,
+            "dry_run_report": self.dry_run_report.to_dict(),
+            "request": self.request.to_dict(),
+            "elapsed_ms": round(self.elapsed_ms, 3),
+        }
+
+
+@dataclasses.dataclass(frozen=True)
+class AgentAppBridgeCdpComposerProbeReport:
+    request: AgentAppBridgeRequest
+    dry_run_report: AgentAppBridgeDryRunReport
+    target: BrowserDevToolsTarget | None = None
+    action_result: dict = dataclasses.field(default_factory=dict)
+    native_probe_attempts: int = 0
+    error: str = ""
+    elapsed_ms: float = 0.0
+
+    @property
+    def mode(self) -> str:
+        return "agent-app-bridge-cdp-composer-probe"
+
+    @property
+    def safety_mode(self) -> str:
+        return "read_only_native_probe"
+
+    @property
+    def control_allowed(self) -> bool:
+        return False
+
+    @property
+    def control_attempts(self) -> int:
+        return 0
+
+    @property
+    def window_input_attempts(self) -> int:
+        return 0
+
+    @property
+    def bridge_send_attempts(self) -> int:
+        return 0
+
+    @property
+    def safe_composer_found(self) -> bool:
+        return bool(
+            self.action_result.get("safeComposerFound", False)
+            or int(self.action_result.get("safeComposerCandidateCount", 0) or 0) > 0
+        )
+
+    @property
+    def ok(self) -> bool:
+        return self.decision == "app_bridge_composer_ready"
+
+    @property
+    def decision(self) -> str:
+        if not self.dry_run_report.ok:
+            return "app_bridge_request_not_ready"
+        if self.error:
+            return "app_bridge_composer_probe_failed"
+        if self.target is None:
+            return "app_bridge_native_target_not_ready"
+        if not self.safe_composer_found:
+            return "app_bridge_composer_not_ready"
+        return "app_bridge_composer_ready"
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "safety_mode": self.safety_mode,
+            "ok": self.ok,
+            "decision": self.decision,
+            "control_allowed": self.control_allowed,
+            "control_attempts": self.control_attempts,
+            "window_input_attempts": self.window_input_attempts,
+            "bridge_send_attempts": self.bridge_send_attempts,
+            "native_probe_attempts": int(self.native_probe_attempts or 0),
+            "safe_composer_found": self.safe_composer_found,
             "target": _devtools_target_to_dict(self.target),
             "action_result": dict(self.action_result),
             "error": self.error,
@@ -329,11 +421,11 @@ class AgentAppBridgeCdpAdapter:
     def __init__(self, *, devtools_client: BrowserDevToolsClient | None = None):
         self._devtools_client = devtools_client or BrowserDevToolsClient()
 
-    def send(self, request: AgentAppBridgeRequest) -> AgentAppBridgeSendReport:
+    def probe_composer(self, request: AgentAppBridgeRequest) -> AgentAppBridgeCdpComposerProbeReport:
         started = time.perf_counter()
         dry_run = AgentAppBridgeDryRunAdapter().prepare(request)
         if not dry_run.ok:
-            return AgentAppBridgeSendReport(
+            return AgentAppBridgeCdpComposerProbeReport(
                 request=request,
                 dry_run_report=dry_run,
                 elapsed_ms=(time.perf_counter() - started) * 1000,
@@ -345,13 +437,65 @@ class AgentAppBridgeCdpAdapter:
             task_name=request.task_name,
         )
         if target is None:
-            return AgentAppBridgeSendReport(
+            return AgentAppBridgeCdpComposerProbeReport(
                 request=request,
                 dry_run_report=dry_run,
                 error="devtools_target_not_ready",
                 elapsed_ms=(time.perf_counter() - started) * 1000,
             )
 
+        debugger_url = str(request.endpoint.get("debugger_url", "") or "").strip()
+        native_probe_attempts = 1
+        try:
+            result = self._devtools_client.evaluate(
+                debugger_url,
+                target,
+                _bridge_composer_probe_expression(),
+            )
+            action_result = _remote_object_value(result)
+        except Exception as exc:
+            return AgentAppBridgeCdpComposerProbeReport(
+                request=request,
+                dry_run_report=dry_run,
+                target=target,
+                native_probe_attempts=native_probe_attempts,
+                error=str(exc) or exc.__class__.__name__,
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+
+        return AgentAppBridgeCdpComposerProbeReport(
+            request=request,
+            dry_run_report=dry_run,
+            target=target,
+            action_result=action_result,
+            native_probe_attempts=native_probe_attempts,
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
+
+    def send(self, request: AgentAppBridgeRequest) -> AgentAppBridgeSendReport:
+        started = time.perf_counter()
+        dry_run = AgentAppBridgeDryRunAdapter().prepare(request)
+        if not dry_run.ok:
+            return AgentAppBridgeSendReport(
+                request=request,
+                dry_run_report=dry_run,
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+
+        composer_probe = self.probe_composer(request)
+        composer_probe_data = composer_probe.to_dict()
+        if not composer_probe.ok:
+            return AgentAppBridgeSendReport(
+                request=request,
+                dry_run_report=dry_run,
+                target=composer_probe.target,
+                composer_probe_report=composer_probe_data,
+                native_probe_attempts=composer_probe.native_probe_attempts,
+                error="" if composer_probe.target is not None else "devtools_target_not_ready",
+                elapsed_ms=(time.perf_counter() - started) * 1000,
+            )
+
+        target = composer_probe.target
         debugger_url = str(request.endpoint.get("debugger_url", "") or "").strip()
         native_call_attempts = 1
         try:
@@ -366,6 +510,8 @@ class AgentAppBridgeCdpAdapter:
                 request=request,
                 dry_run_report=dry_run,
                 target=target,
+                composer_probe_report=composer_probe_data,
+                native_probe_attempts=composer_probe.native_probe_attempts,
                 native_call_attempts=native_call_attempts,
                 error=str(exc) or exc.__class__.__name__,
                 elapsed_ms=(time.perf_counter() - started) * 1000,
@@ -375,7 +521,9 @@ class AgentAppBridgeCdpAdapter:
             request=request,
             dry_run_report=dry_run,
             target=target,
+            composer_probe_report=composer_probe_data,
             action_result=action_result,
+            native_probe_attempts=composer_probe.native_probe_attempts,
             native_call_attempts=native_call_attempts,
             elapsed_ms=(time.perf_counter() - started) * 1000,
         )
@@ -754,6 +902,11 @@ class AgentAppBridgeNativeAdapter:
             return self._agent_native.send(request)
         return self._cdp.send(request)
 
+    def probe_composer(self, request: AgentAppBridgeRequest):
+        if _endpoint_is_devtools(request.endpoint):
+            return self._cdp.probe_composer(request)
+        return {}
+
 
 def build_agent_app_bridge_request(
     *,
@@ -933,6 +1086,63 @@ def _remote_object_value(result: dict) -> dict:
     return {"value": value}
 
 
+def _bridge_composer_probe_expression() -> str:
+    return (
+        "(() => {"
+        "const visible = (el) => {"
+        "if (!el) return false;"
+        "const rect = el.getBoundingClientRect();"
+        "const style = getComputedStyle(el);"
+        "return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';"
+        "};"
+        "const readText = (el) => {"
+        "if (!el) return '';"
+        "if ('value' in el) return String(el.value || '');"
+        "return String(el.innerText || el.textContent || '');"
+        "};"
+        "const labelFor = (el) => String(el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.value || el.innerText || el.textContent || '').trim();"
+        "const safeChatHint = (label) => /chat|message|ask|agent|composer|prompt|plan|commands|context|send|\\u8f93\\u5165|\\u6d88\\u606f|\\u63d0\\u95ee|\\u53d1\\u9001|\\u547d\\u4ee4/i.test(label || '');"
+        "const isCodeEditor = (el) => !!el.closest('.monaco-editor,.cm-editor,[data-mode-id],.editor-instance');"
+        "const composerSelectors = ["
+        "'textarea',"
+        "'[contenteditable=\"true\"]',"
+        "'[role=\"textbox\"]',"
+        "'input[type=\"text\"]',"
+        "'input:not([type])'"
+        "];"
+        "const composers = Array.from(document.querySelectorAll(composerSelectors.join(','))).filter(visible).map((el, index) => {"
+        "const rect = el.getBoundingClientRect();"
+        "const label = labelFor(el);"
+        "const editorLike = isCodeEditor(el);"
+        "const safe = safeChatHint(label) && !editorLike;"
+        "return {index, tag: el.tagName, role: el.getAttribute('role') || '', ariaLabel: el.getAttribute('aria-label') || '', placeholder: el.getAttribute('placeholder') || '', title: el.getAttribute('title') || '', className: String(el.className || '').slice(0, 160), text: label.slice(0, 220), safeChatHint: safeChatHint(label), editorLike, safe, rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}};"
+        "});"
+        "const safeComposers = composers.filter((item) => item.safe);"
+        "const buttonSelectors = ['button', '[role=\"button\"]', 'input[type=\"submit\"]'];"
+        "const buttons = Array.from(document.querySelectorAll(buttonSelectors.join(','))).filter((el) => visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true');"
+        "const sendButtonCandidates = buttons.map((el, index) => {"
+        "const rect = el.getBoundingClientRect();"
+        "const label = labelFor(el);"
+        "return {index, tag: el.tagName, ariaLabel: el.getAttribute('aria-label') || '', title: el.getAttribute('title') || '', text: label.slice(0, 160), sendHint: /send|submit|run|start|\\u53d1\\u9001|\\u63d0\\u4ea4|\\u8fd0\\u884c|\\u5f00\\u59cb/i.test(label), rect: {x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height)}};"
+        "}).filter((item) => item.sendHint);"
+        "return {"
+        "composerFound: safeComposers.length > 0,"
+        "safeComposerFound: safeComposers.length > 0,"
+        "composerCandidateCount: composers.length,"
+        "safeComposerCandidateCount: safeComposers.length,"
+        "selectedComposer: safeComposers[0] || null,"
+        "composers: composers.slice(0, 40),"
+        "buttonCount: buttons.length,"
+        "sendButtonCandidates: sendButtonCandidates.slice(0, 20),"
+        "readbackText: document.body ? document.body.innerText.slice(0, 6000) : '',"
+        "documentTitle: document.title || '',"
+        "pageUrl: location.href || '',"
+        "readyState: document.readyState || ''"
+        "};"
+        "})()"
+    )
+
+
 def _bridge_send_expression(message: str) -> str:
     message_json = json_dumps_ascii(str(message or ""))
     return (
@@ -949,6 +1159,9 @@ def _bridge_send_expression(message: str) -> str:
         "if ('value' in el) return String(el.value || '');"
         "return String(el.innerText || el.textContent || '');"
         "};"
+        "const labelFor = (el) => String(el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.getAttribute('title') || el.value || el.innerText || el.textContent || '').trim();"
+        "const safeChatHint = (label) => /chat|message|ask|agent|composer|prompt|plan|commands|context|send|\\u8f93\\u5165|\\u6d88\\u606f|\\u63d0\\u95ee|\\u53d1\\u9001|\\u547d\\u4ee4/i.test(label || '');"
+        "const isCodeEditor = (el) => !!el.closest('.monaco-editor,.cm-editor,[data-mode-id],.editor-instance');"
         "const setText = (el, text) => {"
         "if ('value' in el) {"
         "const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;"
@@ -969,26 +1182,27 @@ def _bridge_send_expression(message: str) -> str:
         "'input[type=\"text\"]',"
         "'input:not([type])'"
         "];"
-        "const composers = Array.from(document.querySelectorAll(composerSelectors.join(','))).filter(visible);"
+        "const composers = Array.from(document.querySelectorAll(composerSelectors.join(','))).filter((el) => visible(el) && safeChatHint(labelFor(el)) && !isCodeEditor(el));"
         "const composer = composers[0] || null;"
         "if (!composer) {"
-        "return {composerFound: false, composerCandidateCount: 0, messageSet: false, submitAttempted: false, submitVerified: false, readbackText: ''};"
+        "return {composerFound: false, safeComposerFound: false, composerCandidateCount: 0, safeComposerCandidateCount: 0, messageSet: false, submitAttempted: false, submitVerified: false, readbackText: document.body ? document.body.innerText.slice(0, 6000) : ''};"
         "}"
         "setText(composer, message);"
         "const composerText = readText(composer);"
         "const messageSet = composerText === message || composerText.includes(message);"
         "const buttonSelectors = ['button', '[role=\"button\"]', 'input[type=\"submit\"]'];"
         "const buttons = Array.from(document.querySelectorAll(buttonSelectors.join(','))).filter((el) => visible(el) && !el.disabled && el.getAttribute('aria-disabled') !== 'true');"
-        "const labelFor = (el) => String(el.getAttribute('aria-label') || el.getAttribute('title') || el.value || el.innerText || el.textContent || '').trim().toLowerCase();"
-        "const sendButton = buttons.find((el) => /send|submit|\\u53d1\\u9001|\\u63d0\\u4ea4|\\u8fd0\\u884c|\\u5f00\\u59cb/.test(labelFor(el))) || null;"
+        "const sendButton = buttons.find((el) => /send|submit|\\u53d1\\u9001|\\u63d0\\u4ea4|\\u8fd0\\u884c|\\u5f00\\u59cb/i.test(labelFor(el))) || null;"
         "if (!sendButton) {"
-        "return {composerFound: true, composerCandidateCount: composers.length, messageSet, submitAttempted: false, submitVerified: false, readbackText: document.body ? document.body.innerText.slice(0, 6000) : ''};"
+        "return {composerFound: true, safeComposerFound: true, composerCandidateCount: composers.length, safeComposerCandidateCount: composers.length, messageSet, submitAttempted: false, submitVerified: false, readbackText: document.body ? document.body.innerText.slice(0, 6000) : ''};"
         "}"
         "sendButton.click();"
         "const readbackText = document.body ? document.body.innerText.slice(0, 6000) : '';"
         "return {"
         "composerFound: true,"
+        "safeComposerFound: true,"
         "composerCandidateCount: composers.length,"
+        "safeComposerCandidateCount: composers.length,"
         "messageSet,"
         "submitAttempted: true,"
         "submitVerified: true,"
@@ -1448,6 +1662,7 @@ __all__ = [
     "AgentAppBridgeAgentNativeAdapter",
     "AgentAppBridgeAgentNativeSendReport",
     "AgentAppBridgeCdpAdapter",
+    "AgentAppBridgeCdpComposerProbeReport",
     "AgentAppBridgeDryRunAdapter",
     "AgentAppBridgeDryRunReport",
     "AgentAppBridgeIdeExtensionAdapter",

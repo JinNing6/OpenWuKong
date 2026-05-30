@@ -19,6 +19,29 @@ class _FakeProbeReport:
         return dict(self.payload)
 
 
+class _FakeComposerProbeSender:
+    def __init__(self, probe_payload):
+        self.probe_payload = dict(probe_payload)
+        self.probe_calls = []
+        self.send_calls = []
+
+    def probe_composer(self, request):
+        self.probe_calls.append(request)
+        payload = dict(self.probe_payload)
+        payload.setdefault("mode", "agent-app-bridge-cdp-composer-probe")
+        payload.setdefault("safety_mode", "read_only_native_probe")
+        payload.setdefault("control_attempts", 0)
+        payload.setdefault("window_input_attempts", 0)
+        payload.setdefault("bridge_send_attempts", 0)
+        payload.setdefault("native_probe_attempts", 1)
+        payload["request"] = request.to_dict()
+        return payload
+
+    def send(self, request):
+        self.send_calls.append(request)
+        raise AssertionError("send should not run during read-only composer probe")
+
+
 class AgentAppRealNoLossTests(unittest.TestCase):
     def test_runs_agent_app_probes_without_control_attempts_and_writes_artifacts(self):
         calls = []
@@ -265,6 +288,103 @@ class AgentAppRealNoLossTests(unittest.TestCase):
             "Send this through the app surface.",
         )
         self.assertEqual(artifact["app_bridge_send_report"]["decision"], "app_bridge_send_accepted")
+
+    def test_ready_devtools_app_bridge_runs_composer_probe_without_send(self):
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="agent_native_connector_ready",
+                agent=kwargs["agent"],
+                agent_id="cursor",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_allowed=False,
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=1,
+                bridge_send_attempts=0,
+                endpoints=[
+                    {
+                        "endpoint_type": "devtools",
+                        "debugger_url": "http://127.0.0.1:19557",
+                        "ready": True,
+                        "process": {
+                            "process_name": "Cursor.exe",
+                            "pid": 13592,
+                            "executable_path": "E:/cursor/cursor/cursor/Cursor.exe",
+                        },
+                        "targets": [
+                            {
+                                "target_id": "cursor-workbench",
+                                "id": "cursor-workbench",
+                                "type": "page",
+                                "title": "openwukong - Cursor",
+                                "url": "vscode-file://vscode-app/e:/cursor/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html",
+                                "ready": True,
+                                "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/page/cursor-workbench",
+                            }
+                        ],
+                    }
+                ],
+                app_uia_probe={
+                    "decision": "agent_app_project_not_visible",
+                    "matched_window_count": 1,
+                    "target_matched": False,
+                    "semantic_composer_count": 0,
+                    "submit_candidate_count": 0,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "matched_windows": [
+                        {
+                            "process_name": "Cursor.exe",
+                            "pid": 13592,
+                            "window_title": "Cursor",
+                            "hwnd": 3150324,
+                        }
+                    ],
+                },
+            )
+
+        sender = _FakeComposerProbeSender(
+            {
+                "ok": False,
+                "decision": "app_bridge_composer_not_ready",
+                "safe_composer_found": False,
+                "action_result": {
+                    "composerFound": False,
+                    "safeComposerCandidateCount": 0,
+                    "readbackText": "New Agent\nLoading Chat",
+                },
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_app_real_no_loss(
+                agents=("cursor",),
+                project_name="openwukong",
+                task_name="",
+                output_root=Path(td),
+                probe_runner=fake_probe_runner,
+                app_bridge_sender=sender,
+                allow_app_bridge_send=False,
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+
+        self.assertEqual(len(sender.probe_calls), 1)
+        self.assertEqual(sender.send_calls, [])
+        self.assertEqual(data["bridge_send_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(case["app_bridge_dry_run"]["decision"], "app_bridge_dry_run_ready")
+        self.assertEqual(
+            case["app_bridge_composer_probe"]["decision"],
+            "app_bridge_composer_not_ready",
+        )
+        self.assertEqual(case["app_bridge_composer_probe"]["native_probe_attempts"], 1)
+        self.assertFalse(case["app_bridge_send_verified"])
 
     def test_passes_explicit_ide_bridge_urls_to_native_probe(self):
         calls = []
