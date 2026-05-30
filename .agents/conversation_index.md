@@ -7420,3 +7420,28 @@ When a new conversation starts in this repo:
     precise app-side background task/chat submission still requires a native,
     DevTools, or extension endpoint; CLI success must not be used as proof of
     desktop App chat capability
+- 2026-05-30 refreshed current Codex/Claude desktop App read-only evidence:
+  - report:
+    `logs/runtime/agent-app-real-no-loss-r80-codex-claude-readonly/report.json`
+  - suite result:
+    `total_cases=2`, `passed_cases=2`, `goal_complete=false`,
+    `native_ready_cases=0`, `background_send_ready_cases=0`,
+    `background_draft_ready_cases=0`, `bridge_send_attempts=0`,
+    `agent_command_attempts=0`, `window_input_attempts=0`,
+    `background_screenshot_success_count=2/2`, and
+    `background_screenshot_focus_stable=true`
+  - Codex app:
+    current desktop shell can be resolved and background-captured; UIA evidence
+    sees the `openwukong` project as visible, but the requested
+    `major-real-no-loss` task is missing, semantic composer count is `0`, and
+    native endpoint count is `0`, so status stays
+    `gated_native_endpoint_missing`
+  - Claude Desktop:
+    current desktop shell can be resolved and background-captured, but
+    `openwukong` and `major-real-no-loss` are not visible in the current app
+    surface, semantic composer count is `0`, and native endpoint count is `0`,
+    so status stays `gated_native_endpoint_missing`
+  - current conclusion:
+    Codex/Claude desktop App surfaces have strong no-focus observation and
+    screenshot evidence, but no precise background App-side task/chat control
+    until a native/extension/DevTools endpoint is available or installed
