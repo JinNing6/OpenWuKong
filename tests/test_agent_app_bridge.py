@@ -493,6 +493,79 @@ class AgentAppBridgeTests(unittest.TestCase):
             "app_bridge_composer_not_ready",
         )
 
+    def test_cdp_adapter_allows_cursor_aislash_chat_composer_contract(self):
+        devtools = _CursorAislashContractDevToolsClient()
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="openwukong",
+            task_name="",
+            message="OPENWUKONG_CURSOR_AISLASH_CONTRACT",
+            composed_message="Project: openwukong\n\nMessage:\nOPENWUKONG_CURSOR_AISLASH_CONTRACT",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=_ready_cursor_devtools_probe(),
+            required_markers=("OPENWUKONG_CURSOR_AISLASH_CONTRACT",),
+        )
+
+        report = AgentAppBridgeCdpAdapter(devtools_client=devtools).send(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(data["decision"], "app_bridge_send_accepted")
+        self.assertEqual(data["native_probe_attempts"], 1)
+        self.assertEqual(data["native_call_attempts"], 1)
+        self.assertEqual(data["bridge_send_attempts"], 1)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(
+            data["composer_probe_report"]["action_result"]["selectedComposer"][
+                "productComposerContract"
+            ],
+            "cursor-agent-chat-aislash-editor-input",
+        )
+        self.assertIn(".aislash-editor-input", devtools.evaluate_calls[0][2])
+        self.assertIn("cursor-agent-chat-aislash-editor-input", devtools.evaluate_calls[0][2])
+        self.assertIn(".aislash-editor-input", devtools.evaluate_calls[1][2])
+        self.assertIn("cursor-agent-chat-aislash-editor-input", devtools.evaluate_calls[1][2])
+
+    def test_cdp_adapter_send_expression_has_no_submit_cleanup_guard(self):
+        devtools = _NoSubmitCleanupGuardDevToolsClient()
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="openwukong",
+            task_name="",
+            message="OPENWUKONG_CURSOR_NO_SUBMIT_CLEANUP",
+            composed_message="Project: openwukong\n\nMessage:\nOPENWUKONG_CURSOR_NO_SUBMIT_CLEANUP",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=_ready_cursor_devtools_probe(),
+            required_markers=("OPENWUKONG_CURSOR_NO_SUBMIT_CLEANUP",),
+        )
+
+        report = AgentAppBridgeCdpAdapter(devtools_client=devtools).send(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_submit_not_verified")
+        self.assertEqual(data["bridge_send_attempts"], 1)
+        self.assertEqual(data["native_call_attempts"], 1)
+        self.assertEqual(data["action_result"]["cleanupAttempted"], True)
+        self.assertEqual(data["action_result"]["cleanupVerified"], True)
+        self.assertIn("cleanupAttempted", devtools.evaluate_calls[1][2])
+        self.assertIn("originalText", devtools.evaluate_calls[1][2])
+        self.assertIn("data-lexical-editor", devtools.evaluate_calls[1][2])
+        self.assertIn("execCommand('insertText'", devtools.evaluate_calls[1][2])
+        self.assertIn("execCommand('delete'", devtools.evaluate_calls[1][2])
+        self.assertIn("async ()", devtools.evaluate_calls[1][2])
+        self.assertIn("await sleep", devtools.evaluate_calls[1][2])
+        self.assertIn("cleanupTargetText", devtools.evaluate_calls[1][2])
+        self.assertIn("cleanupIndex", devtools.evaluate_calls[1][2])
+        self.assertIn("selectNodeContents", devtools.evaluate_calls[1][2])
+        self.assertIn("codicon-arrow-up-two", devtools.evaluate_calls[1][2])
+        self.assertIn("submitWaitIndex", devtools.evaluate_calls[1][2])
+        self.assertIn("anysphere-icon-button", devtools.evaluate_calls[1][2])
+        self.assertIn("postComposerText", devtools.evaluate_calls[1][2])
+
     def test_bound_devtools_endpoint_is_ready_without_uia_semantic_composer(self):
         probe = _ready_probe()
         probe["app_uia_probe"]["composer_candidate_count"] = 0
@@ -803,6 +876,85 @@ class _FakeDevToolsClient:
         self.evaluate_calls.append((debugger_url, target, expression))
         value = self.values.pop(0) if len(self.values) > 1 else self.values[0]
         return {"type": "object", "value": dict(value)}
+
+
+class _CursorAislashContractDevToolsClient:
+    def __init__(self):
+        self.evaluate_calls = []
+
+    def evaluate(self, debugger_url, target, expression):
+        self.evaluate_calls.append((debugger_url, target, expression))
+        has_contract = (
+            ".aislash-editor-input" in expression
+            and "cursor-agent-chat-aislash-editor-input" in expression
+        )
+        if "selectedComposer" in expression:
+            return {
+                "type": "object",
+                "value": {
+                    "composerFound": has_contract,
+                    "safeComposerFound": has_contract,
+                    "composerCandidateCount": 1,
+                    "safeComposerCandidateCount": 1 if has_contract else 0,
+                    "selectedComposer": {
+                        "tag": "DIV",
+                        "role": "textbox",
+                        "className": "aislash-editor-input",
+                        "safeChatHint": False,
+                        "productComposerContract": (
+                            "cursor-agent-chat-aislash-editor-input"
+                            if has_contract
+                            else ""
+                        ),
+                    }
+                    if has_contract
+                    else None,
+                    "readbackText": "openwukong\nNew Agent\nPlan, Build, / for commands, @ for context",
+                },
+            }
+        return {
+            "type": "object",
+            "value": {
+                "composerFound": has_contract,
+                "safeComposerFound": has_contract,
+                "composerCandidateCount": 1,
+                "safeComposerCandidateCount": 1 if has_contract else 0,
+                "messageSet": has_contract,
+                "submitAttempted": has_contract,
+                "submitVerified": has_contract,
+                "readbackText": (
+                    "OPENWUKONG_CURSOR_AISLASH_CONTRACT"
+                    if has_contract
+                    else "New Agent"
+                ),
+            },
+        }
+
+
+class _NoSubmitCleanupGuardDevToolsClient:
+    def __init__(self):
+        self.evaluate_calls = []
+
+    def evaluate(self, debugger_url, target, expression):
+        self.evaluate_calls.append((debugger_url, target, expression))
+        if "selectedComposer" in expression:
+            return {"type": "object", "value": _ready_cdp_composer_probe()}
+        has_cleanup_guard = "cleanupAttempted" in expression and "originalText" in expression
+        return {
+            "type": "object",
+            "value": {
+                "composerFound": True,
+                "safeComposerFound": True,
+                "composerCandidateCount": 1,
+                "safeComposerCandidateCount": 1,
+                "messageSet": True,
+                "submitAttempted": False,
+                "submitVerified": False,
+                "cleanupAttempted": has_cleanup_guard,
+                "cleanupVerified": has_cleanup_guard,
+                "readbackText": "New Agent",
+            },
+        }
 
 
 class _FakeIDEBridgeClient:

@@ -7174,3 +7174,65 @@ When a new conversation starts in this repo:
     - next concrete action: add a Cursor-specific chat-composer contract for
       `aislash-editor-input` with readback-marker verification, then run an
       explicit opt-in real send test only after the probe reports ready
+- 2026-05-30 completed the first real background Cursor app-chat send path:
+  - implementation:
+    - the CDP composer probe now recognizes Cursor's real Lexical composer:
+      `DIV role=textbox contenteditable=true data-lexical-editor=true` with
+      class `aislash-editor-input`, but only when the Cursor workbench context
+      and `New Agent` chat surface are present
+    - Cursor composer readiness is recorded as
+      `productComposerContract=cursor-agent-chat-aislash-editor-input`
+    - CDP send now uses the Lexical-compatible edit primitive:
+      focus the in-page composer, range-select its contents, use
+      `document.execCommand('insertText')`, dispatch composed input/change
+      events, and wait for Lexical state to settle before readback
+    - the send path now finds Cursor's actual submit control through the
+      `codicon-arrow-up-two` icon and its `.anysphere-icon-button` ancestor,
+      scoped to the proved Cursor composer region
+    - submit verification is no longer assumed after click: the report requires
+      `postComposerText` to no longer contain the submitted message, and then
+      validates required/forbidden readback markers
+    - failure paths attempt cleanup through repeated range-select/delete loops,
+      and real diagnostics confirmed failed draft attempts did not persist
+      after the owned helper was stopped and relaunched
+  - validation:
+    - red tests first covered Cursor `aislash-editor-input` readiness,
+      Lexical `execCommand('insertText')`, async settle waits, cleanup loops,
+      Cursor arrow-up submit discovery, `.anysphere-icon-button` ancestor
+      targeting, and post-submit composer readback
+    - focused regression:
+      `python -m unittest tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_agent_app_transport_matrix tests.test_major_real_no_loss tests.test_agent_native_connector_probe tests.test_agent_app_bridge_fixture_smoke`:
+      `99 tests OK`
+    - real R62:
+      `logs/runtime/major-real-no-loss-r62-cursor-aislash-composer-contract/major-real-no-loss-report.json`
+      proved the Cursor composer contract in the signed-in/default-profile
+      Start Menu route with `composer_probe_decision=app_bridge_composer_ready`,
+      `safe_composer_found=true`, `bridge_send_attempts=0`,
+      `control_attempts=0`, and `window_input_attempts=0`
+    - real R63-R74 diagnostics:
+      showed direct `textContent` writes do not update Cursor's Lexical state,
+      `execCommand('insertText')` does, the long composed message moves the
+      submit icon below the previous y-bound, and the clickable ancestor is
+      `.anysphere-icon-button`
+    - real R75:
+      `logs/runtime/major-real-no-loss-r75-cursor-real-send-verified-submit/major-real-no-loss-report.json`
+      successfully sent a real Cursor app-chat message in the background via
+      the correct Start Menu/default-profile route:
+      `safe_run_ok=true`, `agent_app_goal_complete=true`,
+      `app_bridge_send_verified=true`,
+      `send_decision=app_bridge_send_accepted`, `control_attempts=0`,
+      `window_input_attempts=0`, `launch_attempts=1`, `stop_attempts=1`,
+      `cleanup_ok=true`, no residual `Cursor.exe --remote-debugging-port=19557`
+      process, `sendButtonContract=cursor-arrow-up-two-submit`, and
+      readback contained `OPENWUKONG_CURSOR_REAL_SEND_R75`
+  - current conclusion:
+    - Cursor is now genuinely verified for background project targeting,
+      composer detection, text insertion, submit, and readback-marker
+      acceptance without keyboard/mouse/window input
+    - the global objective is still incomplete because Codex app, Claude app,
+      browser, Word, WeChat, and file/task scenarios must each keep their own
+      current evidence and completion gates
+    - next concrete action: promote this Cursor-specific CDP path into the
+      transport matrix as a verified app-send capability, then continue the
+      same no-focus proof pattern for Codex/Claude app chat or browser/file
+      tasks
