@@ -596,7 +596,11 @@ class WeChatDesktopConnector(SessionConnector):
         )
 
     def route_ready(self, route_id: str, target: ConnectorTarget) -> bool:
-        return route_id in self.route_ids and self.supports_target(target)
+        return (
+            self._backend is not None
+            and route_id in self.route_ids
+            and self.supports_target(target)
+        )
 
     def supports_action(
         self,

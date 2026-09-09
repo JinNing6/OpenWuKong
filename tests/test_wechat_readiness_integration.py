@@ -49,6 +49,12 @@ class WeChatReadinessIntegrationTests(unittest.TestCase):
         self.assertEqual(result.error, "wechat_side_effect_confirmation_required")
         self.assertEqual(result.payload["control_attempts"], 0)
 
+    def test_connector_without_backend_is_not_route_ready(self):
+        connector = WeChatDesktopConnector()
+
+        self.assertFalse(connector.route_ready("app-native-bridge-required", TARGET))
+        self.assertFalse(connector.supports_action("wechat.chat.read", TARGET))
+
 
 if __name__ == "__main__":
     unittest.main()
