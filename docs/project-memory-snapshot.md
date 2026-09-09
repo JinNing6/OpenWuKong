@@ -388,3 +388,18 @@ R290 preserved the complete current working-tree version as remote baseline comm
   and 1 error from pre-existing areas and known expectation drift.
 - Remote implementation checkpoint is fdb1a2a; rollback baseline remains
   afe317c9148f894b8d19ddb8f1f2f2934e74068a.
+
+## R293 File Transfer Assistant real send
+
+- User-authorized real foreground test sent marker
+  OPENWUKONG_WECHAT_FILEHELPER_DIRECT_20260909_1105_01 to the personal
+  WeChat File Transfer Assistant.
+- Evidence is kept in the ignored runtime report
+  logs/runtime/wechat-file-helper-direct-test-20260909/report.json and the
+  bound post-send screenshot in the same run directory.
+- Result: status sent, exact target verified, Python WinRT Windows Media OCR
+  post-send readback verified, one send attempt, six keyboard-input attempts,
+  two clipboard writes, one clipboard restore, and one foreground restore.
+- Boundary: this is explicit foreground text-send evidence only. It does not
+  promote WeChat to background-native readiness and does not prove attachment,
+  Moments, receive-monitor, or arbitrary-contact coverage.

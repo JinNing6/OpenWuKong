@@ -16689,5 +16689,25 @@ When a new conversation starts in this repo:
   - rollback baseline remains afe317c
 - next action:
   - obtain an explicit user-selected contact and message only when a real
-    foreground send verification is authorized; then add attachment and
-    Moments panel locators, followed by readiness-matrix integration
+  foreground send verification is authorized; then add attachment and
+  Moments panel locators, followed by readiness-matrix integration
+
+## 2026-09-09 R293 - File Transfer Assistant real send verified
+
+- user-authorized action:
+  - sent one unique marker to the personal WeChat File Transfer Assistant
+  - marker: OPENWUKONG_WECHAT_FILEHELPER_DIRECT_20260909_1105_01
+- evidence:
+  - report: logs/runtime/wechat-file-helper-direct-test-20260909/report.json
+  - post-send screenshot:
+    logs/runtime/wechat-file-helper-direct-test-20260909/post_send_verify.png
+  - status sent, target verified, post-send OCR readback verified
+  - send attempts 1; keyboard input attempts 6; clipboard writes 2
+  - clipboard restore attempts 1; foreground restore attempts 1
+  - transport foreground-keyboard-clipboard; foreground takeover validation
+    passed; post-send screenshot was bound to the target HWND
+- boundary:
+  - this proves one explicit foreground text-send path to File Transfer
+    Assistant, not background-native WeChat control or all-contact/media/
+    Moments coverage
+  - no payment, red-packet, or transfer action was involved
