@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import re
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from openwukong.connectors.base import (
@@ -191,6 +193,23 @@ class WeChatActionExecutor:
         "wechat.chat.pin": "pin_conversation",
         "wechat.chat.mute": "mute_conversation",
         "wechat.chat.archive": "archive_conversation",
+        "wechat.chat.send_text": "send_text",
+        "wechat.chat.send_emoji": "send_emoji",
+        "wechat.media.send_image": "send_media",
+        "wechat.media.send_video": "send_media",
+        "wechat.media.send_voice": "send_media",
+        "wechat.file.send": "send_file",
+        "wechat.file.download": "download_file",
+        "wechat.file.open": "open_file",
+    }
+    _SIDE_EFFECT_ACTIONS = {
+        "wechat.chat.send_text",
+        "wechat.chat.send_emoji",
+        "wechat.media.send_image",
+        "wechat.media.send_video",
+        "wechat.media.send_voice",
+        "wechat.file.send",
+        "wechat.file.download",
     }
 
     def __init__(self, *, backend: object):
@@ -205,6 +224,15 @@ class WeChatActionExecutor:
         parameters = _intent_parameters(intent)
         if not _is_personal_target(target):
             return self._failure(action, "wechat_personal_target_required", target)
+        if action in self._SIDE_EFFECT_ACTIONS and not bool(
+            getattr(intent, "allow_submit", False)
+            or parameters.get("confirmed", False)
+        ):
+            return self._failure(
+                action,
+                "wechat_side_effect_confirmation_required",
+                target,
+            )
         method_name = self._ACTION_METHODS.get(action)
         if action == "wechat.chat.search" and str(
             parameters.get("target_type", "conversation")
@@ -215,6 +243,18 @@ class WeChatActionExecutor:
         method = getattr(self._backend, method_name, None)
         if not callable(method):
             return self._failure(action, "wechat_capability_missing", target)
+        if action in {
+            "wechat.media.send_image",
+            "wechat.media.send_video",
+            "wechat.media.send_voice",
+            "wechat.file.send",
+            "wechat.file.download",
+        }:
+            try:
+                parameters = dict(parameters)
+                parameters["attachment"] = _attachment_metadata(target, parameters)
+            except (FileNotFoundError, PermissionError, ValueError) as exc:
+                return self._failure(action, str(exc), target)
         try:
             result = method(target, parameters)
         except Exception as exc:
@@ -222,6 +262,8 @@ class WeChatActionExecutor:
         if not isinstance(result, dict):
             return self._failure(action, "wechat_backend_result_invalid", target)
         payload = dict(result)
+        if "attachment" in parameters:
+            payload.setdefault("attachment", dict(parameters["attachment"]))
         _set_default_counters(payload)
         payload.setdefault("target_pid", int(target.pid or 0))
         payload.setdefault("target_process_name", target.process_name)
@@ -265,6 +307,7 @@ class WeChatActionExecutor:
                 "window_input_attempts": 0,
                 "keyboard_input_attempts": 0,
                 "clipboard_write_attempts": 0,
+                "send_attempts": 0,
             },
             error=error,
         )
@@ -591,6 +634,19 @@ def _action_result_verified(action: str, payload: dict[str, Any]) -> bool:
         ))
     if action in {"wechat.chat.draft"}:
         return bool(payload.get("draft_readback_verified"))
+    if action in {
+        "wechat.chat.send_text",
+        "wechat.chat.send_emoji",
+        "wechat.media.send_image",
+        "wechat.media.send_video",
+        "wechat.media.send_voice",
+        "wechat.file.send",
+        "wechat.file.download",
+    }:
+        return bool(
+            payload.get("readback_verified")
+            and (payload.get("sent") or payload.get("uploaded") or payload.get("downloaded"))
+        )
     if action in {"wechat.chat.read", "wechat.contact.read", "wechat.group.read"}:
         return bool(payload.get("readback_verified") or payload.get("messages") is not None)
     if action == "wechat.chat.open":
@@ -623,6 +679,45 @@ def _action_key(
         or "surface"
     )
     return f"{int(target.pid or 0)}:{action}:{resource}"
+
+
+def _attachment_metadata(
+    target: ConnectorTarget,
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    path_text = str(parameters.get("path", "") or "").strip()
+    if not path_text:
+        raise ValueError("wechat_attachment_path_required")
+    path = Path(path_text).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError("wechat_attachment_not_found")
+    if not path.is_file():
+        raise ValueError("wechat_attachment_not_file")
+    root_text = str(
+        parameters.get("approved_root", "") or target.workspace_path or ""
+    ).strip()
+    if not root_text:
+        raise PermissionError("wechat_attachment_root_required")
+    root = Path(root_text).expanduser().resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise PermissionError("wechat_attachment_path_outside_root") from exc
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            digest.update(chunk)
+    return {
+        "path": str(path),
+        "name": path.name,
+        "size": size,
+        "sha256": digest.hexdigest(),
+    }
 
 
 class _Intent:
