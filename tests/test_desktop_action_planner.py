@@ -71,6 +71,10 @@ class _NativeConnector:
         )
 
 
+class _ForegroundConnector(_NativeConnector):
+    execution_mode = "foreground_desktop"
+
+
 class DesktopActionPlannerTests(unittest.TestCase):
     def test_native_connector_is_preferred_when_action_and_target_are_ready(self):
         plan = plan_desktop_action(
@@ -189,6 +193,27 @@ class DesktopActionPlannerTests(unittest.TestCase):
         self.assertEqual(plan.reason, "side_effect_confirmation_required")
         self.assertEqual(plan.selected_route, "")
         self.assertEqual(plan.control_attempts, 0)
+
+    def test_connector_declaring_foreground_mode_is_not_promoted_to_background(self):
+        plan = plan_desktop_action(
+            action=_wechat_action(),
+            profile=_profile(
+                {
+                    "wechat.chat.send_text": {
+                        "route": "uia-semantic",
+                        "confidence": 90,
+                        "read_only": False,
+                    }
+                }
+            ),
+            connectors=(_ForegroundConnector(),),
+            now=NOW,
+        )
+
+        self.assertFalse(plan.blocked)
+        self.assertEqual(plan.execution_mode, "foreground_desktop")
+        self.assertTrue(plan.foreground_required)
+        self.assertFalse(plan.background_safe)
 
 
 if __name__ == "__main__":

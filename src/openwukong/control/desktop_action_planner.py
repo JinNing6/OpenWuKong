@@ -79,13 +79,25 @@ def plan_desktop_action(
         connector_id = str(getattr(connector, "connector_id", "") or "").strip()
         if not route_id or not connector_id:
             continue
+        execution_mode = _connector_execution_mode(connector, action.action)
+        if execution_mode == "foreground_desktop":
+            return DesktopActionPlan(
+                action=action,
+                selected_route=route_id,
+                selected_connector_id=connector_id,
+                execution_mode=execution_mode,
+                foreground_required=True,
+                risks=_risks_for(action, execution_mode),
+            )
+        if execution_mode not in {"background_native", "background_semantic"}:
+            return _blocked(action, "connector_execution_mode_unverified", (route_id,))
         return DesktopActionPlan(
             action=action,
             selected_route=route_id,
             selected_connector_id=connector_id,
-            execution_mode="background_native",
-            background_safe=True,
-            risks=_risks_for(action, "background_native"),
+            execution_mode=execution_mode,
+            background_safe=execution_mode == "background_native" or execution_mode == "background_semantic",
+            risks=_risks_for(action, execution_mode),
         )
 
     grant = profile.grant(action.action)
@@ -170,6 +182,21 @@ def _connector_supports(
         return True
     except (AttributeError, TypeError, ValueError, OSError):
         return False
+
+
+def _connector_execution_mode(connector: object, action: str) -> str:
+    mode_for = getattr(connector, "execution_mode_for", None)
+    if callable(mode_for):
+        try:
+            value = mode_for(action)
+        except TypeError:
+            value = ""
+        if value:
+            return str(value).strip()
+    return str(
+        getattr(connector, "execution_mode", "background_native")
+        or "background_native"
+    ).strip()
 
 
 def _connector_target(action: DesktopAction) -> object:

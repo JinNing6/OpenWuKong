@@ -437,6 +437,8 @@ class WeChatForegroundBackend:
 class WeChatWindowsBackend:
     """Compose read/UIA operations with an explicitly supplied foreground fallback."""
 
+    transport_mode = "foreground_desktop"
+
     def __init__(
         self,
         *,
@@ -585,6 +587,13 @@ class WeChatDesktopConnector(SessionConnector):
 
     def match_score(self, target: ConnectorTarget) -> int:
         return 45 if self.supports_target(target) else -1
+
+    @property
+    def execution_mode(self) -> str:
+        return str(
+            getattr(self._backend, "transport_mode", "background_native")
+            or "background_native"
+        )
 
     def route_ready(self, route_id: str, target: ConnectorTarget) -> bool:
         return route_id in self.route_ids and self.supports_target(target)
