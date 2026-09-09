@@ -35,6 +35,12 @@ from openwukong.connectors.route_policy import (
 from openwukong.connectors.terminal import TerminalCommandConnector
 from openwukong.connectors.uia_ide import UIAIDEConnector
 from openwukong.connectors.wechat_native_bridge import WeChatNativeBridgeConnector
+from openwukong.connectors.wechat_desktop import (
+    WeChatActionExecutor,
+    WeChatDesktopConnector,
+    WeChatSurfaceObserver,
+    WeChatSurfaceSnapshot,
+)
 
 __all__ = [
     "ConnectorActionResult",
@@ -58,6 +64,10 @@ __all__ = [
     "TerminalCommandConnector",
     "UIAIDEConnector",
     "WeChatNativeBridgeConnector",
+    "WeChatActionExecutor",
+    "WeChatDesktopConnector",
+    "WeChatSurfaceObserver",
+    "WeChatSurfaceSnapshot",
     "build_control_route_matrix",
     "build_control_route_plan",
     "classify_app_family",

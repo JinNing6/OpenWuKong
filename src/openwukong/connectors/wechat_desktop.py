@@ -392,9 +392,16 @@ class WeChatDesktopConnector(SessionConnector):
 
     connector_id = "wechat-desktop"
     route_id = "wechat-desktop-capability"
+    route_ids = (
+        "wechat-desktop-capability",
+        "app-native-bridge-required",
+        "uia-semantic",
+        "uia-structural",
+        "uia-structural-observe",
+    )
     display_name = "Personal WeChat Desktop"
 
-    def __init__(self, *, backend: object):
+    def __init__(self, *, backend: object | None = None):
         self._executor = WeChatActionExecutor(backend=backend)
         self._backend = backend
 
@@ -405,7 +412,21 @@ class WeChatDesktopConnector(SessionConnector):
         return 45 if self.supports_target(target) else -1
 
     def route_ready(self, route_id: str, target: ConnectorTarget) -> bool:
-        return route_id == self.route_id and self.supports_target(target)
+        return route_id in self.route_ids and self.supports_target(target)
+
+    def supports_action(
+        self,
+        action: str,
+        target: ConnectorTarget | None = None,
+    ) -> bool:
+        if target is not None and not self.supports_target(target):
+            return False
+        normalized = _normalized_action(action)
+        method_name = WeChatActionExecutor._ACTION_METHODS.get(normalized)
+        return bool(
+            method_name
+            and callable(getattr(self._backend, method_name, None))
+        )
 
     def read_conversation(self, target: ConnectorTarget) -> str:
         result = self.execute_action(
