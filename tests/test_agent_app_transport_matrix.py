@@ -2,6 +2,7 @@ import unittest
 
 from openwukong.control.agent_app_transport_matrix import (
     build_agent_app_transport_matrix,
+    summarize_agent_app_transport_matrices,
 )
 
 
@@ -111,6 +112,116 @@ class AgentAppTransportMatrixTests(unittest.TestCase):
         self.assertTrue(
             _candidate(matrix, "uia-semantic-draft")["can_draft_without_focus"]
         )
+
+    def test_codex_app_server_ws_is_readiness_not_send_ready(self):
+        matrix = build_agent_app_transport_matrix(
+            {
+                "agent": "codex app",
+                "agent_id": "codex",
+                "project_name": "openwukong",
+                "task_name": "desktop-message",
+                "ready_endpoint_count": 1,
+                "endpoints": [
+                    {
+                        "endpoint_type": "codex_app_server_ws",
+                        "bridge_url": "ws://127.0.0.1:19731",
+                        "debugger_url": "ws://127.0.0.1:19731",
+                        "ready": True,
+                        "commands": ["initialize", "thread/list"],
+                        "metadata": {
+                            "thread_api_ready": True,
+                            "send_contract_ready": False,
+                            "observed_thread_count": 1,
+                            "probe_decision": "codex_app_server_ws_ready",
+                        },
+                    }
+                ],
+                "app_uia_probe": {
+                    "target_matched": True,
+                    "semantic_composer_count": 0,
+                    "submit_candidate_count": 0,
+                    "background_screenshot_focus_stable": True,
+                },
+            }
+        ).to_dict()
+
+        self.assertFalse(matrix["send_ready"])
+        self.assertFalse(matrix["draft_ready"])
+        candidate = _candidate(matrix, "codex-app-server-ws")
+        self.assertTrue(candidate["ready"])
+        self.assertEqual(candidate["capability_level"], "background-native")
+        self.assertEqual(candidate["operation_scope"], "thread-readiness")
+        self.assertFalse(candidate["can_send_without_focus"])
+        self.assertFalse(candidate["can_draft_without_focus"])
+        self.assertIn("turn_send_contract_required", candidate["verification_requirements"])
+        self.assertEqual(candidate["evidence"]["observed_thread_count"], 1)
+        self.assertEqual(
+            matrix["best_available_transport"]["transport_id"],
+            "codex-app-server-ws",
+        )
+        self.assertEqual(matrix["summary"]["background_send_ready"], 0)
+
+    def test_codex_app_server_ws_becomes_send_ready_after_strict_turn_readback(self):
+        matrix = build_agent_app_transport_matrix(
+            {
+                "agent": "codex app",
+                "agent_id": "codex",
+                "project_name": "openwukong",
+                "task_name": "desktop-message",
+                "ready_endpoint_count": 1,
+                "endpoints": [
+                    {
+                        "endpoint_type": "codex_app_server_ws",
+                        "bridge_url": "ws://127.0.0.1:19731",
+                        "debugger_url": "ws://127.0.0.1:19731",
+                        "ready": True,
+                        "commands": ["initialize", "thread/list", "turn/start"],
+                        "metadata": {
+                            "thread_api_ready": True,
+                            "send_contract_ready": False,
+                            "owned_loopback_app_server": True,
+                            "surface_kind": "owned_ephemeral_app_server",
+                            "observed_thread_count": 1,
+                            "probe_decision": "codex_app_server_ws_ready",
+                        },
+                    }
+                ],
+                "app_uia_probe": {
+                    "target_matched": True,
+                    "semantic_composer_count": 0,
+                    "submit_candidate_count": 0,
+                    "background_screenshot_focus_stable": True,
+                },
+            },
+            codex_app_server_turn_start_report={
+                "ok": True,
+                "decision": "codex_app_server_turn_start_verified",
+                "assistant_readback_text": "OPENWUKONG_ACCEPTANCE: PASS",
+                "required_markers": ["OPENWUKONG_ACCEPTANCE: PASS"],
+                "missing_required_markers": [],
+                "seen_forbidden_markers": [],
+                "turn_completed": True,
+                "turn_status": "completed",
+                "foreground_no_steal_verified": True,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "app_server_turn_start_attempts": 1,
+            },
+        ).to_dict()
+
+        self.assertTrue(matrix["send_ready"])
+        candidate = _candidate(matrix, "codex-app-server-ws")
+        self.assertTrue(candidate["ready"])
+        self.assertTrue(candidate["can_send_without_focus"])
+        self.assertEqual(candidate["operation_scope"], "send-readback")
+        self.assertEqual(candidate["blocking_reason"], "")
+        self.assertEqual(candidate["evidence"]["turn_start_decision"], "codex_app_server_turn_start_verified")
+        self.assertTrue(candidate["evidence"]["strict_assistant_readback_verified"])
+        self.assertEqual(
+            matrix["selected_send_transport"]["transport_id"],
+            "codex-app-server-ws",
+        )
+        self.assertEqual(matrix["summary"]["background_send_ready"], 1)
 
     def test_page_target_cdp_without_verified_target_context_is_not_send_ready(self):
         matrix = build_agent_app_transport_matrix(
@@ -235,6 +346,140 @@ class AgentAppTransportMatrixTests(unittest.TestCase):
         self.assertEqual(
             candidate["evidence"]["send_button_contract"],
             "cursor-arrow-up-two-submit",
+        )
+
+    def test_ready_computer_use_is_read_only_not_background_send_ready(self):
+        matrix = build_agent_app_transport_matrix(
+            {
+                "agent": "claude desktop",
+                "agent_id": "claude",
+                "project_name": "openwukong",
+                "task_name": "desktop-chat",
+                "endpoints": [],
+                "app_uia_probe": {
+                    "target_matched": True,
+                    "matched_window_count": 1,
+                    "semantic_composer_count": 0,
+                    "submit_candidate_count": 0,
+                    "background_screenshot_focus_stable": True,
+                },
+                "computer_use_probe": {
+                    "ready": True,
+                    "native_pipe_ready": True,
+                    "window_state_ready": True,
+                    "background_snapshot_ready": True,
+                    "input_actions_activate_window": True,
+                    "computer_use_attempts": 0,
+                    "window_input_attempts": 0,
+                    "control_attempts": 0,
+                    "observed_window_count": 1,
+                    "screenshot_count": 1,
+                    "accessibility_tree_available": True,
+                },
+            }
+        ).to_dict()
+
+        self.assertFalse(matrix["send_ready"])
+        self.assertFalse(matrix["draft_ready"])
+        self.assertEqual(matrix["selected_send_transport"], {})
+        candidate = _candidate(matrix, "computer-use-window2")
+        self.assertTrue(candidate["ready"])
+        self.assertEqual(candidate["capability_level"], "background-read-only")
+        self.assertEqual(candidate["operation_scope"], "inspect-snapshot-only")
+        self.assertFalse(candidate["can_send_without_focus"])
+        self.assertFalse(candidate["can_draft_without_focus"])
+        self.assertEqual(
+            candidate["blocking_reason"],
+            "computer_use_input_requires_foreground_activation",
+        )
+        self.assertIn("input_actions_activate_window", candidate["risk_flags"])
+        self.assertEqual(candidate["evidence"]["computer_use_attempts"], 0)
+        self.assertEqual(candidate["evidence"]["window_input_attempts"], 0)
+        self.assertEqual(
+            matrix["best_available_transport"]["transport_id"],
+            "computer-use-window2",
+        )
+        self.assertEqual(matrix["summary"]["background_read_only"], 1)
+        self.assertEqual(matrix["summary"]["computer_use_read_only"], 1)
+        self.assertEqual(matrix["summary"]["background_send_ready"], 0)
+
+    def test_computer_use_without_native_pipe_is_blocked_with_explicit_reason(self):
+        matrix = build_agent_app_transport_matrix(
+            {
+                "agent": "codex app",
+                "agent_id": "codex",
+                "project_name": "openwukong",
+                "task_name": "desktop-chat",
+                "endpoints": [],
+                "app_uia_probe": {
+                    "target_matched": True,
+                    "matched_window_count": 1,
+                    "semantic_composer_count": 0,
+                    "submit_candidate_count": 0,
+                    "background_screenshot_focus_stable": True,
+                },
+                "computer_use_probe": {
+                    "ready": False,
+                    "native_pipe_ready": False,
+                    "decision": "native_pipe_unavailable",
+                    "error": "Computer Use native pipe path is unavailable",
+                    "computer_use_attempts": 0,
+                    "window_input_attempts": 0,
+                    "control_attempts": 0,
+                },
+            }
+        ).to_dict()
+
+        candidate = _candidate(matrix, "computer-use-window2")
+        self.assertFalse(candidate["ready"])
+        self.assertEqual(candidate["capability_level"], "blocked")
+        self.assertEqual(candidate["blocking_reason"], "native_pipe_unavailable")
+        self.assertIn("native_pipe_unavailable", candidate["risk_flags"])
+        self.assertEqual(candidate["evidence"]["error"], "Computer Use native pipe path is unavailable")
+        self.assertEqual(matrix["summary"]["computer_use_read_only"], 0)
+
+    def test_transport_matrix_summary_counts_computer_use_read_only_cases(self):
+        ready_matrix = build_agent_app_transport_matrix(
+            {
+                "agent": "claude desktop",
+                "agent_id": "claude",
+                "app_uia_probe": {"target_matched": True, "matched_window_count": 1},
+                "computer_use_probe": {
+                    "ready": True,
+                    "native_pipe_ready": True,
+                    "window_state_ready": True,
+                    "input_actions_activate_window": True,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                },
+            }
+        ).to_dict()
+        blocked_matrix = build_agent_app_transport_matrix(
+            {
+                "agent": "codex app",
+                "agent_id": "codex",
+                "app_uia_probe": {"target_matched": True, "matched_window_count": 1},
+                "computer_use_probe": {
+                    "ready": False,
+                    "native_pipe_ready": False,
+                    "decision": "native_pipe_unavailable",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                },
+            }
+        ).to_dict()
+
+        summary = summarize_agent_app_transport_matrices(
+            (
+                {"transport_matrix": ready_matrix},
+                {"transport_matrix": blocked_matrix},
+            )
+        )
+
+        self.assertEqual(summary["computer_use_read_only_cases"], 1)
+        self.assertEqual(
+            summary["selected_send_transport_counts"],
+            {"none": 2},
         )
 
 

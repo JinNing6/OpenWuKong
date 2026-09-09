@@ -197,13 +197,19 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
             self.assertFalse(browser_execution["isolation"]["window_input_allowed"])
 
             codex_dry_run = json.loads(codex_dry_run_path.read_text(encoding="utf-8"))
-            self.assertEqual(codex_dry_run["route_id"], "ide-extension-connector")
-            self.assertTrue(codex_dry_run["ownership"]["owned"])
-            self.assertEqual(codex_dry_run["ownership"]["connector_id"], "ide-extension")
-            self.assertEqual(codex_dry_run["dispatch_report"]["decision"], "dispatch_connector")
+            self.assertEqual(codex_dry_run["route_id"], "app-native-bridge-required")
+            self.assertFalse(codex_dry_run["ownership"]["owned"])
+            self.assertEqual(codex_dry_run["ownership"]["connector_id"], "missing_connector")
+            self.assertEqual(codex_dry_run["connector_id"], "")
+            self.assertEqual(codex_dry_run["dispatch_report"]["decision"], "connector_required")
             self.assertEqual(
-                codex_dry_run["dispatch_report"]["selected_connector_id"],
-                "ide-extension",
+                codex_dry_run["dispatch_report"]["reason"],
+                "connector_installed_session_not_ready:app-native-bridge-required",
+            )
+            self.assertEqual(codex_dry_run["dispatch_report"]["selected_connector_id"], "")
+            self.assertEqual(
+                codex_dry_run["dispatch_report"]["candidate_connector_ids"],
+                ["agent-native-bridge"],
             )
             self.assertEqual(codex_dry_run["dispatch_report"]["control_attempts"], 0)
             self.assertFalse(codex_dry_run["isolation"]["real_user_profile_allowed"])
@@ -211,56 +217,7 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
             codex_execution_path_text = cases["codex_project_submit_task_draft"].get(
                 "owned_session_execution_artifact_path"
             )
-            self.assertTrue(codex_execution_path_text)
-            codex_execution_path = Path(codex_execution_path_text).resolve()
-            self.assertTrue(str(codex_execution_path).startswith(str(output_root)))
-            self.assertTrue(codex_execution_path.is_file())
-            codex_execution = json.loads(codex_execution_path.read_text(encoding="utf-8"))
-            self.assertEqual(
-                codex_execution["mode"],
-                "primary-scenario-owned-session-execution",
-            )
-            self.assertEqual(
-                codex_execution["safety_mode"],
-                "isolated_owned_session_local_mock",
-            )
-            self.assertEqual(
-                codex_execution["execution_id"],
-                "codex-owned-session-local-mock-bridge",
-            )
-            self.assertFalse(codex_execution["desktop_control_allowed"])
-            self.assertEqual(codex_execution["desktop_control_attempts"], 0)
-            self.assertTrue(codex_execution["local_connector_call_allowed"])
-            self.assertEqual(codex_execution["local_connector_call_attempts"], 1)
-            self.assertEqual(codex_execution["execute_report"]["decision"], "executed")
-            self.assertTrue(codex_execution["execute_report"]["ok"])
-            self.assertTrue(codex_execution["execute_report"]["ownership"]["owned"])
-            self.assertEqual(
-                codex_execution["execute_report"]["selected_route"],
-                "ide-extension-connector",
-            )
-            self.assertEqual(
-                codex_execution["execute_report"]["selected_connector_id"],
-                "ide-extension",
-            )
-            self.assertEqual(
-                codex_execution["execute_report"]["action_report"]["payload"]["transport"],
-                "vscode-extension-bridge",
-            )
-            self.assertEqual(
-                codex_execution["mock_bridge"]["request_count"],
-                1,
-            )
-            self.assertEqual(
-                codex_execution["mock_bridge"]["requests"][0]["path"],
-                "/v1/ide/send",
-            )
-            self.assertIn(
-                "L1",
-                codex_execution["mock_bridge"]["requests"][0]["payload"]["message"],
-            )
-            self.assertFalse(codex_execution["isolation"]["window_input_allowed"])
-            self.assertFalse(codex_execution["isolation"]["live_app_launch_allowed"])
+            self.assertEqual(codex_execution_path_text, "")
 
             self.assertIn(
                 "send_message",
@@ -512,6 +469,116 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
                 "",
             )
 
+    def test_owned_browser_helper_defaults_to_dynamic_debug_port(self):
+        fixture = load_simulation_fixture(
+            Path("tests/fixtures/evaluation/l1_primary_user_scenarios.json")
+        )
+
+        class _DynamicPortLauncher:
+            def __init__(self):
+                self.calls: list[dict] = []
+
+            def launch(self, argv: tuple[str, ...], cwd: str | None = None) -> int:
+                self.calls.append({"argv": tuple(argv), "cwd": cwd})
+                user_data_arg = next(
+                    value for value in argv if value.startswith("--user-data-dir=")
+                )
+                profile_path = Path(user_data_arg.split("=", 1)[1])
+                profile_path.mkdir(parents=True, exist_ok=True)
+                (profile_path / "DevToolsActivePort").write_text(
+                    "19632\n/devtools/browser/openwukong-primary\n",
+                    encoding="utf-8",
+                )
+                return 525252
+
+        with tempfile.TemporaryDirectory() as tmp:
+            launcher = _DynamicPortLauncher()
+            terminator = _FakeReadinessTerminator()
+            readiness_calls: list[str] = []
+            action_calls: list[dict] = []
+
+            def _fake_readiness_probe(debugger_url: str) -> dict:
+                readiness_calls.append(debugger_url)
+                return {
+                    "mode": "browser-helper-readiness-probe",
+                    "ok": True,
+                    "debugger_url": debugger_url,
+                    "target_count": 1,
+                    "targets": [
+                        {
+                            "type": "page",
+                            "title": "OpenWukong Primary Smoke",
+                            "url": "about:blank#openwukong-primary-smoke",
+                        }
+                    ],
+                    "error": "",
+                }
+
+            def _fake_browser_action_runner(**kwargs) -> dict:
+                action_calls.append(dict(kwargs))
+                return {
+                    "mode": "browser-devtools-action",
+                    "safety_mode": "gated_browser_devtools_action",
+                    "ok": True,
+                    "health_ok": True,
+                    "control_allowed": True,
+                    "control_attempts": 0,
+                    "action": kwargs["action"],
+                    "debugger_url": kwargs["debugger_url"],
+                    "target": {
+                        "type": "page",
+                        "title": "OpenWukong Primary Smoke",
+                        "url": kwargs["resource_url"],
+                    },
+                    "page_identity": {
+                        "title": "OpenWukong Primary Smoke",
+                        "href": kwargs["resource_url"],
+                        "readyState": "complete",
+                    },
+                    "action_result": {
+                        "title": "OpenWukong Primary Smoke",
+                        "href": kwargs["resource_url"],
+                        "readyState": "complete",
+                    },
+                    "post_action_identity": {
+                        "title": "OpenWukong Primary Smoke",
+                        "href": kwargs["resource_url"],
+                        "readyState": "complete",
+                    },
+                    "error": "",
+                }
+
+            report = run_primary_scenario_smoke(
+                fixture,
+                output_root=tmp,
+                allow_owned_browser_helper_launch=True,
+                owned_browser_helper_launcher=launcher,
+                owned_browser_helper_terminator=terminator,
+                owned_browser_helper_readiness_probe=_fake_readiness_probe,
+                owned_browser_helper_action_runner=_fake_browser_action_runner,
+                owned_browser_executable="chrome.exe",
+                owned_browser_url="about:blank#openwukong-primary-smoke",
+            )
+            cases = {case["case_id"]: case for case in report.to_dict()["cases"]}
+            helper_path = Path(
+                cases["browser_research_collect_sources"]["owned_browser_helper_artifact_path"]
+            )
+            helper = json.loads(helper_path.read_text(encoding="utf-8"))
+
+        argv = launcher.calls[0]["argv"]
+        self.assertIn("--remote-debugging-port=0", argv)
+        self.assertEqual(readiness_calls, ["http://127.0.0.1:19632"])
+        self.assertEqual(action_calls[0]["debugger_url"], "http://127.0.0.1:19632")
+        self.assertEqual(
+            helper["readiness_execution"]["results"][0]["readiness_url"],
+            "http://127.0.0.1:19632",
+        )
+        self.assertEqual(
+            helper["readiness_plan"]["actions"][0]["readiness_url"],
+            "",
+        )
+        self.assertEqual(terminator.tree_pids, [525252])
+
     def test_owned_browser_helper_creates_expected_target_after_new_tab_launch(self):
         execution_data = {
             "mode": "session-readiness-execution",
@@ -636,7 +703,7 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
         self.assertEqual(data["real_filesystem_scan_attempts"], 0)
         self.assertEqual(data["artifact_count"], 5)
         self.assertEqual(data["owned_session_dry_run_artifact_count"], 2)
-        self.assertEqual(data["owned_session_execution_artifact_count"], 2)
+        self.assertEqual(data["owned_session_execution_artifact_count"], 1)
         self.assertEqual(data["owned_browser_helper_artifact_count"], 0)
         self.assertNotIn("cases", data)
         scenarios = {item["scenario_id"]: item for item in data["scenarios"]}
@@ -672,9 +739,9 @@ class PrimaryScenarioSmokeTests(unittest.TestCase):
         self.assertTrue(scenarios["codex.project.submit_task_draft"]["owned_session_dry_run_written"])
         self.assertEqual(
             scenarios["codex.project.submit_task_draft"]["owned_session_execution_id"],
-            "codex-owned-session-local-mock-bridge",
+            "",
         )
-        self.assertTrue(
+        self.assertFalse(
             scenarios["codex.project.submit_task_draft"]["owned_session_execution_written"]
         )
         self.assertEqual(

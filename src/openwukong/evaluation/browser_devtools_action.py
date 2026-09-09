@@ -111,6 +111,7 @@ def run_browser_devtools_action(
         window_title=window_title,
         resource_url=resource_url,
         devtools_client=active_client,
+        identity_timeout_sec=5.0,
     )
     if not health.ok or health.target is None:
         return BrowserDevToolsActionReport(

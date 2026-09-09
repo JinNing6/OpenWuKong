@@ -52,6 +52,28 @@ class _FakeSessionDiscovery:
         )
 
 
+class _FakeExecutionReport:
+    ok = True
+
+    def to_dict(self):
+        return {
+            "mode": "control-fabric-execution",
+            "ok": True,
+            "decision": "executed",
+            "selected_route": "uia-semantic",
+            "control_attempts": 1,
+        }
+
+
+class _RecordingFabric:
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, target, intent, **kwargs):
+        self.calls.append((target, intent, dict(kwargs)))
+        return _FakeExecutionReport()
+
+
 class ControlFabricExecuteCliTests(unittest.TestCase):
     def test_cli_refuses_execution_without_explicit_allow_control(self):
         runner = _FakeBrowserActionRunner()
@@ -219,6 +241,56 @@ class ControlFabricExecuteCliTests(unittest.TestCase):
             data["dispatch_report"]["session_discovery"]["discovered_fields"]["debugger_url"],
             "http://127.0.0.1:9222",
         )
+
+    def test_cli_threads_desktop_uia_parameters_and_foreground_approval(self):
+        fabric = _RecordingFabric()
+        approval = {
+            "status": "approved",
+            "request_id": "foreground-approval-1",
+            "action": "click",
+            "process_name": "notepad.exe",
+            "window_title": "Untitled - Notepad",
+            "selected_route": "uia-semantic",
+            "selected_transport": "windows-uia",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            approval_path = Path(tmp) / "approval.json"
+            approval_path.write_text(
+                json.dumps({"foreground_takeover_request": approval}),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "--pid",
+                        "4242",
+                        "--process-name",
+                        "notepad.exe",
+                        "--window-title",
+                        "Untitled - Notepad",
+                        "--action",
+                        "click",
+                        "--parameters-json",
+                        '{"automation_id":"editor","button":"left"}',
+                        "--allow-control",
+                        "--allow-foreground-interaction",
+                        "--foreground-approval-file",
+                        str(approval_path),
+                        "--json",
+                    ],
+                    fabric=fabric,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(json.loads(stdout.getvalue())["ok"])
+        self.assertEqual(len(fabric.calls), 1)
+        target, intent, kwargs = fabric.calls[0]
+        self.assertEqual(target.pid, 4242)
+        self.assertEqual(intent.parameters["automation_id"], "editor")
+        self.assertEqual(intent.parameters["button"], "left")
+        self.assertTrue(intent.allow_foreground_interaction)
+        self.assertEqual(kwargs["foreground_takeover_approval"], approval)
 
 
 if __name__ == "__main__":

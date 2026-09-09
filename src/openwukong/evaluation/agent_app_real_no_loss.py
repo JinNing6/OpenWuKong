@@ -9,9 +9,11 @@ only behind explicit opt-in and only after the dry-run bridge contract is ready.
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import json
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -21,6 +23,12 @@ from openwukong.control.agent_app_bridge import (
     AgentAppBridgeNativeAdapter,
     AgentAppBridgeDryRunAdapter,
     build_agent_app_bridge_request,
+)
+from openwukong.control.codex_app_server_bridge import (
+    CodexAppServerThreadStartAdapter,
+    CodexAppServerTurnDryRunAdapter,
+    CodexAppServerTurnStartAdapter,
+    build_codex_app_server_turn_request,
 )
 from openwukong.control.agent_app_uia_action import (
     AgentAppUiaSemanticActionDryRunAdapter,
@@ -37,6 +45,10 @@ from openwukong.control.agent_app_transport_matrix import (
 from openwukong.control.app_resolution import WindowsAppResolver
 from openwukong.evaluation.agent_native_connector_probe import (
     run_agent_native_connector_probe,
+)
+from openwukong.evaluation.codex_app_server_probe import CodexAppServerWsClient
+from openwukong.evaluation.cursor_transcript_readback import (
+    run_cursor_transcript_readback,
 )
 
 
@@ -58,6 +70,10 @@ class AgentAppRealNoLossCase:
     uia_semantic_action_send_report: dict = dataclasses.field(default_factory=dict)
     uia_semantic_draft_dry_run: dict = dataclasses.field(default_factory=dict)
     uia_semantic_draft_report: dict = dataclasses.field(default_factory=dict)
+    codex_app_server_turn_dry_run: dict = dataclasses.field(default_factory=dict)
+    codex_app_server_thread_start_report: dict = dataclasses.field(default_factory=dict)
+    codex_app_server_turn_after_thread_start_dry_run: dict = dataclasses.field(default_factory=dict)
+    codex_app_server_turn_start_report: dict = dataclasses.field(default_factory=dict)
     app_bridge_dry_run: dict = dataclasses.field(default_factory=dict)
     app_bridge_composer_probe: dict = dataclasses.field(default_factory=dict)
     app_bridge_send_report: dict = dataclasses.field(default_factory=dict)
@@ -85,6 +101,9 @@ class AgentAppRealNoLossCase:
         ) + _counter(
             self.uia_semantic_action_send_report,
             "control_attempts",
+        ) + _counter(
+            self.codex_app_server_turn_start_report,
+            "control_attempts",
         )
 
     @property
@@ -97,6 +116,9 @@ class AgentAppRealNoLossCase:
             "window_input_attempts",
         ) + _counter(
             self.uia_semantic_action_send_report,
+            "window_input_attempts",
+        ) + _counter(
+            self.codex_app_server_turn_start_report,
             "window_input_attempts",
         )
 
@@ -171,6 +193,69 @@ class AgentAppRealNoLossCase:
         ) == "app_bridge_send_accepted"
 
     @property
+    def codex_app_server_turn_contract_ready(self) -> bool:
+        return bool(
+            self.codex_app_server_turn_dry_run.get("ok", False)
+            or self.codex_app_server_turn_after_thread_start_dry_run.get("ok", False)
+        )
+
+    @property
+    def codex_app_server_thread_start_required(self) -> bool:
+        return bool(self.codex_app_server_turn_dry_run.get("thread_start_required", False))
+
+    @property
+    def codex_app_server_thread_start_ready(self) -> bool:
+        return bool(self.codex_app_server_turn_dry_run.get("thread_start_ready", False))
+
+    @property
+    def codex_app_server_turn_start_ready(self) -> bool:
+        return bool(
+            self.codex_app_server_turn_dry_run.get("turn_start_ready", False)
+            or self.codex_app_server_turn_after_thread_start_dry_run.get(
+                "turn_start_ready",
+                False,
+            )
+        )
+
+    @property
+    def codex_app_server_thread_start_verified(self) -> bool:
+        return (
+            str(self.codex_app_server_thread_start_report.get("decision", "") or "")
+            == "codex_app_server_thread_start_verified"
+        )
+
+    @property
+    def codex_app_server_turn_start_verified(self) -> bool:
+        return (
+            str(self.codex_app_server_turn_start_report.get("decision", "") or "")
+            == "codex_app_server_turn_start_verified"
+        )
+
+    @property
+    def codex_app_server_thread_start_attempts(self) -> int:
+        return _counter(
+            self.codex_app_server_thread_start_report,
+            "app_server_thread_start_attempts",
+        )
+
+    @property
+    def codex_app_server_turn_start_attempts(self) -> int:
+        return _counter(
+            self.codex_app_server_turn_start_report,
+            "app_server_turn_start_attempts",
+        )
+
+    @property
+    def codex_app_server_native_call_attempts(self) -> int:
+        return _counter(
+            self.codex_app_server_thread_start_report,
+            "native_call_attempts",
+        ) + _counter(
+            self.codex_app_server_turn_start_report,
+            "native_call_attempts",
+        )
+
+    @property
     def background_screenshot_count(self) -> int:
         return _counter(_app_uia_probe(self.probe), "background_screenshot_count")
 
@@ -207,6 +292,25 @@ class AgentAppRealNoLossCase:
             "uia_semantic_draft_dry_run": dict(self.uia_semantic_draft_dry_run),
             "uia_semantic_draft_verified": self.uia_semantic_draft_verified,
             "uia_semantic_draft_report": dict(self.uia_semantic_draft_report),
+            "codex_app_server_turn_contract_ready": self.codex_app_server_turn_contract_ready,
+            "codex_app_server_thread_start_required": self.codex_app_server_thread_start_required,
+            "codex_app_server_thread_start_ready": self.codex_app_server_thread_start_ready,
+            "codex_app_server_turn_start_ready": self.codex_app_server_turn_start_ready,
+            "codex_app_server_thread_start_verified": self.codex_app_server_thread_start_verified,
+            "codex_app_server_turn_start_verified": self.codex_app_server_turn_start_verified,
+            "codex_app_server_thread_start_attempts": self.codex_app_server_thread_start_attempts,
+            "codex_app_server_turn_start_attempts": self.codex_app_server_turn_start_attempts,
+            "codex_app_server_native_call_attempts": self.codex_app_server_native_call_attempts,
+            "codex_app_server_turn_dry_run": dict(self.codex_app_server_turn_dry_run),
+            "codex_app_server_thread_start_report": dict(
+                self.codex_app_server_thread_start_report
+            ),
+            "codex_app_server_turn_after_thread_start_dry_run": dict(
+                self.codex_app_server_turn_after_thread_start_dry_run
+            ),
+            "codex_app_server_turn_start_report": dict(
+                self.codex_app_server_turn_start_report
+            ),
             "app_bridge_send_verified": self.app_bridge_send_verified,
             "app_bridge_dry_run": dict(self.app_bridge_dry_run),
             "app_bridge_composer_probe": dict(self.app_bridge_composer_probe),
@@ -310,8 +414,16 @@ class AgentAppRealNoLossReport:
         return sum(1 for case in self.cases if case.app_bridge_send_verified)
 
     @property
+    def codex_app_server_turn_start_verified_cases(self) -> int:
+        return sum(1 for case in self.cases if case.codex_app_server_turn_start_verified)
+
+    @property
     def app_side_send_verified_cases(self) -> int:
-        return self.app_bridge_send_verified_cases + self.uia_semantic_action_send_verified_cases
+        return (
+            self.app_bridge_send_verified_cases
+            + self.uia_semantic_action_send_verified_cases
+            + self.codex_app_server_turn_start_verified_cases
+        )
 
     @property
     def background_send_ready_cases(self) -> int:
@@ -375,6 +487,9 @@ class AgentAppRealNoLossReport:
             "uia_semantic_action_send_verified_cases": self.uia_semantic_action_send_verified_cases,
             "uia_semantic_draft_verified_cases": self.uia_semantic_draft_verified_cases,
             "app_bridge_send_verified_cases": self.app_bridge_send_verified_cases,
+            "codex_app_server_turn_start_verified_cases": (
+                self.codex_app_server_turn_start_verified_cases
+            ),
             "app_side_send_verified_cases": self.app_side_send_verified_cases,
             "gated_cases": self.gated_cases,
             "real_verified_cases": self.real_verified_cases,
@@ -401,6 +516,7 @@ def run_agent_app_real_no_loss(
     ide_bridge_probe: object | None = None,
     agent_native_bridge_urls: Iterable[str] = (),
     agent_native_bridge_registry_paths: Iterable[str | Path] = (),
+    codex_app_server_ws_urls: Iterable[str] = (),
     workspace_path: str = "",
     window_capture_provider: object | None = None,
     max_windows: int = 80,
@@ -416,12 +532,22 @@ def run_agent_app_real_no_loss(
     uia_draft_writer: object | None = None,
     uia_draft_message: str = "OPENWUKONG_UIA_DRAFT_REAL_NO_LOSS",
     cleanup_uia_draft: bool = True,
-    uia_draft_restore_value: str = "",
+    uia_draft_restore_value: str | None = None,
     allow_app_bridge_send: bool = False,
     app_bridge_sender: object | None = None,
     bridge_message: str = "OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
     required_markers: tuple[str, ...] = (),
     forbidden_markers: tuple[str, ...] = (),
+    allow_codex_app_server_thread_start: bool = False,
+    allow_codex_app_server_turn_start: bool = False,
+    codex_app_server_client: object | None = None,
+    codex_app_server_foreground_hwnd_provider: object | None = None,
+    codex_app_server_system_dialog_observer: object | None = None,
+    codex_app_server_thread_start_timeout: float = 5.0,
+    codex_app_server_turn_start_timeout: float = 30.0,
+    cursor_transcript_readback_runner: object | None = None,
+    cursor_user_data_root: str | Path = "",
+    enable_cursor_transcript_readback: bool = False,
 ) -> AgentAppRealNoLossReport:
     started = time.perf_counter()
     root = _resolve_output_root(output_root)
@@ -453,6 +579,7 @@ def run_agent_app_real_no_loss(
             agent_native_bridge_registry_paths=tuple(
                 agent_native_bridge_registry_paths or ()
             ),
+            codex_app_server_ws_urls=tuple(codex_app_server_ws_urls or ()),
             workspace_path=workspace_path,
             screenshot_dir=str(agent_screenshot_dir) if agent_screenshot_dir else "",
             window_capture_provider=window_capture_provider,
@@ -485,6 +612,25 @@ def run_agent_app_real_no_loss(
                     bridge_message=bridge_message,
                     required_markers=tuple(required_markers or ()),
                     forbidden_markers=tuple(forbidden_markers or ()),
+                    allow_codex_app_server_thread_start=allow_codex_app_server_thread_start,
+                    allow_codex_app_server_turn_start=allow_codex_app_server_turn_start,
+                    codex_app_server_client=codex_app_server_client,
+                    codex_app_server_foreground_hwnd_provider=(
+                        codex_app_server_foreground_hwnd_provider
+                    ),
+                    codex_app_server_system_dialog_observer=(
+                        codex_app_server_system_dialog_observer
+                    ),
+                    codex_app_server_thread_start_timeout=(
+                        codex_app_server_thread_start_timeout
+                    ),
+                    codex_app_server_turn_start_timeout=(
+                        codex_app_server_turn_start_timeout
+                    ),
+                    workspace_path=workspace_path,
+                    cursor_transcript_readback_runner=cursor_transcript_readback_runner,
+                    cursor_user_data_root=cursor_user_data_root,
+                    enable_cursor_transcript_readback=enable_cursor_transcript_readback,
                 ),
             )
         )
@@ -570,6 +716,12 @@ def main(
         help="Read-only JSON registry file with agent app native bridge URLs.",
     )
     parser.add_argument(
+        "--codex-app-server-ws-url",
+        action="append",
+        default=[],
+        help="Explicit local Codex app-server WebSocket URL to probe read-only.",
+    )
+    parser.add_argument(
         "--workspace-path",
         default="",
         help="Optional workspace path included in IDE bridge capability probes.",
@@ -618,13 +770,35 @@ def main(
     )
     parser.add_argument(
         "--uia-draft-restore-value",
-        default="",
+        default=None,
         help="Value restored after the UIA draft write when cleanup is enabled.",
     )
     parser.add_argument(
         "--allow-app-bridge-send",
         action="store_true",
         help="Allow a native app bridge send when the dry-run contract is ready.",
+    )
+    parser.add_argument(
+        "--allow-codex-app-server-thread-start",
+        action="store_true",
+        help="Allow Codex app-server thread/start only after the staged dry-run contract is ready.",
+    )
+    parser.add_argument(
+        "--codex-app-server-thread-start-timeout",
+        type=float,
+        default=5.0,
+        help="Per-request timeout for optional Codex app-server thread/start.",
+    )
+    parser.add_argument(
+        "--allow-codex-app-server-turn-start",
+        action="store_true",
+        help="Allow Codex app-server turn/start only after a verified turn dry-run contract is ready.",
+    )
+    parser.add_argument(
+        "--codex-app-server-turn-start-timeout",
+        type=float,
+        default=30.0,
+        help="Per-turn timeout for optional Codex app-server turn/start readback.",
     )
     parser.add_argument(
         "--bridge-message",
@@ -642,6 +816,16 @@ def main(
         action="append",
         default=[],
         help="Forbidden marker that fails app bridge readback. Repeat for multiple markers.",
+    )
+    parser.add_argument(
+        "--enable-cursor-transcript-readback",
+        action="store_true",
+        help="Use read-only Cursor local transcript storage to verify pending app bridge sends.",
+    )
+    parser.add_argument(
+        "--cursor-user-data-root",
+        default="",
+        help="Optional Cursor User data root for transcript readback.",
     )
     args = parser.parse_args(argv)
 
@@ -661,6 +845,7 @@ def main(
         ide_bridge_probe=ide_bridge_probe,
         agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),
         agent_native_bridge_registry_paths=tuple(args.agent_native_bridge_registry or ()),
+        codex_app_server_ws_urls=tuple(args.codex_app_server_ws_url or ()),
         workspace_path=args.workspace_path,
         window_capture_provider=window_capture_provider,
         max_windows=args.max_windows,
@@ -686,6 +871,37 @@ def main(
         bridge_message=args.bridge_message,
         required_markers=tuple(args.acceptance_marker or ()),
         forbidden_markers=tuple(args.forbid_marker or ()),
+        allow_codex_app_server_thread_start=(
+            args.allow_codex_app_server_thread_start
+        ),
+        allow_codex_app_server_turn_start=args.allow_codex_app_server_turn_start,
+        codex_app_server_client=(
+            CodexAppServerWsClient(
+                request_timeout=max(
+                    args.codex_app_server_thread_start_timeout,
+                    args.codex_app_server_turn_start_timeout,
+                )
+            )
+            if (
+                args.allow_codex_app_server_thread_start
+                or args.allow_codex_app_server_turn_start
+            )
+            else None
+        ),
+        codex_app_server_foreground_hwnd_provider=(
+            _default_foreground_hwnd_provider
+            if (
+                args.allow_codex_app_server_thread_start
+                or args.allow_codex_app_server_turn_start
+            )
+            else None
+        ),
+        codex_app_server_thread_start_timeout=(
+            args.codex_app_server_thread_start_timeout
+        ),
+        codex_app_server_turn_start_timeout=args.codex_app_server_turn_start_timeout,
+        enable_cursor_transcript_readback=args.enable_cursor_transcript_readback,
+        cursor_user_data_root=args.cursor_user_data_root,
     )
     payload = report.to_dict()
     if args.output:
@@ -718,12 +934,23 @@ def _case_from_probe(
     uia_draft_writer: object | None = None,
     uia_draft_message: str = "",
     cleanup_uia_draft: bool = True,
-    uia_draft_restore_value: str = "",
+    uia_draft_restore_value: str | None = None,
     allow_app_bridge_send: bool = False,
     app_bridge_sender: object | None = None,
     bridge_message: str = "",
     required_markers: tuple[str, ...] = (),
     forbidden_markers: tuple[str, ...] = (),
+    allow_codex_app_server_thread_start: bool = False,
+    allow_codex_app_server_turn_start: bool = False,
+    codex_app_server_client: object | None = None,
+    codex_app_server_foreground_hwnd_provider: object | None = None,
+    codex_app_server_system_dialog_observer: object | None = None,
+    codex_app_server_thread_start_timeout: float = 5.0,
+    codex_app_server_turn_start_timeout: float = 30.0,
+    workspace_path: str | Path = "",
+    cursor_transcript_readback_runner: object | None = None,
+    cursor_user_data_root: str | Path = "",
+    enable_cursor_transcript_readback: bool = False,
 ) -> AgentAppRealNoLossCase:
     decision = str(probe.get("decision", "") or "")
     native_ready = int(probe.get("ready_endpoint_count", 0) or 0) > 0
@@ -742,11 +969,16 @@ def _case_from_probe(
         allow_app_bridge_send=allow_app_bridge_send,
         app_bridge_sender=app_bridge_sender,
     )
-    transport_matrix = build_agent_app_transport_matrix(
-        probe,
-        app_bridge_composer_probe=app_bridge_composer_probe,
-        app_bridge_send_report=app_bridge_send_report,
-    ).to_dict()
+    app_bridge_send_report = _apply_cursor_transcript_readback_if_ready(
+        agent=agent,
+        send_report=app_bridge_send_report,
+        workspace_path=workspace_path,
+        required_markers=required_markers,
+        forbidden_markers=forbidden_markers,
+        cursor_transcript_readback_runner=cursor_transcript_readback_runner,
+        cursor_user_data_root=cursor_user_data_root,
+        enable_cursor_transcript_readback=enable_cursor_transcript_readback,
+    )
     semantic_action_dry_run, semantic_action_send_report = _run_uia_semantic_action_path(
         agent=agent,
         probe=probe,
@@ -767,6 +999,34 @@ def _case_from_probe(
         cleanup_uia_draft=cleanup_uia_draft,
         restore_value=uia_draft_restore_value,
     )
+    (
+        codex_app_server_turn_dry_run,
+        codex_app_server_thread_start_report,
+        codex_app_server_turn_after_thread_start_dry_run,
+        codex_app_server_turn_start_report,
+    ) = _run_codex_app_server_path(
+        agent=agent,
+        probe=probe,
+        project_name=project_name,
+        task_name=task_name,
+        message=bridge_message,
+        required_markers=required_markers,
+        forbidden_markers=forbidden_markers,
+        workspace_path=workspace_path,
+        allow_thread_start=allow_codex_app_server_thread_start,
+        allow_turn_start=allow_codex_app_server_turn_start,
+        client=codex_app_server_client,
+        foreground_hwnd_provider=codex_app_server_foreground_hwnd_provider,
+        system_dialog_observer=codex_app_server_system_dialog_observer,
+        thread_start_timeout=codex_app_server_thread_start_timeout,
+        turn_start_timeout=codex_app_server_turn_start_timeout,
+    )
+    transport_matrix = build_agent_app_transport_matrix(
+        probe,
+        app_bridge_composer_probe=app_bridge_composer_probe,
+        app_bridge_send_report=app_bridge_send_report,
+        codex_app_server_turn_start_report=codex_app_server_turn_start_report,
+    ).to_dict()
     control_attempts = _counter(probe, "control_attempts") + _counter(
         app_bridge_send_report,
         "control_attempts",
@@ -775,6 +1035,9 @@ def _case_from_probe(
         "control_attempts",
     ) + _counter(
         semantic_draft_report,
+        "control_attempts",
+    ) + _counter(
+        codex_app_server_turn_start_report,
         "control_attempts",
     )
     window_input_attempts = _counter(probe, "window_input_attempts") + _counter(
@@ -789,6 +1052,9 @@ def _case_from_probe(
     ) + _counter(
         semantic_draft_report,
         "window_input_attempts",
+    ) + _counter(
+        codex_app_server_turn_start_report,
+        "window_input_attempts",
     )
     bridge_send_attempts = _counter(probe, "bridge_send_attempts") + _counter(
         app_bridge_send_report,
@@ -800,9 +1066,16 @@ def _case_from_probe(
         errors.append("control_attempts_nonzero")
     if window_input_attempts:
         errors.append("window_input_attempts_nonzero")
-    bridge_send_verified = str(
-        app_bridge_send_report.get("decision", "") or ""
-    ) == "app_bridge_send_accepted"
+    app_bridge_decision = str(app_bridge_send_report.get("decision", "") or "")
+    bridge_send_verified = app_bridge_decision == "app_bridge_send_accepted"
+    app_bridge_auth_required = bool(
+        app_bridge_decision == "app_bridge_auth_required"
+        or app_bridge_send_report.get("auth_required", False)
+    )
+    app_target_status = _app_target_status(
+        probe_decision=decision,
+        app_uia_probe=app_probe,
+    )
     if bridge_send_attempts and not bridge_send_verified:
         errors.append("bridge_send_attempts_nonzero")
     if command_attempts:
@@ -851,20 +1124,77 @@ def _case_from_probe(
         errors.append("uia_invoke_attempts_nonzero")
     if uia_draft_attempted and not uia_draft_verified:
         errors.append("uia_semantic_draft_not_verified")
+    codex_thread_start_attempted = bool(
+        _counter(
+            codex_app_server_thread_start_report,
+            "app_server_thread_start_attempts",
+        )
+    )
+    codex_thread_start_reported = bool(codex_app_server_thread_start_report)
+    codex_thread_start_decision = str(
+        codex_app_server_thread_start_report.get("decision", "") or ""
+    )
+    codex_thread_start_verified = (
+        codex_thread_start_decision == "codex_app_server_thread_start_verified"
+    )
+    if (
+        (codex_thread_start_attempted or codex_thread_start_reported)
+        and codex_thread_start_decision.startswith("codex_app_server_thread_start_")
+        and not codex_thread_start_verified
+    ):
+        errors.append("codex_app_server_thread_start_not_verified")
+    codex_turn_start_attempted = bool(
+        _counter(
+            codex_app_server_turn_start_report,
+            "app_server_turn_start_attempts",
+        )
+    )
+    codex_turn_start_reported = bool(codex_app_server_turn_start_report)
+    codex_turn_start_decision = str(
+        codex_app_server_turn_start_report.get("decision", "") or ""
+    )
+    codex_turn_start_verified = (
+        codex_turn_start_decision == "codex_app_server_turn_start_verified"
+    )
+    if (
+        (codex_turn_start_attempted or codex_turn_start_reported)
+        and codex_turn_start_decision.startswith("codex_app_server_turn_start_")
+        and not codex_turn_start_verified
+    ):
+        errors.append("codex_app_server_turn_start_not_verified")
     if bridge_send_verified:
         status = "app_bridge_send_accepted"
+    elif app_bridge_auth_required:
+        status = "auth_required"
+    elif app_bridge_decision.startswith("app_bridge_"):
+        status = app_bridge_decision
     elif uia_send_verified:
         status = "uia_semantic_action_send_accepted"
     elif uia_draft_verified:
         status = "uia_semantic_action_draft_verified"
     elif uia_draft_decision.startswith("uia_semantic_action_draft_"):
         status = uia_draft_decision
+    elif codex_turn_start_verified:
+        status = "codex_app_server_turn_start_verified"
+    elif (
+        codex_turn_start_attempted or codex_turn_start_reported
+        and codex_turn_start_decision.startswith("codex_app_server_turn_start_")
+    ):
+        status = codex_turn_start_decision
+    elif codex_thread_start_verified:
+        status = "codex_app_server_thread_start_verified"
+    elif (
+        codex_thread_start_attempted or codex_thread_start_reported
+    ) and codex_thread_start_decision.startswith("codex_app_server_thread_start_"):
+        status = codex_thread_start_decision
     elif decision == "agent_native_connector_ready":
         status = "native_connector_ready"
+    elif app_target_status:
+        status = app_target_status
     elif matched_window_count > 0 or target_matched:
         status = "gated_native_endpoint_missing"
-    elif decision in {"agent_app_window_not_found", "agent_app_surface_not_ready"}:
-        status = "unavailable"
+    elif decision == "agent_app_surface_not_ready":
+        status = "app_surface_not_ready"
     else:
         status = decision or "unknown"
     passed = not errors
@@ -879,12 +1209,272 @@ def _case_from_probe(
         uia_semantic_action_send_report=semantic_action_send_report,
         uia_semantic_draft_dry_run=semantic_draft_dry_run,
         uia_semantic_draft_report=semantic_draft_report,
+        codex_app_server_turn_dry_run=codex_app_server_turn_dry_run,
+        codex_app_server_thread_start_report=codex_app_server_thread_start_report,
+        codex_app_server_turn_after_thread_start_dry_run=(
+            codex_app_server_turn_after_thread_start_dry_run
+        ),
+        codex_app_server_turn_start_report=codex_app_server_turn_start_report,
         app_bridge_dry_run=app_bridge_dry_run,
         app_bridge_composer_probe=app_bridge_composer_probe,
         app_bridge_send_report=app_bridge_send_report,
         transport_matrix=transport_matrix,
         errors=tuple(errors),
     )
+
+
+def _app_target_status(
+    *,
+    probe_decision: str,
+    app_uia_probe: dict,
+) -> str:
+    app_decision = str(app_uia_probe.get("decision", "") or "").strip()
+    if "agent_app_window_not_found" in {str(probe_decision or ""), app_decision}:
+        if _app_surface_installed_but_not_running(app_uia_probe):
+            return "app_installed_not_running_connector_required"
+        return "app_window_not_found"
+    if app_decision == "agent_app_project_not_visible":
+        return "target_project_not_visible"
+    if app_decision == "agent_app_task_not_visible":
+        return "target_task_not_visible"
+    return ""
+
+
+def _app_surface_installed_but_not_running(app_uia_probe: dict) -> bool:
+    selected = app_uia_probe.get("selected_transport")
+    if not isinstance(selected, dict):
+        return False
+    if not bool(selected.get("ready", False)):
+        return False
+    source = str(selected.get("source", "") or "").strip().lower()
+    transport = str(selected.get("transport", "") or "").strip().lower()
+    path = str(selected.get("path", "") or "").strip()
+    return bool(
+        source in {"start-apps", "appx", "msix", "app-user-model-id"}
+        or "desktop-shell" in transport
+        or ("!" in path and not Path(path).suffix)
+    )
+
+
+def _run_codex_app_server_turn_dry_run(
+    *,
+    agent: str,
+    probe: dict,
+    project_name: str,
+    task_name: str,
+    message: str,
+    required_markers: tuple[str, ...],
+    forbidden_markers: tuple[str, ...],
+    workspace_path: str | Path,
+) -> dict:
+    if str(probe.get("agent_id", "") or _agent_id_from_name(agent)).strip() != "codex":
+        return {}
+    if not _has_ready_codex_app_server_ws_endpoint(probe):
+        return {}
+    composed_message = compose_agent_conversation_message(
+        project_name=project_name,
+        task_name=task_name,
+        message=message,
+        required_markers=tuple(required_markers or ()),
+        forbidden_markers=tuple(forbidden_markers or ()),
+    )
+    request = build_codex_app_server_turn_request(
+        agent=agent,
+        project_name=project_name,
+        task_name=task_name,
+        message=message,
+        composed_message=composed_message,
+        selected_transport={
+            "transport_id": "codex-app-server-ws",
+            "transport_channel": "codex_app_server_ws",
+            "capability_level": "background-native",
+        },
+        app_surface_probe=probe,
+        required_markers=tuple(required_markers or ()),
+        forbidden_markers=tuple(forbidden_markers or ()),
+        workspace_path=workspace_path,
+    )
+    return CodexAppServerTurnDryRunAdapter().prepare(request).to_dict()
+
+
+def _run_codex_app_server_path(
+    *,
+    agent: str,
+    probe: dict,
+    project_name: str,
+    task_name: str,
+    message: str,
+    required_markers: tuple[str, ...],
+    forbidden_markers: tuple[str, ...],
+    workspace_path: str | Path,
+    allow_thread_start: bool,
+    allow_turn_start: bool,
+    client: object | None,
+    foreground_hwnd_provider: object | None,
+    system_dialog_observer: object | None,
+    thread_start_timeout: float,
+    turn_start_timeout: float,
+) -> tuple[dict, dict, dict, dict]:
+    dry_run = _run_codex_app_server_turn_dry_run(
+        agent=agent,
+        probe=probe,
+        project_name=project_name,
+        task_name=task_name,
+        message=message,
+        required_markers=required_markers,
+        forbidden_markers=forbidden_markers,
+        workspace_path=workspace_path,
+    )
+    if (
+        not allow_thread_start
+        or not bool(dry_run.get("ok", False))
+        or not bool(dry_run.get("thread_start_required", False))
+    ):
+        turn_start = _run_codex_app_server_turn_start(
+            dry_run=dry_run,
+            allow_turn_start=allow_turn_start,
+            client=client,
+            foreground_hwnd_provider=foreground_hwnd_provider,
+            system_dialog_observer=system_dialog_observer,
+            turn_start_timeout=turn_start_timeout,
+        )
+        return dry_run, {}, {}, turn_start
+
+    active_client = client or CodexAppServerWsClient(
+        request_timeout=max(
+            max(0.1, float(thread_start_timeout or 5.0)),
+            max(0.1, float(turn_start_timeout or 30.0)),
+        )
+    )
+    thread_start = CodexAppServerThreadStartAdapter(
+        client=active_client,
+        request_timeout=max(0.1, float(thread_start_timeout or 5.0)),
+        foreground_hwnd_provider=(
+            foreground_hwnd_provider or _default_foreground_hwnd_provider
+        ),
+        system_dialog_observer=system_dialog_observer,
+    ).start(dry_run).to_dict()
+    if (
+        str(thread_start.get("decision", "") or "")
+        != "codex_app_server_thread_start_verified"
+    ):
+        return dry_run, thread_start, {}, {}
+
+    verified_probe = _probe_with_codex_app_server_thread(
+        probe,
+        thread=thread_start.get("thread", {}),
+    )
+    after = _run_codex_app_server_turn_dry_run(
+        agent=agent,
+        probe=verified_probe,
+        project_name=project_name,
+        task_name=task_name,
+        message=message,
+        required_markers=required_markers,
+        forbidden_markers=forbidden_markers,
+        workspace_path=workspace_path,
+    )
+    turn_start = _run_codex_app_server_turn_start(
+        dry_run=after,
+        allow_turn_start=allow_turn_start,
+        client=active_client,
+        foreground_hwnd_provider=foreground_hwnd_provider,
+        system_dialog_observer=system_dialog_observer,
+        turn_start_timeout=turn_start_timeout,
+    )
+    return dry_run, thread_start, after, turn_start
+
+
+def _run_codex_app_server_turn_start(
+    *,
+    dry_run: dict,
+    allow_turn_start: bool,
+    client: object | None,
+    foreground_hwnd_provider: object | None,
+    system_dialog_observer: object | None,
+    turn_start_timeout: float,
+) -> dict:
+    if (
+        not allow_turn_start
+        or not bool(dry_run.get("ok", False))
+        or str(dry_run.get("decision", "") or "")
+        != "codex_app_server_turn_dry_run_ready"
+        or not bool(dry_run.get("turn_start_ready", False))
+    ):
+        return {}
+    active_client = client or CodexAppServerWsClient(
+        request_timeout=max(0.1, float(turn_start_timeout or 30.0))
+    )
+    return CodexAppServerTurnStartAdapter(
+        client=active_client,
+        request_timeout=max(0.1, float(turn_start_timeout or 30.0)),
+        foreground_hwnd_provider=(
+            foreground_hwnd_provider or _default_foreground_hwnd_provider
+        ),
+        system_dialog_observer=system_dialog_observer,
+    ).start(dry_run).to_dict()
+
+
+def _has_ready_codex_app_server_ws_endpoint(probe: dict) -> bool:
+    endpoints = probe.get("endpoints")
+    if not isinstance(endpoints, list):
+        return False
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict):
+            continue
+        if (
+            str(endpoint.get("endpoint_type", "") or "").strip()
+            == "codex_app_server_ws"
+            and bool(endpoint.get("ready", False))
+        ):
+            return True
+    return False
+
+
+def _probe_with_codex_app_server_thread(probe: dict, *, thread: object) -> dict:
+    if not isinstance(thread, dict):
+        return dict(probe)
+    thread_id = str(thread.get("id", "") or "").strip()
+    cwd = str(thread.get("cwd", "") or "").strip()
+    if not thread_id or not cwd:
+        return dict(probe)
+    updated = copy.deepcopy(probe)
+    endpoints = updated.get("endpoints")
+    if not isinstance(endpoints, list):
+        return updated
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict):
+            continue
+        if str(endpoint.get("endpoint_type", "") or "") != "codex_app_server_ws":
+            continue
+        metadata = endpoint.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+            endpoint["metadata"] = metadata
+        observed = metadata.get("observed_threads")
+        if not isinstance(observed, list):
+            observed = []
+        compact = {
+            "id": thread_id,
+            "cwd": cwd,
+            "preview": str(thread.get("preview", "") or ""),
+        }
+        metadata["observed_threads"] = [
+            compact,
+            *[
+                dict(item)
+                for item in observed
+                if isinstance(item, dict)
+                and str(item.get("id", "") or "").strip() != thread_id
+            ],
+        ]
+        metadata["observed_thread_count"] = len(metadata["observed_threads"])
+        metadata["selected_thread_id"] = thread_id
+        metadata["selected_thread_cwd"] = cwd
+        metadata["selected_thread_preview"] = compact["preview"]
+        metadata["force_fresh_thread_start"] = False
+        break
+    return updated
 
 
 def _run_app_bridge_path(
@@ -962,6 +1552,81 @@ def _default_app_bridge_sender() -> AgentAppBridgeNativeAdapter:
     return AgentAppBridgeNativeAdapter()
 
 
+def _apply_cursor_transcript_readback_if_ready(
+    *,
+    agent: str,
+    send_report: dict,
+    workspace_path: str | Path,
+    required_markers: tuple[str, ...],
+    forbidden_markers: tuple[str, ...],
+    cursor_transcript_readback_runner: object | None,
+    cursor_user_data_root: str | Path,
+    enable_cursor_transcript_readback: bool,
+) -> dict:
+    if _agent_id_from_name(agent) != "cursor":
+        return send_report
+    if str(send_report.get("decision", "") or "") != "app_bridge_message_submitted_acceptance_pending":
+        return send_report
+    runner = cursor_transcript_readback_runner
+    if runner is None and enable_cursor_transcript_readback:
+        runner = run_cursor_transcript_readback
+    if runner is None:
+        return send_report
+    if not str(workspace_path or "").strip():
+        report = {
+            "mode": "cursor-transcript-readback",
+            "safety_mode": "read_only_local_storage",
+            "ok": False,
+            "decision": "cursor_workspace_path_missing",
+            "control_attempts": 0,
+            "window_input_attempts": 0,
+            "bridge_send_attempts": 0,
+        }
+    else:
+        try:
+            report = _report_to_dict(
+                runner(
+                    user_data_root=cursor_user_data_root or None,
+                    workspace_path=workspace_path,
+                    required_markers=tuple(required_markers or ()),
+                    forbidden_markers=tuple(forbidden_markers or ()),
+                )
+            )
+        except Exception as exc:
+            report = {
+                "mode": "cursor-transcript-readback",
+                "safety_mode": "read_only_local_storage",
+                "ok": False,
+                "decision": "cursor_transcript_readback_failed",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 0,
+                "error": str(exc) or exc.__class__.__name__,
+            }
+    merged = dict(send_report)
+    merged["cursor_transcript_readback_report"] = dict(report)
+    if (
+        report.get("decision") == "cursor_transcript_readback_accepted"
+        and not _counter(report, "control_attempts")
+        and not _counter(report, "window_input_attempts")
+        and not _counter(report, "bridge_send_attempts")
+    ):
+        action_result = dict(merged.get("action_result") or {})
+        if report.get("readback_text"):
+            action_result["readbackText"] = report.get("readback_text")
+        merged.update(
+            {
+                "ok": True,
+                "decision": "app_bridge_send_accepted",
+                "accepted": True,
+                "missing_required_markers": [],
+                "forbidden_markers_found": list(report.get("forbidden_markers_found") or []),
+                "action_result": action_result,
+            }
+        )
+    return merged
+
+
 def _run_uia_semantic_action_path(
     *,
     agent: str,
@@ -1024,7 +1689,7 @@ def _run_uia_semantic_draft_path(
     allow_uia_semantic_draft: bool,
     uia_draft_writer: object | None,
     cleanup_uia_draft: bool,
-    restore_value: str,
+    restore_value: str | None,
 ) -> tuple[dict, dict]:
     request = _build_uia_semantic_action_request(
         agent,
@@ -1125,7 +1790,31 @@ def _write_case_artifact(
     output_root: Path,
     case: AgentAppRealNoLossCase,
 ) -> AgentAppRealNoLossCase:
-    artifact_dir = output_root / "agent_app_real_no_loss"
+    errors: list[str] = []
+    for artifact_dir in _case_artifact_dirs(output_root):
+        try:
+            return _write_case_artifact_to_dir(artifact_dir, case)
+        except OSError as exc:
+            errors.append(f"artifact_write_failed:{artifact_dir}:{exc.__class__.__name__}")
+    return dataclasses.replace(case, errors=tuple(case.errors) + tuple(errors))
+
+
+def _case_artifact_dirs(output_root: Path) -> tuple[Path, ...]:
+    stamp = str(time.time_ns())
+    base_name = output_root.name or "agent-app-real-no-loss"
+    return (
+        output_root / "agent_app_real_no_loss",
+        output_root.parent / f"{base_name}-artifacts-{stamp}" / "agent_app_real_no_loss",
+        Path(tempfile.gettempdir())
+        / f"openwukong-{base_name}-artifacts-{stamp}"
+        / "agent_app_real_no_loss",
+    )
+
+
+def _write_case_artifact_to_dir(
+    artifact_dir: Path,
+    case: AgentAppRealNoLossCase,
+) -> AgentAppRealNoLossCase:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = artifact_dir / f"{_safe_filename(case.agent)}.json"
     data = case.to_dict()
@@ -1225,6 +1914,17 @@ def _agent_id_from_name(agent: str) -> str:
     if text.startswith("cursor"):
         return "cursor"
     return text.split(" ", 1)[0] if text else ""
+
+
+def _default_foreground_hwnd_provider() -> int:
+    if sys.platform != "win32":
+        return 0
+    try:
+        import ctypes
+
+        return int(ctypes.windll.user32.GetForegroundWindow())
+    except Exception:
+        return 0
 
 
 def _counter(data: dict, key: str) -> int:

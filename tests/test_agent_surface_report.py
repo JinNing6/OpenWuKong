@@ -186,6 +186,123 @@ class AgentSurfaceReportTests(unittest.TestCase):
             ["claude-code-cli-managed-terminal", "claude-desktop-shell"],
         )
 
+    def test_claude_generic_surface_prefers_running_claude_code_cli_over_desktop_exe(self):
+        resolver = WindowsAppResolver(
+            candidate_providers=(
+                StaticAppCandidateProvider(
+                    [
+                        AppResolutionCandidate(
+                            source="running-process",
+                            display_name="claude.exe",
+                            process_name="claude.exe",
+                            executable_name="claude.exe",
+                            path="C:/Program Files/WindowsApps/Claude_1.9659.2.0_x64__pzs8sxrjxfjjc/app/claude.exe",
+                            pid=3860,
+                        ),
+                        AppResolutionCandidate(
+                            source="running-process",
+                            display_name="claude.exe",
+                            process_name="claude.exe",
+                            executable_name="claude.exe",
+                            path="C:/Users/me/AppData/Roaming/Claude/claude-code/2.1.156/claude.exe",
+                            pid=21968,
+                        ),
+                    ]
+                ),
+            )
+        )
+
+        data = build_agent_surface_report(["claude"], resolver=resolver).to_dict()
+        surface = data["agents"][0]
+
+        self.assertTrue(surface["ok"])
+        self.assertEqual(surface["app_resolution"]["decision"], "resolved")
+        self.assertEqual(
+            surface["selected_transport"]["transport_id"],
+            "claude-code-cli-managed-terminal",
+        )
+        self.assertEqual(
+            surface["selected_transport"]["path"],
+            "C:/Users/me/AppData/Roaming/Claude/claude-code/2.1.156/claude.exe",
+        )
+        self.assertEqual(
+            [transport["transport_id"] for transport in surface["transports"]],
+            ["claude-code-cli-managed-terminal", "claude-desktop-shell"],
+        )
+
+    def test_cursor_surface_prefers_cursor_agent_cli_over_desktop_shell_for_background(self):
+        resolver = WindowsAppResolver(
+            candidate_providers=(
+                StaticAppCandidateProvider(
+                    [
+                        AppResolutionCandidate(
+                            source="running-process",
+                            display_name="Cursor.exe",
+                            process_name="Cursor.exe",
+                            executable_name="Cursor.exe",
+                            path="E:/cursor/cursor/cursor/Cursor.exe",
+                            pid=2020,
+                        ),
+                        AppResolutionCandidate(
+                            source="path",
+                            display_name="cursor-agent",
+                            executable_name="cursor-agent.cmd",
+                            path="C:/Users/me/AppData/Roaming/npm/cursor-agent.cmd",
+                        ),
+                    ]
+                ),
+            )
+        )
+
+        data = build_agent_surface_report(["cursor"], resolver=resolver).to_dict()
+        surface = data["agents"][0]
+
+        self.assertEqual(surface["agent_id"], "cursor")
+        self.assertEqual(
+            surface["selected_transport"]["transport_id"],
+            "cursor-agent-cli-managed-terminal",
+        )
+        self.assertEqual(surface["selected_transport"]["command_family"], "cursor-agent -p")
+        self.assertTrue(surface["selected_transport"]["background_capable"])
+        self.assertEqual(
+            [transport["transport_id"] for transport in surface["transports"]],
+            ["cursor-agent-cli-managed-terminal", "cursor-desktop-shell"],
+        )
+
+    def test_cursor_app_alias_selects_desktop_shell_not_agent_cli(self):
+        resolver = WindowsAppResolver(
+            candidate_providers=(
+                StaticAppCandidateProvider(
+                    [
+                        AppResolutionCandidate(
+                            source="path",
+                            display_name="cursor-agent",
+                            executable_name="cursor-agent.cmd",
+                            path="C:/Users/me/AppData/Roaming/npm/cursor-agent.cmd",
+                        ),
+                        AppResolutionCandidate(
+                            source="running-process",
+                            display_name="Cursor.exe",
+                            process_name="Cursor.exe",
+                            executable_name="Cursor.exe",
+                            path="E:/cursor/cursor/cursor/Cursor.exe",
+                            pid=2020,
+                        ),
+                    ]
+                ),
+            )
+        )
+
+        data = build_agent_surface_report(["cursor desktop"], resolver=resolver).to_dict()
+        surface = data["agents"][0]
+
+        self.assertEqual(surface["selected_transport"]["transport_id"], "cursor-desktop-shell")
+        self.assertFalse(surface["selected_transport"]["background_capable"])
+        self.assertEqual(
+            [transport["transport_id"] for transport in surface["transports"]],
+            ["cursor-desktop-shell"],
+        )
+
     def test_claude_desktop_alias_selects_app_surface_not_cli(self):
         resolver = WindowsAppResolver(
             candidate_providers=(

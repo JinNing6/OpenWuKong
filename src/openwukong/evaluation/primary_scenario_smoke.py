@@ -216,7 +216,7 @@ def run_primary_scenario_smoke(
     owned_browser_helper_terminator: SessionReadinessTerminator | None = None,
     owned_browser_helper_readiness_probe: OwnedBrowserHelperReadinessProbe | None = None,
     owned_browser_helper_action_runner: OwnedBrowserHelperActionRunner | None = None,
-    owned_browser_debug_port: int = 9238,
+    owned_browser_debug_port: int = 0,
     owned_browser_executable: str = "chrome.exe",
     owned_browser_url: str = _OWNED_BROWSER_HELPER_DEFAULT_URL,
 ) -> PrimaryScenarioSmokeReport:
@@ -258,7 +258,7 @@ def _smoke_case_from_l1_result(
     owned_browser_helper_terminator: SessionReadinessTerminator | None = None,
     owned_browser_helper_readiness_probe: OwnedBrowserHelperReadinessProbe | None = None,
     owned_browser_helper_action_runner: OwnedBrowserHelperActionRunner | None = None,
-    owned_browser_debug_port: int = 9238,
+    owned_browser_debug_port: int = 0,
     owned_browser_executable: str = "chrome.exe",
     owned_browser_url: str = _OWNED_BROWSER_HELPER_DEFAULT_URL,
 ) -> PrimaryScenarioSmokeCase:
@@ -446,30 +446,19 @@ def _write_owned_session_execution_artifact(
     plan: dict,
 ) -> tuple[str, Path | None]:
     scenario_id = str(plan.get("scenario_id", "") or "")
-    if scenario_id not in {
-        "browser.research.collect_sources",
-        "codex.project.submit_task_draft",
-    }:
+    if scenario_id != "browser.research.collect_sources":
         return "", None
 
     executions_dir = output_root / "owned_session_executions"
     executions_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = executions_dir / f"{_safe_filename(case_id)}.json"
     execution_id = _owned_session_execution_id(scenario_id)
-    if scenario_id == "browser.research.collect_sources":
-        artifact = _browser_owned_session_execution_payload(
-            execution_id=execution_id,
-            case_id=case_id,
-            plan=plan,
-            output_root=output_root,
-        )
-    else:
-        artifact = _codex_owned_session_execution_payload(
-            execution_id=execution_id,
-            case_id=case_id,
-            plan=plan,
-            output_root=output_root,
-        )
+    artifact = _browser_owned_session_execution_payload(
+        execution_id=execution_id,
+        case_id=case_id,
+        plan=plan,
+        output_root=output_root,
+    )
     artifact_path.write_text(
         json.dumps(artifact, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -487,7 +476,7 @@ def _write_owned_browser_helper_artifact(
     terminator: SessionReadinessTerminator | None = None,
     readiness_probe: OwnedBrowserHelperReadinessProbe | None = None,
     action_runner: OwnedBrowserHelperActionRunner | None = None,
-    debug_port: int = 9238,
+    debug_port: int = 0,
     browser_executable: str = "chrome.exe",
     browser_url: str = _OWNED_BROWSER_HELPER_DEFAULT_URL,
 ) -> tuple[str, Path | None, tuple[str, ...]]:
@@ -1076,11 +1065,11 @@ def _owned_session_dry_run_contract(
     endpoint = f"dry-run://ide-bridge/{safe_case}"
     project_id = str(recorded_context.get("project_id", "") or "codex")
     ownership = SessionOwnership(
-        owned=True,
+        owned=False,
         ownership_source="primary_scenario_smoke_isolated_dry_run",
         manifest_path=str(session_root / "codex-owned-session.json"),
-        route_id="ide-extension-connector",
-        connector_id="ide-extension",
+        route_id="app-native-bridge-required",
+        connector_id="missing_connector",
         action_id=dry_run_id,
         endpoint=endpoint,
         profile_path=str(bridge_root),
@@ -1098,6 +1087,8 @@ def _owned_session_dry_run_contract(
     intent = ControlIntent(
         action="draft_codex_project_task",
         text=str(intent_payload.get("task", "") or ""),
+        preferred_route_id="app-native-bridge-required",
+        preferred_connector_id="agent-native-bridge",
         side_effect_policy=dry_run_policy,
     )
     return ownership, target, intent
@@ -1863,8 +1854,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--owned-browser-debug-port",
         type=int,
-        default=9238,
-        help="DevTools port for the opt-in isolated browser helper.",
+        default=0,
+        help=(
+            "DevTools port for the opt-in isolated browser helper. "
+            "Use 0 to let Chrome choose an unused loopback port."
+        ),
     )
     parser.add_argument(
         "--owned-browser-executable",

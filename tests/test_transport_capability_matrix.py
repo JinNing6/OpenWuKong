@@ -54,7 +54,7 @@ class TransportCapabilityMatrixTests(unittest.TestCase):
         self.assertFalse(capability["foreground_required"])
         self.assertFalse(capability["requires_user_confirmation"])
 
-    def test_wechat_send_without_native_bridge_requires_foreground_and_confirmation(self):
+    def test_app_native_bridge_route_is_background_native_transport_contract(self):
         plan = build_control_route_plan(
             _window(
                 "Weixin.exe",
@@ -70,13 +70,28 @@ class TransportCapabilityMatrixTests(unittest.TestCase):
 
         self.assertEqual(capability["app_family"], "im")
         self.assertEqual(capability["route_id"], "app-native-bridge-required")
-        self.assertEqual(capability["capability_level"], "foreground-required")
-        self.assertEqual(capability["selected_transport"], "foreground-keyboard-clipboard")
-        self.assertFalse(capability["background_safe"])
-        self.assertTrue(capability["foreground_required"])
+        self.assertEqual(capability["capability_level"], "background-native")
+        self.assertEqual(capability["selected_transport"], "agent-native-bridge")
+        self.assertTrue(capability["background_safe"])
+        self.assertFalse(capability["foreground_required"])
         self.assertTrue(capability["requires_user_confirmation"])
-        self.assertIn("native_connector_missing", capability["risk_flags"])
-        self.assertIn("post_action_bound_window_verification", capability["verification_requirements"])
+        self.assertIn("native_bridge_response", capability["verification_requirements"])
+
+    def test_claude_process_only_routes_to_agent_app_native_bridge_required(self):
+        plan = build_control_route_plan(_window("claude.exe", "claude.exe", []))
+
+        capability = build_transport_capability(
+            plan,
+            ControlIntent(action="submit_task", text="probe"),
+        ).to_dict()
+
+        self.assertEqual(plan.app_family, "agent-app")
+        self.assertEqual(plan.primary_route.route_id, "app-native-bridge-required")
+        self.assertEqual(plan.control_decision, "block_until_deterministic_route")
+        self.assertEqual(capability["route_id"], "app-native-bridge-required")
+        self.assertEqual(capability["capability_level"], "background-native")
+        self.assertEqual(capability["selected_transport"], "agent-native-bridge")
+        self.assertTrue(capability["background_safe"])
 
     def test_structural_uia_read_is_background_read_only(self):
         plan = build_control_route_plan(

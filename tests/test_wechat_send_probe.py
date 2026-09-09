@@ -2,10 +2,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import openwukong.evaluation.wechat_send_probe as wechat_send_probe_module
 from openwukong.control.foreground_takeover import ForegroundTakeoverRequest
 from openwukong.evaluation.wechat_send_probe import (
     FakeWeChatKeyboardAutomation,
     run_wechat_file_helper_send_probe,
+    verify_wechat_post_send_message_from_screenshot,
 )
 
 
@@ -38,6 +40,22 @@ class PostSendVerifyingAutomation(FakeWeChatKeyboardAutomation):
             "message_preview": message,
             "screenshot_path": screenshot_path,
         }
+
+
+class OcrPostSendAutomation(FakeWeChatKeyboardAutomation):
+    def verify_post_send_message(self, target_name: str, message: str, screenshot_path: str) -> dict:
+        self.events.append(f"ocr_verify_post_send:{target_name}:{message}")
+        return verify_wechat_post_send_message_from_screenshot(
+            target_name=target_name,
+            message=message,
+            screenshot_path=screenshot_path,
+            ocr_runner=lambda _path, timeout: {
+                "ok": True,
+                "method": "fake-windows-media-ocr",
+                "text": "17:49 OPENWUKONG WECHAT R278 REAL SEND 2026062 8T181500",
+                "error": "",
+            },
+        )
 
 
 class WeChatSendProbeTests(unittest.TestCase):
@@ -225,6 +243,86 @@ class WeChatSendProbeTests(unittest.TestCase):
         self.assertTrue(data["post_send_verified"])
         self.assertEqual(data["post_send_verification"]["method"], "accessibility-text-readback")
         self.assertIn("verify_post_send:文件传输助手:verified send", automation.events)
+
+    def test_records_post_send_windows_ocr_verification_when_available(self):
+        automation = OcrPostSendAutomation(target_verified=True)
+
+        report = run_wechat_file_helper_send_probe(
+            message="OPENWUKONG_WECHAT_R278_REAL_SEND_20260628T181500",
+            allow_send=True,
+            automation=automation,
+            foreground_takeover_request=_wechat_takeover_request(),
+        )
+        data = report.to_dict()
+
+        self.assertEqual(data["status"], "sent")
+        self.assertTrue(data["post_send_verified"])
+        self.assertEqual(data["post_send_verification"]["method"], "windows-media-ocr-readback")
+        self.assertEqual(data["post_send_verification"]["ocr_method"], "fake-windows-media-ocr")
+        self.assertTrue(data["post_send_verification"]["normalized_marker_matched"])
+        self.assertIn(
+            "ocr_verify_post_send:文件传输助手:OPENWUKONG_WECHAT_R278_REAL_SEND_20260628T181500",
+            automation.events,
+        )
+
+    def test_screenshot_readback_accepts_ocr_spacing_noise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screenshot = Path(tmp) / "post.png"
+            screenshot.write_bytes(b"not actually read by fake ocr")
+
+            result = verify_wechat_post_send_message_from_screenshot(
+                target_name="文件传输助手",
+                message="OPENWUKONG_WECHAT_R278_REAL_SEND_20260628T181500",
+                screenshot_path=str(screenshot),
+                ocr_runner=lambda _path, timeout: {
+                    "ok": True,
+                    "method": "fake-windows-media-ocr",
+                    "text": "OPENWUKONG WECHAT R278 REAL SEND 2026062 8T181500",
+                    "error": "",
+                },
+            )
+
+        self.assertTrue(result["verified"])
+        self.assertTrue(result["normalized_marker_matched"])
+        self.assertEqual(result["error"], "")
+
+    def test_screenshot_readback_rejects_missing_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            screenshot = Path(tmp) / "post.png"
+            screenshot.write_bytes(b"not actually read by fake ocr")
+
+            result = verify_wechat_post_send_message_from_screenshot(
+                target_name="文件传输助手",
+                message="OPENWUKONG_WECHAT_R278_REAL_SEND_20260628T181500",
+                screenshot_path=str(screenshot),
+                ocr_runner=lambda _path, timeout: {
+                    "ok": True,
+                    "method": "fake-windows-media-ocr",
+                    "text": "different message",
+                    "error": "",
+                },
+            )
+
+        self.assertFalse(result["verified"])
+        self.assertFalse(result["normalized_marker_matched"])
+        self.assertEqual(result["method"], "windows-media-ocr-readback")
+
+    def test_screenshot_readback_reports_missing_screenshot(self):
+        result = verify_wechat_post_send_message_from_screenshot(
+            target_name="文件传输助手",
+            message="OPENWUKONG_WECHAT_R278_REAL_SEND_20260628T181500",
+            screenshot_path="",
+        )
+
+        self.assertFalse(result["verified"])
+        self.assertEqual(result["error"], "screenshot_missing")
+
+    def test_windows_ocr_backend_does_not_use_encoded_powershell(self):
+        source = Path(wechat_send_probe_module.__file__).read_text(encoding="utf-8")
+
+        self.assertNotIn("-EncodedCommand", source)
+        self.assertNotIn("ExecutionPolicy", source)
+        self.assertNotIn("_run_ocr_powershell", source)
 
     def test_explicit_confirmation_override_can_unlock_send(self):
         automation = FakeWeChatKeyboardAutomation(target_verified=False)

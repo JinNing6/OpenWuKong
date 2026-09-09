@@ -98,6 +98,40 @@ class BrowserDevToolsHealthTests(unittest.TestCase):
         self.assertEqual(data["error"], "devtools_target_not_matched")
         self.assertEqual(fake.evaluate_calls, [])
 
+    def test_health_report_refuses_when_evaluated_page_identity_does_not_match_resource_url(self):
+        target = BrowserDevToolsTarget(
+            target_id="page-1",
+            type="page",
+            title="Example App",
+            url="https://example.test/app",
+            web_socket_debugger_url="ws://127.0.0.1/devtools/page/page-1",
+        )
+        fake = _FakeDevToolsClient(
+            [target],
+            evaluate_result={
+                "type": "object",
+                "value": {
+                    "title": "",
+                    "href": "about:blank",
+                    "readyState": "complete",
+                },
+            },
+        )
+
+        report = run_browser_devtools_health(
+            debugger_url="http://127.0.0.1:9223",
+            resource_url="https://example.test/app",
+            devtools_client=fake,
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertTrue(data["endpoint_ready"])
+        self.assertTrue(data["target_matched"])
+        self.assertTrue(data["evaluated_read_only"])
+        self.assertEqual(data["error"], "devtools_page_identity_mismatch")
+        self.assertEqual(data["page_identity"]["href"], "about:blank")
+
     def test_cli_outputs_browser_devtools_health_json(self):
         target = BrowserDevToolsTarget(
             target_id="page-1",

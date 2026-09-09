@@ -6,8 +6,11 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
+import queue
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -16,7 +19,16 @@ from openwukong.connectors.browser import BrowserDevToolsClient
 from openwukong.control.agent_app_transport_matrix import (
     summarize_agent_app_transport_matrices,
 )
-from openwukong.control.app_resolution import WindowsAppResolver
+from openwukong.control.app_resolution import (
+    AppResolutionCandidate,
+    WindowsAppResolver,
+    claude_candidate_surface_kind,
+    codex_candidate_surface_kind,
+    cursor_candidate_surface_kind,
+)
+from openwukong.control.desktop_system_dialog import (
+    run_desktop_system_dialog_preflight,
+)
 from openwukong.control.session_readiness_plan import (
     SessionReadinessPlanOptions,
     build_session_readiness_plan,
@@ -25,6 +37,15 @@ from openwukong.control.session_readiness_plan import (
 )
 from openwukong.evaluation.agent_app_real_no_loss import (
     run_agent_app_real_no_loss,
+)
+from openwukong.evaluation.agent_app_bridge_fixture_smoke import (
+    run_agent_app_bridge_fixture_smoke as run_default_agent_app_bridge_fixture_smoke,
+)
+from openwukong.evaluation.agent_native_bridge_fixture_smoke import (
+    run_agent_native_bridge_fixture_smoke as run_default_agent_native_bridge_fixture_smoke,
+)
+from openwukong.evaluation.wechat_native_bridge_fixture_smoke import (
+    run_wechat_native_bridge_fixture_smoke as run_default_wechat_native_bridge_fixture_smoke,
 )
 from openwukong.evaluation.agent_native_connector_probe import (
     NativeProcessSnapshot,
@@ -42,24 +63,41 @@ from openwukong.evaluation.ide_bridge_contract_probe import (
     probe_ide_command_contracts,
     select_probe_command_ids,
 )
+from openwukong.evaluation.ide_extension_readiness import (
+    DEFAULT_BRIDGE_URL as DEFAULT_IDE_EXTENSION_BRIDGE_URL,
+    probe_ide_extension_bridge_readiness,
+)
 from openwukong.evaluation.primary_real_no_loss import (
     _resolve_installed_browser_executable,
     run_primary_real_no_loss,
+)
+from openwukong.evaluation.objective_readiness_matrix import (
+    build_objective_readiness_matrix,
 )
 from openwukong.evaluation.simulation import load_simulation_fixture
 
 
 DEFAULT_MAJOR_FIXTURE = Path("tests/fixtures/evaluation/l1_primary_user_scenarios.json")
-DEFAULT_AGENT_APPS = ("codex app", "claude desktop", "cursor")
-DEFAULT_CLI_AGENTS = ("codex", "claude")
+DEFAULT_AGENT_APPS = ("codex app", "claude desktop")
+DEFAULT_CLI_AGENTS = ("codex", "cursor")
+CLI_REQUIREMENT_SPECS = {
+    "codex": ("codex_cli_background_task", "codex"),
+    "claude": ("claude_cli_background_task", "claude"),
+    "cursor": ("cursor_cli_background_task", "cursor"),
+}
 
 
 PrimaryRunner = Callable[..., object]
 AgentAppRunner = Callable[..., object]
+AgentAppBridgeFixtureSmokeRunner = Callable[..., object]
+AgentNativeBridgeFixtureSmokeRunner = Callable[..., object]
+WeChatNativeBridgeFixtureSmokeRunner = Callable[..., object]
 AgentCliRunner = Callable[..., object]
+SystemDialogPreflightRunner = Callable[..., object]
 OwnedIdeBridgeHelperRunner = Callable[..., object]
 AgentNativeCdpBridgeHelperRunner = Callable[..., object]
 AgentAppDevToolsOwnedLaunchRunner = Callable[..., object]
+IDEExtensionReadinessRunner = Callable[..., object]
 AgentAppDevToolsResolver = object
 
 
@@ -98,10 +136,21 @@ class MajorScenarioRealNoLossReport:
     owned_ide_bridge_helper_report: dict
     agent_native_cdp_bridge_helper_report: dict
     agent_app_report: dict
+    agent_app_bridge_fixture_smoke_report: dict
     agent_cli_report: dict
     requirements: tuple[MajorRequirement, ...]
+    agent_native_bridge_fixture_smoke_report: dict = dataclasses.field(
+        default_factory=dict
+    )
+    wechat_native_bridge_fixture_smoke_report: dict = dataclasses.field(
+        default_factory=dict
+    )
+    system_dialog_preflight_report: dict = dataclasses.field(default_factory=dict)
+    ide_extension_readiness_report: dict = dataclasses.field(default_factory=dict)
     agent_app_devtools_resolution_report: dict = dataclasses.field(default_factory=dict)
     agent_app_devtools_owned_launch_report: dict = dataclasses.field(default_factory=dict)
+    scenario_scope_report: dict = dataclasses.field(default_factory=dict)
+    runner_stage_reports: tuple[dict, ...] = dataclasses.field(default_factory=tuple)
     elapsed_ms: float = 0.0
 
     @property
@@ -118,11 +167,18 @@ class MajorScenarioRealNoLossReport:
 
     @property
     def control_attempts(self) -> int:
-        return _sum_counter(
-            self.primary_report,
-            self.agent_app_report,
-            self.agent_cli_report,
-            key="control_attempts",
+        return (
+            _sum_counter(
+                self.system_dialog_preflight_report,
+                self.primary_report,
+                self.ide_extension_readiness_report,
+                self.agent_app_report,
+                self.agent_cli_report,
+                key="control_attempts",
+            )
+            + self.agent_app_bridge_fixture_control_attempts
+            + self.agent_native_bridge_fixture_control_attempts
+            + self.wechat_native_bridge_fixture_control_attempts
         )
 
     @property
@@ -132,11 +188,119 @@ class MajorScenarioRealNoLossReport:
     @property
     def window_input_attempts(self) -> int:
         return _sum_counter(
+            self.system_dialog_preflight_report,
             self.primary_report,
+            self.ide_extension_readiness_report,
+            self.agent_app_bridge_fixture_smoke_report,
+            self.agent_native_bridge_fixture_smoke_report,
+            self.wechat_native_bridge_fixture_smoke_report,
             self.agent_app_report,
             self.agent_cli_report,
             key="window_input_attempts",
         )
+
+    @property
+    def agent_app_bridge_fixture_smoke_enabled(self) -> bool:
+        return bool(self.agent_app_bridge_fixture_smoke_report.get("enabled", False))
+
+    @property
+    def agent_app_bridge_fixture_smoke_ok(self) -> bool:
+        if not self.agent_app_bridge_fixture_smoke_report:
+            return True
+        if not self.agent_app_bridge_fixture_smoke_enabled:
+            return True
+        return bool(self.agent_app_bridge_fixture_smoke_report.get("ok", False))
+
+    @property
+    def agent_app_bridge_fixture_control_attempts(self) -> int:
+        return _counter(
+            self.agent_app_bridge_fixture_smoke_report,
+            "control_attempts",
+        ) + _counter(
+            self.agent_app_bridge_fixture_smoke_report,
+            "desktop_control_attempts",
+        )
+
+    @property
+    def agent_app_bridge_fixture_native_call_attempts(self) -> int:
+        bridge_send = self.agent_app_bridge_fixture_smoke_report.get(
+            "bridge_send_report",
+            {},
+        )
+        if not isinstance(bridge_send, dict):
+            bridge_send = {}
+        return _counter(bridge_send, "native_call_attempts")
+
+    @property
+    def agent_native_bridge_fixture_smoke_enabled(self) -> bool:
+        return bool(
+            self.agent_native_bridge_fixture_smoke_report.get("enabled", False)
+        )
+
+    @property
+    def agent_native_bridge_fixture_smoke_ok(self) -> bool:
+        if not self.agent_native_bridge_fixture_smoke_report:
+            return True
+        if not self.agent_native_bridge_fixture_smoke_enabled:
+            return True
+        return bool(self.agent_native_bridge_fixture_smoke_report.get("ok", False))
+
+    @property
+    def agent_native_bridge_fixture_control_attempts(self) -> int:
+        return _counter(
+            self.agent_native_bridge_fixture_smoke_report,
+            "control_attempts",
+        ) + _counter(
+            self.agent_native_bridge_fixture_smoke_report,
+            "desktop_control_attempts",
+        )
+
+    @property
+    def agent_native_bridge_fixture_native_call_attempts(self) -> int:
+        send_report = self.agent_native_bridge_fixture_smoke_report.get(
+            "send_report",
+            {},
+        )
+        if not isinstance(send_report, dict):
+            send_report = {}
+        return _counter(
+            self.agent_native_bridge_fixture_smoke_report,
+            "native_call_attempts",
+        ) or _counter(send_report, "native_call_attempts")
+
+    @property
+    def wechat_native_bridge_fixture_smoke_enabled(self) -> bool:
+        return bool(
+            self.wechat_native_bridge_fixture_smoke_report.get("enabled", False)
+        )
+
+    @property
+    def wechat_native_bridge_fixture_smoke_ok(self) -> bool:
+        if not self.wechat_native_bridge_fixture_smoke_report:
+            return True
+        if not self.wechat_native_bridge_fixture_smoke_enabled:
+            return True
+        return bool(self.wechat_native_bridge_fixture_smoke_report.get("ok", False))
+
+    @property
+    def wechat_native_bridge_fixture_control_attempts(self) -> int:
+        return _counter(
+            self.wechat_native_bridge_fixture_smoke_report,
+            "control_attempts",
+        )
+
+    @property
+    def wechat_native_bridge_fixture_native_call_attempts(self) -> int:
+        send_report = self.wechat_native_bridge_fixture_smoke_report.get(
+            "send_report",
+            {},
+        )
+        if not isinstance(send_report, dict):
+            send_report = {}
+        return _counter(
+            self.wechat_native_bridge_fixture_smoke_report,
+            "native_call_attempts",
+        ) or _counter(send_report, "native_call_attempts")
 
     @property
     def owned_ide_bridge_launch_attempts(self) -> int:
@@ -199,13 +363,25 @@ class MajorScenarioRealNoLossReport:
 
     @property
     def bridge_send_attempts(self) -> int:
-        return _counter(self.agent_app_report, "bridge_send_attempts")
+        return _counter(self.ide_extension_readiness_report, "bridge_send_attempts") + _counter(
+            self.agent_app_report,
+            "bridge_send_attempts",
+        )
 
     @property
     def agent_command_attempts(self) -> int:
         return _counter(self.agent_app_report, "agent_command_attempts") + _counter(
             self.agent_cli_report,
             "agent_command_attempts",
+        )
+
+    @property
+    def system_dialog_preflight_failed(self) -> bool:
+        if not self.system_dialog_preflight_report:
+            return False
+        return bool(
+            self.system_dialog_preflight_report.get("system_dialog_detected", False)
+            or not bool(self.system_dialog_preflight_report.get("ok", True))
         )
 
     @property
@@ -236,6 +412,14 @@ class MajorScenarioRealNoLossReport:
         ) and bool(self.agent_app_report.get("background_screenshot_focus_stable", True))
 
     @property
+    def cli_foreground_focus_stable(self) -> bool:
+        return bool(self.agent_cli_report.get("foreground_focus_stable", True))
+
+    @property
+    def cli_foreground_no_steal_verified(self) -> bool:
+        return bool(self.agent_cli_report.get("foreground_no_steal_verified", True))
+
+    @property
     def automation_focus_risk_attempts(self) -> int:
         return (
             self.control_attempts
@@ -250,7 +434,7 @@ class MajorScenarioRealNoLossReport:
 
     @property
     def automation_focus_safe(self) -> bool:
-        if self.background_screenshot_focus_stable:
+        if self.background_screenshot_focus_stable and self.cli_foreground_no_steal_verified:
             return True
         return self.automation_focus_risk_attempts == 0
 
@@ -261,6 +445,15 @@ class MajorScenarioRealNoLossReport:
             self.agent_native_cdp_bridge_helper_report,
             self.agent_app_devtools_resolution_report,
             self.agent_app_devtools_owned_launch_report,
+            output_root=self.output_root,
+        )
+
+    @property
+    def agent_app_endpoint_readiness(self) -> dict:
+        return _build_agent_app_endpoint_readiness(
+            self.agent_app_report,
+            self.agent_app_endpoint_acceptance,
+            self.ide_extension_readiness_report,
         )
 
     @property
@@ -274,6 +467,16 @@ class MajorScenarioRealNoLossReport:
         )
 
     @property
+    def objective_readiness_matrix(self) -> dict:
+        return build_objective_readiness_matrix(
+            primary_report=self.primary_report,
+            agent_app_report=self.agent_app_report,
+            agent_cli_report=self.agent_cli_report,
+            requirements=(item.to_dict() for item in self.requirements),
+            safe_run_ok=self.safe_run_ok,
+        ).to_dict()
+
+    @property
     def failed_runner_count(self) -> int:
         return sum(
             1
@@ -283,10 +486,35 @@ class MajorScenarioRealNoLossReport:
                 self.agent_cli_report,
             )
             if _counter(report, "failed_cases") > 0
-        ) + (0 if self.owned_ide_bridge_cleanup_ok else 1) + (
+        ) + (1 if self.system_dialog_preflight_failed else 0) + (
+            0 if self.owned_ide_bridge_cleanup_ok else 1
+        ) + (
             0 if self.agent_native_cdp_bridge_cleanup_ok else 1
         ) + (
             0 if self.agent_app_devtools_cleanup_ok else 1
+        ) + (
+            0 if self.agent_app_bridge_fixture_smoke_ok else 1
+        ) + (
+            0 if self.agent_native_bridge_fixture_smoke_ok else 1
+        ) + (
+            0 if self.wechat_native_bridge_fixture_smoke_ok else 1
+        )
+
+    @property
+    def runner_timed_out(self) -> bool:
+        return any(
+            bool(item.get("timed_out", False))
+            or str(item.get("status", "") or "") == "timed_out"
+            for item in self.runner_stage_reports
+            if isinstance(item, dict)
+        )
+
+    @property
+    def runner_stage_failed(self) -> bool:
+        return any(
+            str(item.get("status", "") or "") in {"failed", "timed_out"}
+            for item in self.runner_stage_reports
+            if isinstance(item, dict)
         )
 
     @property
@@ -300,7 +528,8 @@ class MajorScenarioRealNoLossReport:
     @property
     def goal_complete(self) -> bool:
         return bool(
-            not self.unmet_requirements
+            self.requirements
+            and not self.unmet_requirements
             and self.failed_runner_count == 0
             and self.control_attempts == 0
             and self.window_input_attempts == 0
@@ -308,6 +537,7 @@ class MajorScenarioRealNoLossReport:
             and self.owned_ide_bridge_cleanup_ok
             and self.agent_native_cdp_bridge_cleanup_ok
             and self.agent_app_devtools_cleanup_ok
+            and not self.runner_stage_failed
         )
 
     @property
@@ -320,6 +550,7 @@ class MajorScenarioRealNoLossReport:
             and self.owned_ide_bridge_cleanup_ok
             and self.agent_native_cdp_bridge_cleanup_ok
             and self.agent_app_devtools_cleanup_ok
+            and not self.runner_stage_failed
         )
 
     def to_dict(self) -> dict:
@@ -340,21 +571,53 @@ class MajorScenarioRealNoLossReport:
             "agent_app_devtools_launch_attempts": self.agent_app_devtools_launch_attempts,
             "agent_app_devtools_stop_attempts": self.agent_app_devtools_stop_attempts,
             "agent_app_devtools_cleanup_ok": self.agent_app_devtools_cleanup_ok,
+            "agent_app_bridge_fixture_smoke_enabled": self.agent_app_bridge_fixture_smoke_enabled,
+            "agent_app_bridge_fixture_smoke_ok": self.agent_app_bridge_fixture_smoke_ok,
+            "agent_app_bridge_fixture_control_attempts": self.agent_app_bridge_fixture_control_attempts,
+            "agent_app_bridge_fixture_native_call_attempts": self.agent_app_bridge_fixture_native_call_attempts,
+            "agent_native_bridge_fixture_smoke_enabled": self.agent_native_bridge_fixture_smoke_enabled,
+            "agent_native_bridge_fixture_smoke_ok": self.agent_native_bridge_fixture_smoke_ok,
+            "agent_native_bridge_fixture_control_attempts": self.agent_native_bridge_fixture_control_attempts,
+            "agent_native_bridge_fixture_native_call_attempts": self.agent_native_bridge_fixture_native_call_attempts,
+            "wechat_native_bridge_fixture_smoke_enabled": self.wechat_native_bridge_fixture_smoke_enabled,
+            "wechat_native_bridge_fixture_smoke_ok": self.wechat_native_bridge_fixture_smoke_ok,
+            "wechat_native_bridge_fixture_control_attempts": self.wechat_native_bridge_fixture_control_attempts,
+            "wechat_native_bridge_fixture_native_call_attempts": self.wechat_native_bridge_fixture_native_call_attempts,
             "bridge_send_attempts": self.bridge_send_attempts,
             "agent_command_attempts": self.agent_command_attempts,
             "owned_app_launch_attempts": self.owned_app_launch_attempts,
             "background_screenshot_count": self.background_screenshot_count,
             "background_screenshot_success_count": self.background_screenshot_success_count,
             "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
+            "cli_foreground_focus_stable": self.cli_foreground_focus_stable,
+            "cli_foreground_no_steal_verified": self.cli_foreground_no_steal_verified,
             "automation_focus_risk_attempts": self.automation_focus_risk_attempts,
             "automation_focus_safe": self.automation_focus_safe,
             "failed_runner_count": self.failed_runner_count,
+            "runner_timed_out": self.runner_timed_out,
+            "runner_stage_failed": self.runner_stage_failed,
+            "runner_stage_reports": [dict(item) for item in self.runner_stage_reports],
             "goal_complete": self.goal_complete,
             "safe_run_ok": self.safe_run_ok,
+            "scenario_scope": dict(self.scenario_scope_report),
+            "system_dialog_preflight_failed": self.system_dialog_preflight_failed,
+            "system_dialog_preflight": dict(self.system_dialog_preflight_report),
             "agent_app_endpoint_acceptance": self.agent_app_endpoint_acceptance,
+            "agent_app_endpoint_readiness": self.agent_app_endpoint_readiness,
             "agent_app_transport_matrix_summary": self.agent_app_transport_matrix_summary,
+            "objective_readiness_matrix": self.objective_readiness_matrix,
+            "ide_extension_readiness": dict(self.ide_extension_readiness_report),
             "agent_app_devtools_resolution": dict(
                 self.agent_app_devtools_resolution_report
+            ),
+            "agent_app_bridge_fixture_smoke": dict(
+                self.agent_app_bridge_fixture_smoke_report
+            ),
+            "agent_native_bridge_fixture_smoke": dict(
+                self.agent_native_bridge_fixture_smoke_report
+            ),
+            "wechat_native_bridge_fixture_smoke": dict(
+                self.wechat_native_bridge_fixture_smoke_report
             ),
             "unmet_requirements": list(self.unmet_requirements),
             "requirements": [
@@ -363,7 +626,9 @@ class MajorScenarioRealNoLossReport:
             "output_root": self.output_root,
             "artifact_path": self.artifact_path,
             "subreports": {
+                "system_dialog_preflight": dict(self.system_dialog_preflight_report),
                 "primary": dict(self.primary_report),
+                "ide_extension_readiness": dict(self.ide_extension_readiness_report),
                 "owned_ide_bridge_helper": dict(self.owned_ide_bridge_helper_report),
                 "agent_native_cdp_bridge_helper": dict(
                     self.agent_native_cdp_bridge_helper_report
@@ -374,6 +639,15 @@ class MajorScenarioRealNoLossReport:
                 ),
                 "agent_app_devtools_owned_launch": dict(
                     self.agent_app_devtools_owned_launch_report
+                ),
+                "agent_app_bridge_fixture_smoke": dict(
+                    self.agent_app_bridge_fixture_smoke_report
+                ),
+                "agent_native_bridge_fixture_smoke": dict(
+                    self.agent_native_bridge_fixture_smoke_report
+                ),
+                "wechat_native_bridge_fixture_smoke": dict(
+                    self.wechat_native_bridge_fixture_smoke_report
                 ),
                 "agent_cli": dict(self.agent_cli_report),
             },
@@ -386,8 +660,15 @@ def run_major_scenario_real_no_loss(
     fixture: dict | None = None,
     fixture_path: str | Path = DEFAULT_MAJOR_FIXTURE,
     output_root: str | Path = "",
+    runner_timeout_sec: float = 0.0,
+    stop_on_runner_timeout: bool = False,
+    run_primary_scenarios: bool = True,
+    run_agent_app_scenarios: bool = True,
+    run_agent_cli_scenarios: bool = True,
+    isolate_agent_app_scenarios: bool = False,
+    isolate_agent_cli_scenarios: bool = False,
     allow_owned_browser_helper_launch: bool = False,
-    owned_browser_debug_port: int = 9475,
+    owned_browser_debug_port: int = 0,
     owned_browser_executable: str = "chrome.exe",
     owned_browser_url: str = "data:text/html,<title>OpenWukong Major No Loss</title><body>OpenWukong Major No Loss</body>",
     background_screenshot_dir: str | Path = "",
@@ -396,6 +677,7 @@ def run_major_scenario_real_no_loss(
     wechat_uia_required_markers: tuple[str, ...] = (),
     wechat_uia_forbidden_markers: tuple[str, ...] = (),
     wechat_native_bridge_urls: Iterable[str] = (),
+    wechat_native_bridge_registry_paths: Iterable[str | Path] = (),
     allow_wechat_native_bridge_send: bool = False,
     wechat_native_bridge_message: str = "OPENWUKONG_WECHAT_NATIVE_BRIDGE_SEND",
     wechat_native_bridge_required_markers: tuple[str, ...] = (),
@@ -412,14 +694,43 @@ def run_major_scenario_real_no_loss(
     app_bridge_message: str = "OPENWUKONG_APP_BRIDGE_REAL_NO_LOSS",
     app_bridge_required_markers: tuple[str, ...] = (),
     app_bridge_forbidden_markers: tuple[str, ...] = (),
+    allow_codex_app_server_thread_start: bool = False,
+    codex_app_server_thread_start_timeout: float = 5.0,
+    allow_codex_app_server_turn_start: bool = False,
+    codex_app_server_turn_start_timeout: float = 30.0,
+    run_agent_app_bridge_fixture_smoke: bool = False,
+    agent_app_bridge_fixture_message: str = "OPENWUKONG_APP_BRIDGE_FIXTURE_SMOKE",
+    agent_app_bridge_fixture_required_markers: tuple[str, ...] = (
+        "OPENWUKONG_ACCEPTANCE: PASS",
+    ),
+    agent_app_bridge_fixture_forbidden_markers: tuple[str, ...] = (),
+    run_agent_native_bridge_fixture_smoke: bool = False,
+    agent_native_bridge_fixture_message: str = (
+        "OPENWUKONG_AGENT_NATIVE_BRIDGE_FIXTURE_SMOKE"
+    ),
+    agent_native_bridge_fixture_required_markers: tuple[str, ...] = (
+        "OPENWUKONG_ACCEPTANCE: PASS",
+    ),
+    agent_native_bridge_fixture_forbidden_markers: tuple[str, ...] = (),
+    run_wechat_native_bridge_fixture_smoke: bool = False,
+    wechat_native_bridge_fixture_message: str = "OPENWUKONG_WECHAT_FIXTURE: PASS",
+    wechat_native_bridge_fixture_required_markers: tuple[str, ...] = (
+        "OPENWUKONG_WECHAT_FIXTURE: PASS",
+    ),
+    wechat_native_bridge_fixture_forbidden_markers: tuple[str, ...] = (),
     debugger_urls: Iterable[str] = (),
     ide_bridge_urls: Iterable[str] = (),
+    probe_existing_ide_extension_bridge: bool = False,
+    ide_extension_bridge_url: str = DEFAULT_IDE_EXTENSION_BRIDGE_URL,
+    ide_extension_agent_id: str = "cursor",
+    ide_extension_request_timeout_sec: float = 0.5,
     agent_native_bridge_urls: Iterable[str] = (),
     agent_native_bridge_registry_paths: Iterable[str | Path] = (),
+    codex_app_server_ws_urls: Iterable[str] = (),
     workspace_path: str = "",
     allow_owned_ide_bridge_helper_launch: bool = False,
     owned_ide_executable: str = "cursor.exe",
-    owned_ide_bridge_port: int = 8791,
+    owned_ide_bridge_port: int = 0,
     owned_ide_user_data_dir: str = "",
     owned_ide_extensions_dir: str = "",
     owned_ide_extension_dir: str = "extensions/openwukong-vscode",
@@ -429,7 +740,7 @@ def run_major_scenario_real_no_loss(
     allow_agent_native_cdp_bridge_helper_launch: bool = False,
     agent_native_cdp_bridge_helper_agent: str = "codex app",
     agent_native_cdp_bridge_helper_agent_id: str = "codex",
-    agent_native_cdp_bridge_helper_port: int = 18888,
+    agent_native_cdp_bridge_helper_port: int = 0,
     agent_native_cdp_bridge_helper_debugger_url: str = "",
     agent_native_cdp_bridge_helper_process_name: str = "Codex.exe",
     agent_native_cdp_bridge_helper_pid: int = 0,
@@ -449,177 +760,506 @@ def run_major_scenario_real_no_loss(
     owned_ide_bridge_helper_runner: OwnedIdeBridgeHelperRunner | None = None,
     agent_native_cdp_bridge_helper_runner: AgentNativeCdpBridgeHelperRunner | None = None,
     agent_app_runner: AgentAppRunner | None = None,
+    agent_app_bridge_fixture_smoke_runner: AgentAppBridgeFixtureSmokeRunner | None = None,
+    agent_native_bridge_fixture_smoke_runner: (
+        AgentNativeBridgeFixtureSmokeRunner | None
+    ) = None,
+    wechat_native_bridge_fixture_smoke_runner: WeChatNativeBridgeFixtureSmokeRunner | None = None,
     agent_app_devtools_resolver: AgentAppDevToolsResolver | None = None,
     agent_app_devtools_owned_launch_runner: AgentAppDevToolsOwnedLaunchRunner | None = None,
+    ide_extension_readiness_runner: IDEExtensionReadinessRunner | None = None,
     agent_app_process_provider: Callable[[], Iterable[NativeProcessSnapshot]] | None = None,
     agent_cli_runner: AgentCliRunner | None = None,
+    system_dialog_preflight_runner: SystemDialogPreflightRunner | None = None,
 ) -> MajorScenarioRealNoLossReport:
     started = time.perf_counter()
     root = _resolve_output_root(output_root)
     root.mkdir(parents=True, exist_ok=True)
-    loaded_fixture = fixture if fixture is not None else load_simulation_fixture(fixture_path)
-
-    primary = _report_to_dict(
-        (primary_runner or run_primary_real_no_loss)(
-            loaded_fixture,
-            output_root=root / "primary",
-            allow_owned_browser_helper_launch=allow_owned_browser_helper_launch,
-            owned_browser_debug_port=owned_browser_debug_port,
-            owned_browser_executable=owned_browser_executable,
-            owned_browser_url=owned_browser_url,
-            browser_executable_resolver=_resolve_installed_browser_executable,
-            background_screenshot_dir=(
-                background_screenshot_dir
-                or root / "background-screenshots" / "primary"
-            ),
-            allow_wechat_uia_semantic_send=allow_wechat_uia_semantic_send,
-            wechat_uia_message=wechat_uia_message,
-            wechat_uia_required_markers=tuple(wechat_uia_required_markers or ()),
-            wechat_uia_forbidden_markers=tuple(wechat_uia_forbidden_markers or ()),
-            wechat_native_bridge_urls=tuple(wechat_native_bridge_urls or ()),
-            allow_wechat_native_bridge_send=allow_wechat_native_bridge_send,
-            wechat_native_bridge_message=wechat_native_bridge_message,
-            wechat_native_bridge_required_markers=tuple(
-                wechat_native_bridge_required_markers or ()
-            ),
-            wechat_native_bridge_forbidden_markers=tuple(
-                wechat_native_bridge_forbidden_markers or ()
-            ),
+    runner_stages: list[dict] = []
+    scenario_scope = _build_scenario_scope_report(
+        run_primary_scenarios=run_primary_scenarios,
+        run_agent_app_scenarios=run_agent_app_scenarios,
+        run_agent_cli_scenarios=run_agent_cli_scenarios,
+    )
+    system_dialog_preflight = _report_to_dict(
+        _run_major_stage(
+            "system_dialog_preflight",
+            runner_timeout_sec=runner_timeout_sec,
+            stage_reports=runner_stages,
+            output_root=root,
+            runner=lambda: (
+                system_dialog_preflight_runner or run_desktop_system_dialog_preflight
+            )(),
         )
     )
+    if _system_dialog_preflight_failed(system_dialog_preflight):
+        report = MajorScenarioRealNoLossReport(
+            output_root=str(root),
+            artifact_path="",
+            primary_report={},
+            owned_ide_bridge_helper_report=_disabled_owned_ide_bridge_helper_report(),
+            agent_native_cdp_bridge_helper_report=(
+                _disabled_agent_native_cdp_bridge_helper_report()
+            ),
+            agent_app_report={},
+            agent_app_bridge_fixture_smoke_report=(
+                _disabled_agent_app_bridge_fixture_smoke_report()
+            ),
+            agent_cli_report={},
+            agent_native_bridge_fixture_smoke_report=(
+                _disabled_agent_native_bridge_fixture_smoke_report()
+            ),
+            wechat_native_bridge_fixture_smoke_report=(
+                _disabled_wechat_native_bridge_fixture_smoke_report()
+            ),
+            system_dialog_preflight_report=system_dialog_preflight,
+            agent_app_devtools_resolution_report={},
+            agent_app_devtools_owned_launch_report=(
+                _disabled_agent_app_devtools_owned_launch_report()
+            ),
+            scenario_scope_report=scenario_scope,
+            runner_stage_reports=tuple(runner_stages),
+            requirements=(),
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
+        return _write_report_artifact(root, report)
+    loaded_fixture = (
+        fixture
+        if fixture is not None
+        else (load_simulation_fixture(fixture_path) if run_primary_scenarios else {})
+    )
+
+    primary = _disabled_primary_scenario_report()
+    if run_primary_scenarios:
+        primary = _report_to_dict(
+            _run_major_stage(
+                "primary",
+                runner_timeout_sec=runner_timeout_sec,
+                stage_reports=runner_stages,
+                output_root=root,
+                runner=lambda: (primary_runner or run_primary_real_no_loss)(
+                    loaded_fixture,
+                    output_root=root / "primary",
+                    allow_owned_browser_helper_launch=allow_owned_browser_helper_launch,
+                    owned_browser_debug_port=owned_browser_debug_port,
+                    owned_browser_executable=owned_browser_executable,
+                    owned_browser_url=owned_browser_url,
+                    browser_executable_resolver=_resolve_installed_browser_executable,
+                    background_screenshot_dir=(
+                        background_screenshot_dir
+                        or root / "background-screenshots" / "primary"
+                    ),
+                    allow_wechat_uia_semantic_send=allow_wechat_uia_semantic_send,
+                    wechat_uia_message=wechat_uia_message,
+                    wechat_uia_required_markers=tuple(
+                        wechat_uia_required_markers or ()
+                    ),
+                    wechat_uia_forbidden_markers=tuple(
+                        wechat_uia_forbidden_markers or ()
+                    ),
+                    wechat_native_bridge_urls=tuple(wechat_native_bridge_urls or ()),
+                    wechat_native_bridge_registry_paths=tuple(
+                        wechat_native_bridge_registry_paths or ()
+                    ),
+                    allow_wechat_native_bridge_send=allow_wechat_native_bridge_send,
+                    wechat_native_bridge_message=wechat_native_bridge_message,
+                    wechat_native_bridge_required_markers=tuple(
+                        wechat_native_bridge_required_markers or ()
+                    ),
+                    wechat_native_bridge_forbidden_markers=tuple(
+                        wechat_native_bridge_forbidden_markers or ()
+                    ),
+                    system_dialog_preflight_runner=lambda: dict(
+                        system_dialog_preflight
+                    ),
+                ),
+            )
+        )
     helper = _disabled_owned_ide_bridge_helper_report()
     native_helper = _disabled_agent_native_cdp_bridge_helper_report()
+    bridge_fixture_smoke = _disabled_agent_app_bridge_fixture_smoke_report()
+    native_bridge_fixture_smoke = _disabled_agent_native_bridge_fixture_smoke_report()
+    wechat_bridge_fixture_smoke = _disabled_wechat_native_bridge_fixture_smoke_report()
     agent_app_devtools_launch = _disabled_agent_app_devtools_owned_launch_report()
     app: dict = {}
     cli: dict = {}
-    app_devtools_resolution: dict = _build_agent_app_devtools_resolution_report(
-        tuple(agent_apps),
-        resolver=agent_app_devtools_resolver,
-    )
+    app_devtools_resolution: dict = {}
+    ide_extension_readiness: dict = {}
+    if stop_on_runner_timeout and _runner_stage_timed_out(primary):
+        app = (
+            _skipped_after_runner_timeout_report("agent_app")
+            if run_agent_app_scenarios
+            else _disabled_agent_app_scenario_report()
+        )
+        cli = (
+            _skipped_after_runner_timeout_report("agent_cli")
+            if run_agent_cli_scenarios
+            else _disabled_agent_cli_scenario_report()
+        )
+        report = MajorScenarioRealNoLossReport(
+            output_root=str(root),
+            artifact_path="",
+            primary_report=primary,
+            owned_ide_bridge_helper_report=helper,
+            agent_native_cdp_bridge_helper_report=native_helper,
+            agent_app_report=app,
+            agent_app_bridge_fixture_smoke_report=bridge_fixture_smoke,
+            agent_cli_report=cli,
+            agent_native_bridge_fixture_smoke_report=native_bridge_fixture_smoke,
+            wechat_native_bridge_fixture_smoke_report=wechat_bridge_fixture_smoke,
+            system_dialog_preflight_report=system_dialog_preflight,
+            ide_extension_readiness_report=ide_extension_readiness,
+            agent_app_devtools_resolution_report=app_devtools_resolution,
+            agent_app_devtools_owned_launch_report=agent_app_devtools_launch,
+            scenario_scope_report=scenario_scope,
+            runner_stage_reports=tuple(runner_stages),
+            requirements=_build_requirements(
+                primary,
+                app,
+                cli,
+                cli_agents=tuple(cli_agents),
+                include_primary=run_primary_scenarios,
+                include_agent_app=run_agent_app_scenarios,
+                include_agent_cli=run_agent_cli_scenarios,
+            ),
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
+        return _write_report_artifact(root, report)
+    if run_agent_app_scenarios:
+        app_devtools_resolution = _build_agent_app_devtools_resolution_report(
+            tuple(agent_apps),
+            resolver=agent_app_devtools_resolver,
+        )
     try:
-        if allow_owned_ide_bridge_helper_launch:
+        if run_agent_app_scenarios and allow_owned_ide_bridge_helper_launch:
             helper = _report_to_dict(
-                (owned_ide_bridge_helper_runner or prepare_owned_ide_bridge_helper)(
-                    output_root=root / "owned-ide-bridge",
-                    project_name=project_name,
-                    task_name=task_name,
-                    ide_executable=owned_ide_executable,
-                    ide_bridge_port=owned_ide_bridge_port,
-                    ide_user_data_dir=owned_ide_user_data_dir,
-                    ide_extensions_dir=owned_ide_extensions_dir,
-                    ide_extension_dir=owned_ide_extension_dir,
-                    workspace_root=owned_ide_workspace_root,
-                    adapter_id=owned_ide_chat_adapter_id,
-                    capability_timeout_sec=owned_ide_capability_timeout_sec,
+                _run_major_stage(
+                    "owned_ide_bridge_helper",
+                    runner_timeout_sec=runner_timeout_sec,
+                    stage_reports=runner_stages,
+                    output_root=root,
+                    runner=lambda: (
+                        owned_ide_bridge_helper_runner or prepare_owned_ide_bridge_helper
+                    )(
+                        output_root=root / "owned-ide-bridge",
+                        project_name=project_name,
+                        task_name=task_name,
+                        ide_executable=owned_ide_executable,
+                        ide_bridge_port=owned_ide_bridge_port,
+                        ide_user_data_dir=owned_ide_user_data_dir,
+                        ide_extensions_dir=owned_ide_extensions_dir,
+                        ide_extension_dir=owned_ide_extension_dir,
+                        workspace_root=owned_ide_workspace_root,
+                        adapter_id=owned_ide_chat_adapter_id,
+                        capability_timeout_sec=owned_ide_capability_timeout_sec,
+                    ),
                 )
             )
-        if allow_agent_native_cdp_bridge_helper_launch:
+        if run_agent_app_scenarios and allow_agent_native_cdp_bridge_helper_launch:
             helper_specs = tuple(agent_native_cdp_bridge_helper_specs or ())
             if helper_specs:
                 native_helper = _report_to_dict(
-                    prepare_agent_native_cdp_bridge_helper_fleet(
-                        output_root=root / "agent-native-cdp-bridge",
-                        specs=helper_specs,
-                        project_name=project_name,
-                        task_name=task_name,
-                        registry_wait_timeout_sec=agent_native_cdp_bridge_registry_wait_timeout_sec,
-                        helper_runner=(
-                            agent_native_cdp_bridge_helper_runner
-                            or prepare_agent_native_cdp_bridge_helper
+                    _run_major_stage(
+                        "agent_native_cdp_bridge_helper",
+                        runner_timeout_sec=runner_timeout_sec,
+                        stage_reports=runner_stages,
+                        output_root=root,
+                        runner=lambda: prepare_agent_native_cdp_bridge_helper_fleet(
+                            output_root=root / "agent-native-cdp-bridge",
+                            specs=helper_specs,
+                            project_name=project_name,
+                            task_name=task_name,
+                            registry_wait_timeout_sec=agent_native_cdp_bridge_registry_wait_timeout_sec,
+                            helper_runner=(
+                                agent_native_cdp_bridge_helper_runner
+                                or prepare_agent_native_cdp_bridge_helper
+                            ),
                         ),
                     )
                 )
             else:
                 native_helper = _report_to_dict(
-                    (
-                        agent_native_cdp_bridge_helper_runner
-                        or prepare_agent_native_cdp_bridge_helper
-                    )(
-                        output_root=root / "agent-native-cdp-bridge",
-                        agent=agent_native_cdp_bridge_helper_agent,
-                        agent_id=agent_native_cdp_bridge_helper_agent_id,
-                        bridge_port=agent_native_cdp_bridge_helper_port,
-                        debugger_url=agent_native_cdp_bridge_helper_debugger_url,
-                        process_name=agent_native_cdp_bridge_helper_process_name,
-                        pid=agent_native_cdp_bridge_helper_pid,
-                        hwnd=agent_native_cdp_bridge_helper_hwnd,
-                        window_title=agent_native_cdp_bridge_helper_window_title,
-                        project_name=project_name,
-                        task_name=task_name,
-                        target_title=agent_native_cdp_bridge_helper_target_title,
-                        target_url=agent_native_cdp_bridge_helper_target_url,
-                        registry_wait_timeout_sec=agent_native_cdp_bridge_registry_wait_timeout_sec,
+                    _run_major_stage(
+                        "agent_native_cdp_bridge_helper",
+                        runner_timeout_sec=runner_timeout_sec,
+                        stage_reports=runner_stages,
+                        output_root=root,
+                        runner=lambda: (
+                            agent_native_cdp_bridge_helper_runner
+                            or prepare_agent_native_cdp_bridge_helper
+                        )(
+                            output_root=root / "agent-native-cdp-bridge",
+                            agent=agent_native_cdp_bridge_helper_agent,
+                            agent_id=agent_native_cdp_bridge_helper_agent_id,
+                            bridge_port=agent_native_cdp_bridge_helper_port,
+                            debugger_url=agent_native_cdp_bridge_helper_debugger_url,
+                            process_name=agent_native_cdp_bridge_helper_process_name,
+                            pid=agent_native_cdp_bridge_helper_pid,
+                            hwnd=agent_native_cdp_bridge_helper_hwnd,
+                            window_title=agent_native_cdp_bridge_helper_window_title,
+                            project_name=project_name,
+                            task_name=task_name,
+                            target_title=agent_native_cdp_bridge_helper_target_title,
+                            target_url=agent_native_cdp_bridge_helper_target_url,
+                            registry_wait_timeout_sec=agent_native_cdp_bridge_registry_wait_timeout_sec,
+                        ),
                     )
                 )
-        if allow_agent_app_devtools_owned_launch or allow_agent_app_devtools_default_profile_launch:
+        if run_agent_app_scenarios and (
+            allow_agent_app_devtools_owned_launch
+            or allow_agent_app_devtools_default_profile_launch
+        ):
             agent_app_devtools_launch = _report_to_dict(
-                (
-                    agent_app_devtools_owned_launch_runner
-                    or prepare_agent_app_devtools_owned_launch_fleet
-                )(
-                    output_root=root / "agent-app-devtools",
-                    resolution_report=app_devtools_resolution,
-                    workspace_path=workspace_path,
-                    default_profile_agents=(
-                        tuple(agent_apps)
-                        if allow_agent_app_devtools_default_profile_launch
-                        else ()
+                _run_major_stage(
+                    "agent_app_devtools_owned_launch",
+                    runner_timeout_sec=runner_timeout_sec,
+                    stage_reports=runner_stages,
+                    output_root=root,
+                    runner=lambda: (
+                        agent_app_devtools_owned_launch_runner
+                        or prepare_agent_app_devtools_owned_launch_fleet
+                    )(
+                        output_root=root / "agent-app-devtools",
+                        resolution_report=app_devtools_resolution,
+                        workspace_path=workspace_path,
+                        default_profile_agents=(
+                            tuple(agent_apps)
+                            if allow_agent_app_devtools_default_profile_launch
+                            else ()
+                        ),
+                        endpoint_wait_timeout_sec=agent_app_devtools_endpoint_wait_timeout_sec,
+                        request_timeout=agent_app_devtools_request_timeout_sec,
                     ),
-                    endpoint_wait_timeout_sec=agent_app_devtools_endpoint_wait_timeout_sec,
-                    request_timeout=agent_app_devtools_request_timeout_sec,
                 )
             )
-        effective_ide_bridge_urls = _effective_ide_bridge_urls(
-            ide_bridge_urls,
-            helper,
-        )
-        effective_agent_native_bridge_registry_paths = (
-            _effective_agent_native_bridge_registry_paths(
-                agent_native_bridge_registry_paths,
-                native_helper,
+        if run_agent_app_scenarios and probe_existing_ide_extension_bridge:
+            ide_extension_readiness = _report_to_dict(
+                _run_major_stage(
+                    "ide_extension_readiness",
+                    runner_timeout_sec=runner_timeout_sec,
+                    stage_reports=runner_stages,
+                    output_root=root,
+                    runner=lambda: (
+                        ide_extension_readiness_runner
+                        or probe_ide_extension_bridge_readiness
+                    )(
+                        bridge_url=ide_extension_bridge_url,
+                        agent_id=ide_extension_agent_id,
+                        project_name=project_name,
+                        workspace_path=workspace_path,
+                        request_timeout=ide_extension_request_timeout_sec,
+                    ),
+                )
             )
-        )
-        effective_workspace_path = workspace_path or str(
-            helper.get("workspace_path", "") or ""
-        )
-        app = _report_to_dict(
-            (agent_app_runner or run_agent_app_real_no_loss)(
-                agents=tuple(agent_apps),
-                project_name=project_name,
-                task_name=task_name,
-                output_root=root / "agent-app",
-                screenshot_dir=root / "background-screenshots" / "agent-app",
-                allow_uia_semantic_action=allow_uia_semantic_action,
-                uia_message=uia_message,
-                uia_required_markers=tuple(uia_required_markers or ()),
-                uia_forbidden_markers=tuple(uia_forbidden_markers or ()),
-                allow_app_bridge_send=allow_app_bridge_send,
-                bridge_message=app_bridge_message,
-                required_markers=tuple(app_bridge_required_markers or ()),
-                forbidden_markers=tuple(app_bridge_forbidden_markers or ()),
-                debugger_urls=tuple(debugger_urls or ()),
-                debugger_urls_by_agent=_agent_app_devtools_debugger_urls_by_agent(
+        if run_agent_app_bridge_fixture_smoke:
+            bridge_fixture_smoke = {
+                "enabled": True,
+                **_report_to_dict(
+                    _run_major_stage(
+                        "agent_app_bridge_fixture_smoke",
+                        runner_timeout_sec=runner_timeout_sec,
+                        stage_reports=runner_stages,
+                        output_root=root,
+                        runner=lambda: (
+                            agent_app_bridge_fixture_smoke_runner
+                            or run_default_agent_app_bridge_fixture_smoke
+                        )(
+                            message=agent_app_bridge_fixture_message,
+                            required_markers=tuple(
+                                agent_app_bridge_fixture_required_markers or ()
+                            ),
+                            forbidden_markers=tuple(
+                                agent_app_bridge_fixture_forbidden_markers or ()
+                            ),
+                        ),
+                    )
+                ),
+            }
+        if run_agent_native_bridge_fixture_smoke:
+            native_bridge_fixture_smoke = {
+                "enabled": True,
+                **_report_to_dict(
+                    _run_major_stage(
+                        "agent_native_bridge_fixture_smoke",
+                        runner_timeout_sec=runner_timeout_sec,
+                        stage_reports=runner_stages,
+                        output_root=root,
+                        runner=lambda: (
+                            agent_native_bridge_fixture_smoke_runner
+                            or run_default_agent_native_bridge_fixture_smoke
+                        )(
+                            message=agent_native_bridge_fixture_message,
+                            required_markers=tuple(
+                                agent_native_bridge_fixture_required_markers or ()
+                            ),
+                            forbidden_markers=tuple(
+                                agent_native_bridge_fixture_forbidden_markers or ()
+                            ),
+                        ),
+                    )
+                ),
+            }
+        if run_wechat_native_bridge_fixture_smoke:
+            wechat_bridge_fixture_smoke = {
+                "enabled": True,
+                **_report_to_dict(
+                    _run_major_stage(
+                        "wechat_native_bridge_fixture_smoke",
+                        runner_timeout_sec=runner_timeout_sec,
+                        stage_reports=runner_stages,
+                        output_root=root,
+                        runner=lambda: (
+                            wechat_native_bridge_fixture_smoke_runner
+                            or run_default_wechat_native_bridge_fixture_smoke
+                        )(
+                            message=wechat_native_bridge_fixture_message,
+                            required_markers=tuple(
+                                wechat_native_bridge_fixture_required_markers or ()
+                            ),
+                            forbidden_markers=tuple(
+                                wechat_native_bridge_fixture_forbidden_markers or ()
+                            ),
+                        ),
+                    )
+                ),
+            }
+        if run_agent_app_scenarios:
+            effective_ide_bridge_urls = _effective_ide_bridge_urls(
+                ide_bridge_urls,
+                helper,
+                ide_extension_readiness,
+            )
+            effective_agent_native_bridge_registry_paths = (
+                _effective_agent_native_bridge_registry_paths(
+                    agent_native_bridge_registry_paths,
+                    native_helper,
+                )
+            )
+            effective_workspace_path = workspace_path or str(
+                helper.get("workspace_path", "") or ""
+            )
+            app_agents = tuple(agent_apps)
+            app_runner = agent_app_runner or run_agent_app_real_no_loss
+            app_common_kwargs = {
+                "project_name": project_name,
+                "task_name": task_name,
+                "screenshot_dir": root / "background-screenshots" / "agent-app",
+                "allow_uia_semantic_action": allow_uia_semantic_action,
+                "uia_message": uia_message,
+                "uia_required_markers": tuple(uia_required_markers or ()),
+                "uia_forbidden_markers": tuple(uia_forbidden_markers or ()),
+                "allow_app_bridge_send": allow_app_bridge_send,
+                "bridge_message": app_bridge_message,
+                "required_markers": tuple(app_bridge_required_markers or ()),
+                "forbidden_markers": tuple(app_bridge_forbidden_markers or ()),
+                "allow_codex_app_server_thread_start": (
+                    allow_codex_app_server_thread_start
+                ),
+                "codex_app_server_thread_start_timeout": (
+                    codex_app_server_thread_start_timeout
+                ),
+                "allow_codex_app_server_turn_start": (
+                    allow_codex_app_server_turn_start
+                ),
+                "codex_app_server_turn_start_timeout": (
+                    codex_app_server_turn_start_timeout
+                ),
+                "debugger_urls": tuple(debugger_urls or ()),
+                "debugger_urls_by_agent": _agent_app_devtools_debugger_urls_by_agent(
                     agent_app_devtools_launch
                 ),
-                ide_bridge_urls=effective_ide_bridge_urls,
-                agent_native_bridge_urls=tuple(agent_native_bridge_urls or ()),
-                agent_native_bridge_registry_paths=effective_agent_native_bridge_registry_paths,
-                workspace_path=effective_workspace_path,
-                process_provider=_combined_agent_app_process_provider(
+                "ide_bridge_urls": effective_ide_bridge_urls,
+                "agent_native_bridge_urls": tuple(agent_native_bridge_urls or ()),
+                "agent_native_bridge_registry_paths": (
+                    effective_agent_native_bridge_registry_paths
+                ),
+                "codex_app_server_ws_urls": tuple(codex_app_server_ws_urls or ()),
+                "workspace_path": effective_workspace_path,
+                "process_provider": _combined_agent_app_process_provider(
                     agent_app_process_provider,
                     agent_app_devtools_launch,
                 ),
-                request_timeout=agent_app_devtools_request_timeout_sec,
-            )
-        )
-        cli = _report_to_dict(
-            (agent_cli_runner or run_agent_cli_real_no_loss)(
-                agents=tuple(cli_agents),
-                output_root=root / "agent-cli",
-                allow_cli_execution=allow_agent_cli_execution,
-                timeout_sec=agent_cli_timeout_sec,
-            )
-        )
+                "request_timeout": agent_app_devtools_request_timeout_sec,
+            }
+            if isolate_agent_app_scenarios and len(app_agents) > 1:
+                app = _merge_agent_runner_reports(
+                    [
+                        _report_to_dict(
+                            _run_major_stage(
+                                f"agent_app:{agent}",
+                                runner_timeout_sec=runner_timeout_sec,
+                                stage_reports=runner_stages,
+                                output_root=root,
+                                runner=lambda agent=agent: app_runner(
+                                    agents=(agent,),
+                                    output_root=root / "agent-app" / _safe_stage_id(agent),
+                                    **app_common_kwargs,
+                                ),
+                            )
+                        )
+                        for agent in app_agents
+                    ],
+                    mode="agent-app-real-no-loss",
+                    safety_mode="real_no_loss",
+                )
+            else:
+                app = _report_to_dict(
+                    _run_major_stage(
+                        "agent_app",
+                        runner_timeout_sec=runner_timeout_sec,
+                        stage_reports=runner_stages,
+                        output_root=root,
+                        runner=lambda: app_runner(
+                            agents=app_agents,
+                            output_root=root / "agent-app",
+                            **app_common_kwargs,
+                        ),
+                    )
+                )
+        else:
+            app = _disabled_agent_app_scenario_report()
+        if run_agent_cli_scenarios:
+            cli_agents_tuple = tuple(cli_agents)
+            cli_runner = agent_cli_runner or run_agent_cli_real_no_loss
+            if isolate_agent_cli_scenarios and len(cli_agents_tuple) > 1:
+                cli = _merge_agent_runner_reports(
+                    [
+                        _report_to_dict(
+                            _run_major_stage(
+                                f"agent_cli:{agent}",
+                                runner_timeout_sec=runner_timeout_sec,
+                                stage_reports=runner_stages,
+                                output_root=root,
+                                runner=lambda agent=agent: cli_runner(
+                                    agents=(agent,),
+                                    output_root=root / "agent-cli" / _safe_stage_id(agent),
+                                    allow_cli_execution=allow_agent_cli_execution,
+                                    timeout_sec=agent_cli_timeout_sec,
+                                ),
+                            )
+                        )
+                        for agent in cli_agents_tuple
+                    ],
+                    mode="agent-cli-real-no-loss",
+                    safety_mode="real_no_loss",
+                )
+            else:
+                cli = _report_to_dict(
+                    _run_major_stage(
+                        "agent_cli",
+                        runner_timeout_sec=runner_timeout_sec,
+                        stage_reports=runner_stages,
+                        output_root=root,
+                        runner=lambda: cli_runner(
+                            agents=cli_agents_tuple,
+                            output_root=root / "agent-cli",
+                            allow_cli_execution=allow_agent_cli_execution,
+                            timeout_sec=agent_cli_timeout_sec,
+                        ),
+                    )
+                )
+        else:
+            cli = _disabled_agent_cli_scenario_report()
     finally:
         native_helper = _stop_agent_native_cdp_bridge_helper_if_needed(native_helper)
         agent_app_devtools_launch = _stop_agent_app_devtools_owned_launch_if_needed(
@@ -634,10 +1274,25 @@ def run_major_scenario_real_no_loss(
         owned_ide_bridge_helper_report=helper,
         agent_native_cdp_bridge_helper_report=native_helper,
         agent_app_report=app,
+        agent_app_bridge_fixture_smoke_report=bridge_fixture_smoke,
         agent_cli_report=cli,
+        agent_native_bridge_fixture_smoke_report=native_bridge_fixture_smoke,
+        wechat_native_bridge_fixture_smoke_report=wechat_bridge_fixture_smoke,
+        system_dialog_preflight_report=system_dialog_preflight,
+        ide_extension_readiness_report=ide_extension_readiness,
         agent_app_devtools_resolution_report=app_devtools_resolution,
         agent_app_devtools_owned_launch_report=agent_app_devtools_launch,
-        requirements=_build_requirements(primary, app, cli),
+        scenario_scope_report=scenario_scope,
+        runner_stage_reports=tuple(runner_stages),
+        requirements=_build_requirements(
+            primary,
+            app,
+            cli,
+            cli_agents=tuple(cli_agents),
+            include_primary=run_primary_scenarios,
+            include_agent_app=run_agent_app_scenarios,
+            include_agent_cli=run_agent_cli_scenarios,
+        ),
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
     return _write_report_artifact(root, report)
@@ -659,6 +1314,12 @@ def format_major_scenario_real_no_loss_report(
             f"Agent commands: {report.agent_command_attempts}"
         ),
         (
+            "Scenario scope: "
+            f"primary={str(report.scenario_scope_report.get('primary_scenarios_enabled', True)).lower()}  "
+            f"agent_app={str(report.scenario_scope_report.get('agent_app_scenarios_enabled', True)).lower()}  "
+            f"agent_cli={str(report.scenario_scope_report.get('agent_cli_scenarios_enabled', True)).lower()}"
+        ),
+        (
             f"Screenshots: {report.background_screenshot_success_count}/"
             f"{report.background_screenshot_count}  "
             f"Focus stable: {str(report.background_screenshot_focus_stable).lower()}"
@@ -674,6 +1335,24 @@ def format_major_scenario_real_no_loss_report(
             f"stops={report.agent_app_devtools_stop_attempts}  "
             f"cleanup={str(report.agent_app_devtools_cleanup_ok).lower()}"
         ),
+        (
+            "Agent app bridge fixture: "
+            f"enabled={str(report.agent_app_bridge_fixture_smoke_enabled).lower()}  "
+            f"ok={str(report.agent_app_bridge_fixture_smoke_ok).lower()}  "
+            f"native calls={report.agent_app_bridge_fixture_native_call_attempts}"
+        ),
+        (
+            "Agent native bridge fixture: "
+            f"enabled={str(report.agent_native_bridge_fixture_smoke_enabled).lower()}  "
+            f"ok={str(report.agent_native_bridge_fixture_smoke_ok).lower()}  "
+            f"native calls={report.agent_native_bridge_fixture_native_call_attempts}"
+        ),
+        (
+            "WeChat native bridge fixture: "
+            f"enabled={str(report.wechat_native_bridge_fixture_smoke_enabled).lower()}  "
+            f"ok={str(report.wechat_native_bridge_fixture_smoke_ok).lower()}  "
+            f"native calls={report.wechat_native_bridge_fixture_native_call_attempts}"
+        ),
     ]
     for requirement in report.requirements:
         lines.append(
@@ -687,64 +1366,105 @@ def format_major_scenario_real_no_loss_report(
     return "\n".join(lines).rstrip()
 
 
-def _build_requirements(primary: dict, app: dict, cli: dict) -> tuple[MajorRequirement, ...]:
+def _build_requirements(
+    primary: dict,
+    app: dict,
+    cli: dict,
+    cli_agents: Iterable[str] = DEFAULT_CLI_AGENTS,
+    *,
+    include_primary: bool = True,
+    include_agent_app: bool = True,
+    include_agent_cli: bool = True,
+) -> tuple[MajorRequirement, ...]:
     primary_cases = _cases_by_key(primary, "scenario_id")
     app_cases = _cases_by_key(app, "agent")
     cli_cases = _cases_by_key(cli, "agent")
-    return (
-        _primary_requirement(
-            "wechat_background_observation",
-            "wechat",
-            "background_observation",
-            primary_cases.get("wechat.chat.draft_reply", {}),
-        ),
-        _wechat_background_send_requirement(
-            primary_cases.get("wechat.chat.draft_reply", {})
-        ),
-        _primary_requirement(
-            "word_background_document",
-            "word",
-            "hidden_com_create_save_readback",
-            primary_cases.get("word.document.create_background", {}),
-        ),
-        _primary_requirement(
-            "browser_background_research",
-            "browser",
-            "owned_cdp_read_page",
-            primary_cases.get("browser.research.collect_sources", {}),
-        ),
-        _primary_requirement(
-            "file_background_search",
-            "files",
-            "owned_filesystem_search",
-            primary_cases.get("files.search.find_candidate", {}),
-        ),
-        _cli_requirement(
-            "codex_cli_background_task",
-            "codex",
-            cli_cases.get("codex", {}),
-        ),
-        _cli_requirement(
-            "claude_cli_background_task",
-            "claude",
-            cli_cases.get("claude", {}),
-        ),
-        _app_requirement(
-            "codex_app_background_chat",
-            "codex app",
-            app_cases.get("codex app", {}),
-        ),
-        _app_requirement(
-            "claude_desktop_background_chat",
-            "claude desktop",
-            app_cases.get("claude desktop", {}),
-        ),
-        _app_requirement(
-            "cursor_background_chat",
-            "cursor",
-            app_cases.get("cursor", {}),
-        ),
-    )
+    requirements: list[MajorRequirement] = []
+    if include_primary:
+        requirements.extend(
+            [
+                _primary_requirement(
+                    "wechat_background_observation",
+                    "wechat",
+                    "background_observation",
+                    primary_cases.get("wechat.chat.draft_reply", {}),
+                ),
+                _wechat_background_send_requirement(
+                    primary_cases.get("wechat.chat.draft_reply", {})
+                ),
+                _primary_requirement(
+                    "word_background_document",
+                    "word",
+                    "hidden_com_create_save_readback",
+                    primary_cases.get("word.document.create_background", {}),
+                ),
+                _primary_requirement(
+                    "browser_background_research",
+                    "browser",
+                    "owned_cdp_read_page",
+                    primary_cases.get("browser.research.collect_sources", {}),
+                ),
+                _primary_requirement(
+                    "file_background_search",
+                    "files",
+                    "owned_filesystem_search",
+                    primary_cases.get("files.search.find_candidate", {}),
+                ),
+            ]
+        )
+    if include_agent_cli:
+        for agent_id in _selected_cli_requirement_agent_ids(cli_agents):
+            requirement_id, surface = CLI_REQUIREMENT_SPECS[agent_id]
+            requirements.append(
+                _cli_requirement(
+                    requirement_id,
+                    surface,
+                    cli_cases.get(agent_id, {}),
+                )
+            )
+    if include_agent_app:
+        requirements.extend(
+            [
+                _app_requirement(
+                    "codex_app_background_chat",
+                    "codex app",
+                    app_cases.get("codex app", {}),
+                ),
+                _app_requirement(
+                    "claude_desktop_background_chat",
+                    "claude desktop",
+                    app_cases.get("claude desktop", {}),
+                ),
+                _app_requirement(
+                    "cursor_background_chat",
+                    "cursor",
+                    app_cases.get("cursor", _protected_cursor_desktop_case()),
+                ),
+            ]
+        )
+    return tuple(requirements)
+
+
+def _selected_cli_requirement_agent_ids(cli_agents: Iterable[str]) -> tuple[str, ...]:
+    selected = {
+        agent_id
+        for agent in cli_agents
+        for agent_id in (_cli_requirement_agent_id(agent),)
+        if agent_id
+    }
+    return tuple(agent_id for agent_id in CLI_REQUIREMENT_SPECS if agent_id in selected)
+
+
+def _cli_requirement_agent_id(agent: str) -> str:
+    normalized = str(agent or "").strip().lower().replace("_", " ").replace("-", " ")
+    normalized = " ".join(normalized.split())
+    if normalized in {"codex", "codex cli", "openai codex"}:
+        return "codex"
+    if normalized in {"claude", "claude cli", "claude code", "anthropic claude"}:
+        return "claude"
+    if normalized in {"cursor", "cursor agent", "cursor cli"}:
+        return "cursor"
+    return ""
 
 
 def _primary_requirement(
@@ -867,13 +1587,20 @@ def _app_requirement(requirement_id: str, surface: str, case: dict) -> MajorRequ
     }:
         status = "verified"
         reason = ""
+    elif raw_status == "auth_required":
+        status = "auth_required"
+        reason = raw_status
     elif raw_status.startswith("gated_") or bool(case.get("native_ready", False)):
         status = "gated"
+        native_ready = bool(case.get("native_ready", False))
         reason = (
             "native_connector_ready_but_send_not_verified"
-            if raw_status == "native_connector_ready"
+            if native_ready or raw_status == "native_connector_ready"
             else raw_status or "native_ready_send_not_verified"
         )
+    elif raw_status == "app_installed_not_running_connector_required":
+        status = "gated"
+        reason = raw_status
     elif raw_status == "unavailable" or not case:
         status = "unavailable"
         reason = raw_status or "case_missing"
@@ -891,11 +1618,25 @@ def _app_requirement(requirement_id: str, surface: str, case: dict) -> MajorRequ
     )
 
 
+def _protected_cursor_desktop_case() -> dict:
+    return {
+        "agent": "cursor",
+        "status": "gated_cursor_desktop_protected_explicit_bridge_required",
+        "real_verified": False,
+        "native_ready": False,
+        "protected_default": True,
+        "protection_reason": "active_cursor_desktop_protected",
+        "required_endpoint_kind": "explicit_ide_bridge_or_isolated_cursor_profile",
+        "next_action": "provide_explicit_bridge_url_or_run_isolated_cursor_profile",
+    }
+
+
 def _build_agent_app_endpoint_acceptance(
     app_report: dict,
     native_helper_report: dict,
     app_devtools_resolution_report: dict | None = None,
     app_devtools_launch_report: dict | None = None,
+    output_root: str | Path = "",
 ) -> dict:
     cases = [
         _build_agent_app_endpoint_acceptance_case(
@@ -903,6 +1644,7 @@ def _build_agent_app_endpoint_acceptance(
             native_helper_report,
             app_devtools_resolution_report or {},
             app_devtools_launch_report or {},
+            output_root=output_root,
         )
         for case in app_report.get("cases", []) or []
         if isinstance(case, dict)
@@ -930,11 +1672,145 @@ def _build_agent_app_endpoint_acceptance(
     }
 
 
+def _build_agent_app_endpoint_readiness(
+    app_report: dict,
+    endpoint_acceptance_report: dict,
+    ide_extension_readiness_report: dict | None = None,
+) -> dict:
+    acceptance_cases = [
+        dict(case)
+        for case in endpoint_acceptance_report.get("cases", []) or []
+        if isinstance(case, dict)
+    ]
+    app_cases = _cases_by_key(app_report, "agent")
+    cases = [
+        _build_agent_app_endpoint_readiness_case(
+            acceptance_case,
+            app_cases.get(str(acceptance_case.get("agent", "") or "").strip(), {}),
+            ide_extension_readiness_report or {},
+        )
+        for acceptance_case in acceptance_cases
+    ]
+    return {
+        "mode": "agent-app-endpoint-readiness",
+        "safety_mode": "read_only",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "bridge_send_attempts": 0,
+        "total_cases": len(cases),
+        "observed_endpoint_cases": sum(
+            1 for case in cases if int(case.get("observed_endpoint_count", 0) or 0) > 0
+        ),
+        "ready_endpoint_cases": sum(
+            1 for case in cases if bool(case.get("endpoint_ready", False))
+        ),
+        "background_send_contract_candidate_cases": sum(
+            1
+            for case in cases
+            if bool(case.get("can_prepare_background_send_contract", False))
+        ),
+        "send_verified_cases": sum(
+            1 for case in cases if bool(case.get("send_verified", False))
+        ),
+        "blocked_cases": sum(
+            1 for case in cases if not bool(case.get("endpoint_ready", False))
+        ),
+        "ready_endpoint_type_counts": _count_case_values(cases, "ready_endpoint_type"),
+        "blocking_reason_counts": _count_case_values(cases, "blocking_reason"),
+        "cases": cases,
+    }
+
+
+def _build_agent_app_endpoint_readiness_case(
+    acceptance_case: dict,
+    app_case: dict,
+    ide_extension_readiness_report: dict,
+) -> dict:
+    endpoints = [
+        dict(endpoint)
+        for endpoint in acceptance_case.get("observed_endpoints", []) or []
+        if isinstance(endpoint, dict)
+    ]
+    ready_endpoint = _first_ready_endpoint(endpoints)
+    agent = str(acceptance_case.get("agent", "") or "").strip()
+    agent_id = str(acceptance_case.get("agent_id", "") or "").strip()
+    endpoint_ready = bool(acceptance_case.get("endpoint_ready", False))
+    send_verified = bool(acceptance_case.get("send_verified", False))
+    supplemental = _matching_ide_extension_readiness(
+        ide_extension_readiness_report,
+        agent_id=agent_id,
+    )
+    blocking_reason = str(acceptance_case.get("blocking_reason", "") or "").strip()
+    if not endpoint_ready and supplemental and supplemental.get("blocking_reason"):
+        blocking_reason = str(supplemental.get("blocking_reason", "") or blocking_reason)
+    codex_app_server_turn_dry_run = _details(
+        app_case.get("codex_app_server_turn_dry_run", {})
+    )
+    codex_app_server_turn_contract_ready = bool(
+        app_case.get("codex_app_server_turn_contract_ready", False)
+        or codex_app_server_turn_dry_run.get("ok", False)
+    )
+    codex_app_server_thread_start_required = bool(
+        app_case.get("codex_app_server_thread_start_required", False)
+        or codex_app_server_turn_dry_run.get("thread_start_required", False)
+    )
+    codex_app_server_thread_start_ready = bool(
+        app_case.get("codex_app_server_thread_start_ready", False)
+        or codex_app_server_turn_dry_run.get("thread_start_ready", False)
+    )
+    codex_app_server_turn_start_ready = bool(
+        app_case.get("codex_app_server_turn_start_ready", False)
+        or codex_app_server_turn_dry_run.get("turn_start_ready", False)
+    )
+    return {
+        "agent": agent,
+        "agent_id": agent_id,
+        "status": str(acceptance_case.get("status", "") or "").strip(),
+        "endpoint_ready": endpoint_ready,
+        "send_verified": send_verified,
+        "can_prepare_background_send_contract": bool(endpoint_ready and not send_verified),
+        "codex_app_server_turn_contract_ready": codex_app_server_turn_contract_ready,
+        "codex_app_server_thread_start_required": codex_app_server_thread_start_required,
+        "codex_app_server_thread_start_ready": codex_app_server_thread_start_ready,
+        "codex_app_server_turn_start_ready": codex_app_server_turn_start_ready,
+        "codex_app_server_turn_dry_run": codex_app_server_turn_dry_run,
+        "observed_endpoint_count": int(
+            acceptance_case.get("observed_endpoint_count", 0) or 0
+        ),
+        "ready_endpoint_count": int(acceptance_case.get("ready_endpoint_count", 0) or 0),
+        "observed_endpoint_types": _endpoint_types(endpoints),
+        "observed_endpoint_errors": list(
+            acceptance_case.get("observed_endpoint_errors", []) or []
+        ),
+        "ready_endpoint_type": str(ready_endpoint.get("endpoint_type", "") or ""),
+        "ready_endpoint_url": _endpoint_url(ready_endpoint),
+        "ready_endpoint_source": str(ready_endpoint.get("source", "") or ""),
+        "required_endpoint_kind": str(
+            acceptance_case.get("required_endpoint_kind", "") or ""
+        ),
+        "next_action": str(acceptance_case.get("next_action", "") or ""),
+        "blocking_reason": blocking_reason,
+        "no_focus_required": bool(acceptance_case.get("no_focus_required", True)),
+        "native_ready": bool(app_case.get("native_ready", False)),
+        "real_verified": bool(app_case.get("real_verified", False)),
+        "app_status": str(app_case.get("status", "") or ""),
+        "existing_ide_extension_readiness": supplemental,
+        "helper_status": dict(acceptance_case.get("helper_status", {}) or {}),
+        "helper_spec_template": dict(acceptance_case.get("helper_spec_template", {}) or {}),
+        "owned_devtools_launch_plan_template": dict(
+            acceptance_case.get("owned_devtools_launch_plan_template", {}) or {}
+        ),
+    }
+
+
 def _build_agent_app_endpoint_acceptance_case(
     case: dict,
     native_helper_report: dict,
     app_devtools_resolution_report: dict,
     app_devtools_launch_report: dict,
+    *,
+    output_root: str | Path = "",
 ) -> dict:
     agent = str(case.get("agent", "") or "").strip()
     defaults = _agent_app_endpoint_defaults(agent)
@@ -1023,6 +1899,7 @@ def _build_agent_app_endpoint_acceptance_case(
             defaults=defaults,
             resolution=devtools_resolution,
             launch_helper=devtools_launch_helper,
+            output_root=output_root,
         ),
         "helper_status": helper_status,
     }
@@ -1071,7 +1948,11 @@ def _build_agent_app_devtools_resolution_case(
             "decision": "resolution_failed",
             "error": str(exc) or exc.__class__.__name__,
         }
-    executable_path = _launchable_agent_app_executable_path(resolution)
+    executable_path, launch_blocking_reason = _launchable_agent_app_executable(
+        resolution,
+        agent=agent,
+        agent_id=defaults["agent_id"],
+    )
     if executable_path:
         status = "resolved"
     elif bool(resolution.get("ok", False)):
@@ -1086,40 +1967,127 @@ def _build_agent_app_devtools_resolution_case(
         "status": status,
         "executable_ready": bool(executable_path),
         "executable_path": executable_path,
+        "launch_blocking_reason": launch_blocking_reason,
         "app_resolution": resolution,
     }
 
 
-def _launchable_agent_app_executable_path(resolution: dict) -> str:
+def _launchable_agent_app_executable(
+    resolution: dict,
+    *,
+    agent: str,
+    agent_id: str,
+) -> tuple[str, str]:
+    blocking_reason = ""
     path = str(resolution.get("path", "") or "").strip()
     source = str(resolution.get("source", "") or "").strip()
-    selected_path = _launchable_agent_app_candidate_path(
-        {"path": path, "source": source}
+    selected_path, selected_blocking = _launchable_agent_app_candidate_path(
+        {
+            "path": path,
+            "source": source,
+            "display_name": resolution.get("app_name", "") or agent,
+            "executable_name": Path(path).name if path else "",
+        },
+        agent=agent,
+        agent_id=agent_id,
     )
     if selected_path:
-        return selected_path
+        return selected_path, ""
+    blocking_reason = blocking_reason or selected_blocking
     selected = resolution.get("selected_candidate", {})
     if isinstance(selected, dict):
-        selected_candidate_path = _launchable_agent_app_candidate_path(selected)
+        selected_candidate_path, selected_candidate_blocking = (
+            _launchable_agent_app_candidate_path(
+                selected,
+                agent=agent,
+                agent_id=agent_id,
+            )
+        )
         if selected_candidate_path:
-            return selected_candidate_path
+            return selected_candidate_path, ""
+        blocking_reason = blocking_reason or selected_candidate_blocking
     for candidate in resolution.get("candidates", []) or []:
         if not isinstance(candidate, dict):
             continue
-        candidate_path = _launchable_agent_app_candidate_path(candidate)
+        candidate_path, candidate_blocking = _launchable_agent_app_candidate_path(
+            candidate,
+            agent=agent,
+            agent_id=agent_id,
+        )
         if candidate_path:
-            return candidate_path
-    return ""
+            return candidate_path, ""
+        blocking_reason = blocking_reason or candidate_blocking
+    return "", blocking_reason
 
 
-def _launchable_agent_app_candidate_path(candidate: dict) -> str:
+def _launchable_agent_app_candidate_path(
+    candidate: dict,
+    *,
+    agent: str,
+    agent_id: str,
+) -> tuple[str, str]:
     path = str(candidate.get("path", "") or "").strip()
     source = str(candidate.get("source", "") or "").strip()
     if not path or source == "start-apps":
-        return ""
+        return "", ""
+    blocking_reason = _agent_app_launch_blocking_reason(
+        candidate,
+        agent=agent,
+        agent_id=agent_id,
+    )
+    if blocking_reason:
+        return "", blocking_reason
+    if _is_windowsapps_msix_path(path):
+        return "", "msix_windowsapps_not_background_launchable"
     if Path(path).suffix.lower() != ".exe":
+        return "", ""
+    return path, ""
+
+
+def _agent_app_launch_blocking_reason(
+    candidate: dict,
+    *,
+    agent: str,
+    agent_id: str,
+) -> str:
+    path = str(candidate.get("path", "") or "").strip()
+    if not path:
         return ""
-    return path
+    surface = _agent_app_candidate_surface_kind(candidate, agent=agent, agent_id=agent_id)
+    if surface == "cli":
+        return "agent_app_cli_path_not_background_launchable"
+    if _is_windowsapps_msix_path(path):
+        return "msix_windowsapps_not_background_launchable"
+    return ""
+
+
+def _agent_app_candidate_surface_kind(
+    candidate: dict,
+    *,
+    agent: str,
+    agent_id: str,
+) -> str:
+    path = str(candidate.get("path", "") or "").strip()
+    app_candidate = AppResolutionCandidate(
+        source=str(candidate.get("source", "") or "").strip() or "path",
+        display_name=str(candidate.get("display_name", "") or agent or "").strip(),
+        path=path,
+        executable_name=str(
+            candidate.get("executable_name", "")
+            or (Path(path).name if path else "")
+        ).strip(),
+        process_name=str(candidate.get("process_name", "") or "").strip(),
+        pid=_counter(candidate, "pid"),
+        metadata=dict(candidate.get("metadata", {}) or {}),
+    )
+    normalized_agent_id = str(agent_id or "").strip().lower()
+    if normalized_agent_id == "claude":
+        return claude_candidate_surface_kind(app_candidate)
+    if normalized_agent_id == "codex":
+        return codex_candidate_surface_kind(app_candidate)
+    if normalized_agent_id == "cursor":
+        return cursor_candidate_surface_kind(app_candidate)
+    return ""
 
 
 def _agent_app_devtools_resolution_status(
@@ -1163,23 +2131,23 @@ def _agent_app_endpoint_defaults(agent: str) -> dict:
             "agent": "claude desktop",
             "agent_id": "claude",
             "process_name": "Claude.exe",
-            "bridge_port": 18891,
-            "devtools_port": 19556,
+            "bridge_port": 0,
+            "devtools_port": 0,
         }
     if key.startswith("cursor"):
         return {
             "agent": "cursor",
             "agent_id": "cursor",
             "process_name": "Cursor.exe",
-            "bridge_port": 18892,
-            "devtools_port": 19557,
+            "bridge_port": 0,
+            "devtools_port": 0,
         }
     return {
         "agent": "codex app",
         "agent_id": "codex",
         "process_name": "Codex.exe",
-        "bridge_port": 18890,
-        "devtools_port": 19555,
+        "bridge_port": 0,
+        "devtools_port": 0,
     }
 
 
@@ -1195,11 +2163,10 @@ def _owned_devtools_launch_plan_template(
     defaults: dict,
     resolution: dict | None = None,
     launch_helper: dict | None = None,
+    output_root: str | Path = "",
 ) -> dict:
     helper = dict(launch_helper or {})
-    port = int(
-        helper.get("debug_port") or defaults.get("devtools_port", 19555) or 19555
-    )
+    port = int(helper.get("debug_port") or defaults.get("devtools_port", 0) or 0)
     process_name = str(defaults.get("process_name", "") or "").strip()
     uses_default_profile = bool(helper.get("uses_default_profile", False)) or str(
         helper.get("profile_mode", "") or ""
@@ -1208,36 +2175,68 @@ def _owned_devtools_launch_plan_template(
         helper.get("profile_mode", "")
         or ("default-user-profile" if uses_default_profile else "isolated-owned-profile")
     )
-    fallback_user_data_dir = f"logs/runtime/agent-app-devtools/{agent_id or 'agent'}/profile"
+    fallback_user_data_dir = _owned_devtools_template_user_data_dir(
+        output_root,
+        agent_id=agent_id,
+    )
     user_data_dir = (
         ""
         if uses_default_profile
-        else str(helper.get("user_data_dir", "") or fallback_user_data_dir).strip()
+        else _normalized_optional_owned_path(
+            helper.get("user_data_dir", "") or fallback_user_data_dir
+        )
     )
     resolved = dict(resolution or {})
     executable = str(
         helper.get("executable_path", "") or resolved.get("executable_path", "") or ""
     ).strip()
+    launch_blocking_reason = str(
+        helper.get("launch_blocking_reason", "")
+        or resolved.get("launch_blocking_reason", "")
+        or ""
+    ).strip()
+    if executable and not launch_blocking_reason:
+        launch_blocking_reason = _agent_app_launch_blocking_reason(
+            {
+                "path": executable,
+                "source": resolved.get("source", "") or "path",
+                "display_name": agent,
+                "executable_name": Path(executable).name,
+            },
+            agent=agent,
+            agent_id=agent_id,
+        )
     executable_ready = bool(
-        executable and (bool(helper) or bool(resolved.get("executable_ready", False)))
+        executable
+        and not launch_blocking_reason
+        and (bool(helper) or bool(resolved.get("executable_ready", False)))
     )
     if not executable:
         executable = f"<path-to-{process_name or 'agent-app.exe'}>"
-    readiness_url = str(helper.get("debugger_url", "") or f"http://127.0.0.1:{port}")
-    argv = [
-        executable,
-        f"--remote-debugging-port={port}",
-    ]
-    if user_data_dir:
-        argv.append(f"--user-data-dir={user_data_dir}")
-    argv.extend(
-        [
-            "--no-first-run",
-            "--disable-crash-reporter",
-        ]
+    readiness_url = str(
+        helper.get("debugger_url", "")
+        or ("" if port == 0 else f"http://127.0.0.1:{port}")
     )
+    argv: list[str] = []
+    if not launch_blocking_reason:
+        argv = [
+            executable,
+            f"--remote-debugging-port={port}",
+        ]
+        if user_data_dir:
+            argv.append(f"--user-data-dir={user_data_dir}")
+        argv.extend(
+            [
+                "--no-first-run",
+                "--disable-crash-reporter",
+            ]
+        )
     workspace_path = str(helper.get("workspace_path", "") or "").strip()
-    if workspace_path and _agent_app_accepts_workspace_argument(agent_id or agent):
+    if (
+        workspace_path
+        and argv
+        and _agent_app_accepts_workspace_argument(agent_id or agent)
+    ):
         argv.append(workspace_path)
     return {
         "route_id": "agent-app-devtools-owned",
@@ -1246,6 +2245,7 @@ def _owned_devtools_launch_plan_template(
         "executable": executable,
         "executable_ready": executable_ready,
         "executable_resolution_status": str(resolved.get("status", "") or "not_resolved"),
+        "launch_blocking_reason": launch_blocking_reason,
         "debug_port": port,
         "profile_mode": profile_mode,
         "uses_default_profile": uses_default_profile,
@@ -1255,6 +2255,34 @@ def _owned_devtools_launch_plan_template(
         "workspace_path": workspace_path,
         "argv": argv,
     }
+
+
+def _owned_devtools_template_user_data_dir(
+    output_root: str | Path,
+    *,
+    agent_id: str,
+) -> str:
+    root = _normalized_optional_owned_path(output_root)
+    if not root:
+        root = _normalized_optional_owned_path(Path("logs") / "runtime")
+    return str(
+        Path(root)
+        / "agent-app-devtools"
+        / _safe_stage_id(agent_id or "agent")
+        / "profile"
+    )
+
+
+def _normalized_optional_owned_path(path: str | Path) -> str:
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    return str(Path(text).expanduser().resolve())
+
+
+def _is_windowsapps_msix_path(path: str) -> bool:
+    normalized = str(path or "").strip().replace("\\", "/").casefold()
+    return "/program files/windowsapps/" in normalized
 
 
 def _agent_app_required_endpoint_kind(
@@ -1310,6 +2338,64 @@ def _observed_endpoint_errors(endpoints: list[dict]) -> list[str]:
         if error and error not in errors:
             errors.append(error)
     return errors
+
+
+def _first_ready_endpoint(endpoints: list[dict]) -> dict:
+    for endpoint in endpoints:
+        if bool(endpoint.get("ready", False)):
+            return dict(endpoint)
+    return {}
+
+
+def _endpoint_types(endpoints: list[dict]) -> list[str]:
+    values: list[str] = []
+    for endpoint in endpoints:
+        value = str(endpoint.get("endpoint_type", "") or "devtools").strip()
+        if value and value not in values:
+            values.append(value)
+    return values
+
+
+def _endpoint_url(endpoint: dict) -> str:
+    if not endpoint:
+        return ""
+    if str(endpoint.get("endpoint_type", "") or "").strip() in {
+        "agent_native_bridge",
+        "ide_bridge",
+    }:
+        return str(endpoint.get("bridge_url", "") or endpoint.get("debugger_url", "") or "")
+    return str(endpoint.get("debugger_url", "") or endpoint.get("bridge_url", "") or "")
+
+
+def _matching_ide_extension_readiness(
+    report: dict,
+    *,
+    agent_id: str,
+) -> dict:
+    if not report:
+        return {}
+    expected = str(agent_id or "").strip().lower()
+    actual = str(report.get("agent_id", "") or "").strip().lower()
+    if not expected or actual != expected:
+        return {}
+    return {
+        "status": str(report.get("status", "") or ""),
+        "blocking_reason": str(report.get("blocking_reason", "") or ""),
+        "bridge_url": str(report.get("bridge_url", "") or ""),
+        "bridge_ready": bool(report.get("bridge_ready", False)),
+        "can_execute_without_focus": bool(
+            report.get("can_execute_without_focus", False)
+        ),
+        "can_write_without_focus": bool(report.get("can_write_without_focus", False)),
+    }
+
+
+def _count_case_values(cases: list[dict], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for case in cases:
+        value = str(case.get(key, "") or "").strip() or "none"
+        counts[value] = counts.get(value, 0) + 1
+    return counts
 
 
 def _agent_native_helper_status(
@@ -1399,6 +2485,10 @@ def _compact_case_evidence(case: dict) -> dict:
         "foreground_focus_stable",
         "background_screenshot_focus_stable",
         "artifact_path",
+        "protected_default",
+        "protection_reason",
+        "required_endpoint_kind",
+        "next_action",
     ):
         if key in case:
             evidence[key] = case[key]
@@ -1675,7 +2765,7 @@ def prepare_agent_app_devtools_owned_launch_fleet(
         defaults = _agent_app_endpoint_defaults(agent or agent_id)
         effective_agent_id = agent_id or defaults["agent_id"]
         executable = str(case.get("executable_path", "") or "").strip()
-        debug_port = int(defaults.get("devtools_port", 19555) or 19555)
+        debug_port = int(defaults.get("devtools_port", 0) or 0)
         default_profile_requested = (
             str(effective_agent_id).lower() in default_profile_keys
             or str(agent).lower() in default_profile_keys
@@ -1693,7 +2783,7 @@ def prepare_agent_app_devtools_owned_launch_fleet(
         helper_root = root / f"{index:02d}-{_safe_path_component(effective_agent_id or agent)}"
         user_data_dir = helper_root / "profile"
         manifest_path = helper_root / "manifest.json"
-        readiness_url = f"http://127.0.0.1:{debug_port}"
+        readiness_url = "" if debug_port == 0 else f"http://127.0.0.1:{debug_port}"
         launch_report: dict = {}
         endpoint_health: dict = {}
         pid = 0
@@ -1724,7 +2814,7 @@ def prepare_agent_app_devtools_owned_launch_fleet(
             )
             pid = _pid_from_launch_report(launch_report)
             command = _command_from_launch_report(launch_report)
-            if ready:
+            if ready and readiness_url:
                 endpoint_health = _wait_for_agent_app_devtools_endpoint_health(
                     readiness_url,
                     http_probe=active_http_probe,
@@ -1733,8 +2823,11 @@ def prepare_agent_app_devtools_owned_launch_fleet(
                     request_timeout=request_timeout,
                 )
                 ready = bool(endpoint_health.get("ready", False))
+            elif ready:
+                ready = False
+                error = "agent_app_devtools_readiness_url_missing"
             if not ready:
-                error = "agent_app_devtools_owned_not_started"
+                error = error or "agent_app_devtools_owned_not_started"
                 if endpoint_health.get("error"):
                     error = str(endpoint_health.get("error") or error)
         except Exception as exc:
@@ -1781,7 +2874,7 @@ def prepare_agent_native_cdp_bridge_helper(
     output_root: str | Path,
     agent: str = "codex app",
     agent_id: str = "codex",
-    bridge_port: int = 18888,
+    bridge_port: int = 0,
     debugger_url: str = "",
     process_name: str = "Codex.exe",
     pid: int = 0,
@@ -1798,7 +2891,10 @@ def prepare_agent_native_cdp_bridge_helper(
     root = Path(output_root).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     host = "127.0.0.1"
-    bridge_url = f"http://{host}:{int(bridge_port)}"
+    configured_bridge_port = int(bridge_port)
+    bridge_url = (
+        "" if configured_bridge_port == 0 else f"http://{host}:{configured_bridge_port}"
+    )
     registry_path = root / "native-bridges.json"
     manifest_path = root / "manifest.json"
     launch_report: dict = {}
@@ -1819,7 +2915,7 @@ def prepare_agent_native_cdp_bridge_helper(
                 agent_bridge_agent=agent,
                 agent_bridge_agent_id=agent_id,
                 agent_bridge_host=host,
-                agent_bridge_port=int(bridge_port),
+                agent_bridge_port=configured_bridge_port,
                 agent_bridge_debugger_url=debugger_url,
                 agent_bridge_registry_path=str(registry_path),
                 agent_bridge_process_name=process_name,
@@ -1840,6 +2936,15 @@ def prepare_agent_native_cdp_bridge_helper(
         )
         if _counter(launch_report, "launch_attempts") <= 0:
             error = "agent_native_cdp_bridge_helper_not_started"
+            raise RuntimeError(error)
+        launched_bridge_url = _launch_readiness_url(
+            launch_report,
+            action_id="launch_agent_native_cdp_bridge",
+        )
+        if launched_bridge_url:
+            bridge_url = launched_bridge_url
+        if not bridge_url:
+            error = "dynamic_agent_native_cdp_bridge_readiness_url_missing"
             raise RuntimeError(error)
         ready = _wait_for_agent_native_cdp_bridge_registry(
             registry_path,
@@ -1918,7 +3023,7 @@ def prepare_owned_ide_bridge_helper(
     project_name: str = "openwukong",
     task_name: str = "major-real-no-loss",
     ide_executable: str = "cursor.exe",
-    ide_bridge_port: int = 8791,
+    ide_bridge_port: int = 0,
     ide_user_data_dir: str = "",
     ide_extensions_dir: str = "",
     ide_extension_dir: str = "extensions/openwukong-vscode",
@@ -1936,7 +3041,10 @@ def prepare_owned_ide_bridge_helper(
     root = Path(output_root).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     host = "127.0.0.1"
-    bridge_url = f"http://{host}:{int(ide_bridge_port)}"
+    configured_bridge_port = int(ide_bridge_port)
+    bridge_url = (
+        "" if configured_bridge_port == 0 else f"http://{host}:{configured_bridge_port}"
+    )
     user_data_dir = _owned_helper_path(
         ide_user_data_dir,
         root / "user-data",
@@ -1978,7 +3086,7 @@ def prepare_owned_ide_bridge_helper(
                 ide_extensions_dir=extensions_dir,
                 ide_extension_dir=extension_dir,
                 ide_bridge_host=host,
-                ide_bridge_port=int(ide_bridge_port),
+                ide_bridge_port=configured_bridge_port,
                 workspace_root=workspace,
             ),
         )
@@ -1990,6 +3098,15 @@ def prepare_owned_ide_bridge_helper(
         )
         if _counter(launch_report, "launch_attempts") <= 0:
             error = "ide_bridge_helper_not_started"
+            raise RuntimeError(error)
+        launched_bridge_url = _launch_readiness_url(
+            launch_report,
+            action_id="launch_ide_bridge_isolated",
+        )
+        if launched_bridge_url:
+            bridge_url = launched_bridge_url
+        if not bridge_url:
+            error = "dynamic_ide_bridge_readiness_url_missing"
             raise RuntimeError(error)
 
         initial_capability = _wait_for_ide_bridge_capabilities(
@@ -2018,7 +3135,7 @@ def prepare_owned_ide_bridge_helper(
         pre_probe_settings = {
             "openwukong.bridge.autoStart": True,
             "openwukong.bridge.host": host,
-            "openwukong.bridge.port": int(ide_bridge_port),
+            "openwukong.bridge.port": configured_bridge_port,
             "openwukong.bridge.allowedCommands": command_ids,
         }
         _merge_settings_file(settings_path, pre_probe_settings)
@@ -2036,7 +3153,7 @@ def prepare_owned_ide_bridge_helper(
         validated_settings = active_settings_builder(
             contract_probe,
             host=host,
-            port=int(ide_bridge_port),
+            port=configured_bridge_port,
             auto_start=True,
         )
         _merge_settings_file(settings_path, validated_settings)
@@ -2087,6 +3204,48 @@ def _details(value: object) -> dict:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def _launch_readiness_url(report: dict, *, action_id: str = "") -> str:
+    if not isinstance(report, dict):
+        return ""
+    fallback_url = ""
+    for result in report.get("results", []) or ():
+        if not isinstance(result, dict):
+            continue
+        if str(result.get("status", "") or "") != "started":
+            continue
+        url = str(result.get("readiness_url", "") or "").strip()
+        if not url:
+            continue
+        if action_id and str(result.get("action_id", "") or "") != action_id:
+            if not fallback_url:
+                fallback_url = url
+            continue
+        if url:
+            return url
+    for launch in report.get("launches", []) or ():
+        if not isinstance(launch, dict):
+            continue
+        url = str(launch.get("readiness_url", "") or "").strip()
+        if not url:
+            continue
+        if action_id and str(launch.get("action_id", "") or "") != action_id:
+            if not fallback_url:
+                fallback_url = url
+            continue
+        if url:
+            return url
+    return fallback_url
+
+
+def _system_dialog_preflight_failed(report: dict) -> bool:
+    if not report:
+        return False
+    return bool(
+        report.get("system_dialog_detected", False)
+        or not bool(report.get("ok", True))
+    )
+
+
 def _disabled_owned_ide_bridge_helper_report() -> dict:
     return {
         "mode": "owned-ide-bridge-helper",
@@ -2127,6 +3286,159 @@ def _disabled_agent_native_cdp_bridge_helper_report() -> dict:
     }
 
 
+def _disabled_agent_app_bridge_fixture_smoke_report() -> dict:
+    return {
+        "mode": "agent-app-bridge-fixture-smoke",
+        "safety_mode": "local_owned_devtools_fixture",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "desktop_control_attempts": 0,
+        "window_input_attempts": 0,
+        "enabled": False,
+        "ok": True,
+        "decision": "disabled",
+        "bridge_send_report": {
+            "native_call_attempts": 0,
+            "window_input_attempts": 0,
+            "keyboard_input_attempts": 0,
+            "clipboard_write_attempts": 0,
+        },
+        "fixture": {
+            "cdp_request_count": 0,
+            "http_request_count": 0,
+        },
+    }
+
+
+def _build_scenario_scope_report(
+    *,
+    run_primary_scenarios: bool,
+    run_agent_app_scenarios: bool,
+    run_agent_cli_scenarios: bool,
+) -> dict:
+    return {
+        "mode": "major-scenario-scope",
+        "primary_scenarios_enabled": bool(run_primary_scenarios),
+        "agent_app_scenarios_enabled": bool(run_agent_app_scenarios),
+        "agent_cli_scenarios_enabled": bool(run_agent_cli_scenarios),
+        "primary_scenarios_skipped": not bool(run_primary_scenarios),
+        "agent_app_scenarios_skipped": not bool(run_agent_app_scenarios),
+        "agent_cli_scenarios_skipped": not bool(run_agent_cli_scenarios),
+    }
+
+
+def _disabled_primary_scenario_report() -> dict:
+    return {
+        "mode": "primary-scenario-real-no-loss",
+        "safety_mode": "real_no_loss",
+        "enabled": False,
+        "decision": "primary_scenarios_skipped",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "external_communication_attempts": 0,
+        "window_input_attempts": 0,
+        "owned_app_launch_attempts": 0,
+        "background_screenshot_count": 0,
+        "background_screenshot_success_count": 0,
+        "background_screenshot_focus_stable": True,
+        "failed_cases": 0,
+        "passed_cases": 0,
+        "cases": [],
+    }
+
+
+def _disabled_agent_app_scenario_report() -> dict:
+    return {
+        "mode": "agent-app-real-no-loss",
+        "safety_mode": "real_no_loss",
+        "enabled": False,
+        "decision": "agent_app_scenarios_skipped",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "bridge_send_attempts": 0,
+        "agent_command_attempts": 0,
+        "background_screenshot_count": 0,
+        "background_screenshot_success_count": 0,
+        "background_screenshot_focus_stable": True,
+        "failed_cases": 0,
+        "passed_cases": 0,
+        "cases": [],
+    }
+
+
+def _disabled_agent_cli_scenario_report() -> dict:
+    return {
+        "mode": "agent-cli-real-no-loss",
+        "safety_mode": "real_no_loss",
+        "enabled": False,
+        "decision": "agent_cli_scenarios_skipped",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "agent_command_attempts": 0,
+        "foreground_focus_stable": True,
+        "foreground_no_steal_verified": True,
+        "failed_cases": 0,
+        "passed_cases": 0,
+        "cases": [],
+    }
+
+
+def _disabled_agent_native_bridge_fixture_smoke_report() -> dict:
+    return {
+        "mode": "agent-native-bridge-fixture-smoke",
+        "safety_mode": "local_owned_http_fixture",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "desktop_control_attempts": 0,
+        "window_input_attempts": 0,
+        "native_call_attempts": 0,
+        "enabled": False,
+        "ok": True,
+        "decision": "disabled",
+        "send_report": {
+            "native_call_attempts": 0,
+            "window_input_attempts": 0,
+            "keyboard_input_attempts": 0,
+            "clipboard_write_attempts": 0,
+        },
+        "fixture": {
+            "capability_request_count": 0,
+            "chat_request_count": 0,
+        },
+    }
+
+
+def _disabled_wechat_native_bridge_fixture_smoke_report() -> dict:
+    return {
+        "mode": "wechat-native-bridge-fixture-smoke",
+        "safety_mode": "local_owned_wechat_native_bridge_fixture",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "native_call_attempts": 0,
+        "send_attempts": 0,
+        "enabled": False,
+        "ok": True,
+        "decision": "disabled",
+        "send_report": {
+            "native_call_attempts": 0,
+            "window_input_attempts": 0,
+            "keyboard_input_attempts": 0,
+            "clipboard_write_attempts": 0,
+        },
+        "fixture": {
+            "capability_request_count": 0,
+            "send_request_count": 0,
+        },
+        "registry": {
+            "registered": False,
+            "discovered_urls": [],
+        },
+    }
+
+
 def _disabled_agent_app_devtools_owned_launch_report() -> dict:
     return {
         "mode": "agent-app-devtools-owned-launch-fleet",
@@ -2155,6 +3467,12 @@ def _agent_app_devtools_launchable_cases(
             continue
         executable = str(raw.get("executable_path", "") or "").strip()
         if not bool(raw.get("executable_ready", False)) or not executable:
+            continue
+        if _agent_app_launch_blocking_reason(
+            raw,
+            agent=str(raw.get("agent", "") or ""),
+            agent_id=str(raw.get("agent_id", "") or ""),
+        ):
             continue
         cases.append(dict(raw))
     return tuple(cases)
@@ -2207,6 +3525,7 @@ def _wait_for_agent_app_devtools_endpoint_health(
     base = str(debugger_url or "").strip().rstrip("/")
     attempts = 0
     last_error = ""
+    last_probe: dict | None = None
     while True:
         attempts += 1
         try:
@@ -2233,7 +3552,7 @@ def _wait_for_agent_app_devtools_endpoint_health(
                 version=version,
                 devtools_client=devtools_client,
             )
-            return {
+            probe = {
                 "mode": "agent-app-devtools-endpoint-health",
                 "safety_mode": "read_only",
                 "control_allowed": False,
@@ -2249,9 +3568,19 @@ def _wait_for_agent_app_devtools_endpoint_health(
                 "error": "" if ready else "devtools_targets_not_ready",
                 "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
             }
+            if ready:
+                return probe
+            last_error = str(probe["error"])
+            last_probe = probe
         except Exception as exc:
             last_error = str(exc) or exc.__class__.__name__
         if time.perf_counter() - started >= max(0.0, float(timeout_sec)):
+            if last_probe:
+                timed_out_probe = dict(last_probe)
+                timed_out_probe["ready"] = False
+                timed_out_probe["error"] = last_error or timed_out_probe.get("error") or "devtools_endpoint_not_ready"
+                timed_out_probe["elapsed_ms"] = round((time.perf_counter() - started) * 1000, 3)
+                return timed_out_probe
             return {
                 "mode": "agent-app-devtools-endpoint-health",
                 "safety_mode": "read_only",
@@ -2357,7 +3686,7 @@ def _normalize_agent_native_cdp_bridge_helper_specs(
         debugger_url = str(raw.get("debugger_url", "") or raw.get("debuggerUrl", "") or "").strip()
         process_name = str(raw.get("process_name", "") or raw.get("processName", "") or "").strip()
         bridge_port = _counter({"value": raw.get("bridge_port", raw.get("port", 0))}, "value")
-        if not agent or not agent_id or not debugger_url or not process_name or bridge_port <= 0:
+        if not agent or not agent_id or not debugger_url or not process_name or bridge_port < 0:
             continue
         normalized.append(
             {
@@ -2418,6 +3747,7 @@ def _agent_native_cdp_bridge_helper_fleet_report(
 def _effective_ide_bridge_urls(
     explicit_urls: Iterable[str],
     helper_report: dict,
+    ide_extension_readiness_report: dict | None = None,
 ) -> tuple[str, ...]:
     urls: list[str] = []
     for value in explicit_urls or ():
@@ -2426,6 +3756,11 @@ def _effective_ide_bridge_urls(
             urls.append(text)
     if bool(helper_report.get("ready", False)):
         bridge_url = str(helper_report.get("bridge_url", "") or "").strip()
+        if bridge_url and bridge_url not in urls:
+            urls.append(bridge_url)
+    readiness = ide_extension_readiness_report or {}
+    if bool(readiness.get("bridge_ready", False)):
+        bridge_url = str(readiness.get("bridge_url", "") or "").strip()
         if bridge_url and bridge_url not in urls:
             urls.append(bridge_url)
     return tuple(urls)
@@ -2862,6 +4197,256 @@ def _report_to_dict(report: object) -> dict:
     return {"mode": "unknown", "failed_cases": 1, "cases": []}
 
 
+def _merge_agent_runner_reports(
+    reports: Iterable[dict],
+    *,
+    mode: str,
+    safety_mode: str,
+) -> dict:
+    items = [dict(report) for report in reports if isinstance(report, dict)]
+    sum_keys = (
+        "control_attempts",
+        "window_input_attempts",
+        "bridge_send_attempts",
+        "agent_command_attempts",
+        "background_screenshot_count",
+        "background_screenshot_success_count",
+        "passed_cases",
+        "failed_cases",
+        "verified_cases",
+        "native_ready_cases",
+        "gated_cases",
+        "real_verified_cases",
+        "app_bridge_send_verified_cases",
+        "uia_semantic_action_send_verified_cases",
+    )
+    merged = {
+        "mode": mode,
+        "safety_mode": safety_mode,
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "bridge_send_attempts": 0,
+        "agent_command_attempts": 0,
+        "background_screenshot_count": 0,
+        "background_screenshot_success_count": 0,
+        "background_screenshot_focus_stable": True,
+        "foreground_focus_stable": True,
+        "foreground_no_steal_verified": True,
+        "cases": [],
+        "isolated_agent_reports": items,
+    }
+    for key in sum_keys:
+        merged[key] = sum(_counter(report, key) for report in items)
+    merged["background_screenshot_focus_stable"] = all(
+        bool(report.get("background_screenshot_focus_stable", True))
+        for report in items
+    )
+    merged["foreground_focus_stable"] = all(
+        bool(report.get("foreground_focus_stable", True)) for report in items
+    )
+    merged["foreground_no_steal_verified"] = all(
+        bool(report.get("foreground_no_steal_verified", True))
+        for report in items
+    )
+    cases: list[dict] = []
+    for report in items:
+        raw_cases = report.get("cases", [])
+        if isinstance(raw_cases, list):
+            cases.extend(dict(item) for item in raw_cases if isinstance(item, dict))
+    merged["cases"] = cases
+    return merged
+
+
+def _safe_stage_id(value: str) -> str:
+    text = str(value or "").strip().lower()
+    safe = "".join(char if char.isalnum() else "-" for char in text)
+    safe = "-".join(part for part in safe.split("-") if part)
+    return safe or "agent"
+
+
+def _run_major_stage(
+    stage_name: str,
+    *,
+    runner_timeout_sec: float,
+    stage_reports: list[dict],
+    output_root: Path,
+    runner: Callable[[], object],
+) -> object:
+    started = time.perf_counter()
+    _record_major_stage(
+        stage_reports,
+        output_root,
+        {
+            "stage_name": stage_name,
+            "status": "started",
+            "timed_out": False,
+            "timeout_sec": float(runner_timeout_sec or 0.0),
+            "elapsed_ms": 0.0,
+        },
+    )
+    if not runner_timeout_sec or runner_timeout_sec <= 0:
+        try:
+            result = runner()
+        except BaseException as exc:
+            _record_major_stage(
+                stage_reports,
+                output_root,
+                _major_stage_failure(stage_name, started, exc),
+            )
+            raise
+        _record_major_stage(
+            stage_reports,
+            output_root,
+            _major_stage_success(stage_name, started),
+        )
+        return result
+
+    results: queue.Queue = queue.Queue(maxsize=1)
+
+    def _target() -> None:
+        try:
+            results.put(("ok", runner()))
+        except BaseException as exc:  # pragma: no cover - exercised via main thread
+            results.put(("error", exc))
+
+    thread = threading.Thread(
+        target=_target,
+        name=f"openwukong-major-stage-{stage_name}",
+        daemon=True,
+    )
+    thread.start()
+    thread.join(float(runner_timeout_sec))
+    if thread.is_alive():
+        report = _major_stage_timeout_report(
+            stage_name,
+            timeout_sec=float(runner_timeout_sec),
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
+        _record_major_stage(
+            stage_reports,
+            output_root,
+            {
+                "stage_name": stage_name,
+                "status": "timed_out",
+                "timed_out": True,
+                "timeout_sec": float(runner_timeout_sec),
+                "elapsed_ms": report["elapsed_ms"],
+                "report": dict(report),
+            },
+        )
+        return report
+
+    kind, payload = results.get_nowait()
+    if kind == "error":
+        _record_major_stage(
+            stage_reports,
+            output_root,
+            _major_stage_failure(stage_name, started, payload),
+        )
+        raise payload
+    _record_major_stage(
+        stage_reports,
+        output_root,
+        _major_stage_success(stage_name, started),
+    )
+    return payload
+
+
+def _major_stage_success(stage_name: str, started: float) -> dict:
+    return {
+        "stage_name": stage_name,
+        "status": "completed",
+        "timed_out": False,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+    }
+
+
+def _major_stage_failure(stage_name: str, started: float, exc: object) -> dict:
+    return {
+        "stage_name": stage_name,
+        "status": "failed",
+        "timed_out": False,
+        "elapsed_ms": round((time.perf_counter() - started) * 1000, 3),
+        "error_type": exc.__class__.__name__,
+        "error": str(exc),
+    }
+
+
+def _major_stage_timeout_report(
+    stage_name: str,
+    *,
+    timeout_sec: float,
+    elapsed_ms: float,
+) -> dict:
+    return {
+        "mode": "major-runner-stage-timeout",
+        "safety_mode": "real_no_loss",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "bridge_send_attempts": 0,
+        "agent_command_attempts": 0,
+        "failed_cases": 1,
+        "cases": [],
+        "ok": False,
+        "decision": "runner_stage_timeout",
+        "stage_name": stage_name,
+        "timed_out": True,
+        "timeout_sec": timeout_sec,
+        "elapsed_ms": round(elapsed_ms, 3),
+        "attempt_counters_reliable": False,
+        "unknown_post_timeout_runner_state": True,
+    }
+
+
+def _runner_stage_timed_out(report: dict) -> bool:
+    return bool(report.get("timed_out", False)) or str(
+        report.get("decision", "") or ""
+    ) == "runner_stage_timeout"
+
+
+def _skipped_after_runner_timeout_report(stage_name: str) -> dict:
+    return {
+        "mode": "major-runner-stage-skipped",
+        "safety_mode": "real_no_loss",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "bridge_send_attempts": 0,
+        "agent_command_attempts": 0,
+        "failed_cases": 1,
+        "cases": [],
+        "ok": False,
+        "decision": "skipped_after_runner_timeout",
+        "stage_name": stage_name,
+    }
+
+
+def _record_major_stage(
+    stage_reports: list[dict],
+    output_root: Path,
+    entry: dict,
+) -> None:
+    stage_reports.append(dict(entry))
+    _write_major_stage_progress(output_root, stage_reports)
+
+
+def _write_major_stage_progress(output_root: Path, stage_reports: list[dict]) -> None:
+    payload = {
+        "mode": "major-real-no-loss-progress",
+        "stages": [dict(item) for item in stage_reports],
+    }
+    try:
+        output_root.mkdir(parents=True, exist_ok=True)
+        (output_root / "major-real-no-loss-progress.json").write_text(
+            _json_dumps(payload),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
 def _sum_counter(*reports: dict, key: str) -> int:
     return sum(_counter(report, key) for report in reports)
 
@@ -2881,6 +4466,10 @@ def _resolve_output_root(output_root: str | Path) -> Path:
 
 def _json_dumps(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=True, indent=2)
+
+
+def _force_exit_process(code: int) -> None:
+    os._exit(code)
 
 
 def _parse_agent_native_cdp_bridge_helper_specs(values: Iterable[str]) -> tuple[dict, ...]:
@@ -2920,8 +4509,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--output-root", default="")
     parser.add_argument("--output", default="")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--runner-timeout-sec",
+        type=float,
+        default=0.0,
+        help="Optional per-stage timeout for major runner sub-checks. Zero disables the wrapper.",
+    )
+    parser.add_argument(
+        "--stop-on-runner-timeout",
+        action="store_true",
+        help="Write the final report after the first timed-out runner stage instead of continuing through later stages.",
+    )
+    parser.add_argument(
+        "--skip-primary-scenarios",
+        action="store_true",
+        help="Skip primary real scenarios and omit their requirements from this acceptance run.",
+    )
+    parser.add_argument(
+        "--skip-agent-app-scenarios",
+        action="store_true",
+        help="Skip agent desktop-app scenarios and omit their requirements from this acceptance run.",
+    )
+    parser.add_argument(
+        "--skip-agent-cli-scenarios",
+        action="store_true",
+        help="Skip agent CLI scenarios and omit their requirements from this acceptance run.",
+    )
     parser.add_argument("--allow-owned-browser-helper-launch", action="store_true")
-    parser.add_argument("--owned-browser-debug-port", type=int, default=9475)
+    parser.add_argument("--owned-browser-debug-port", type=int, default=0)
     parser.add_argument("--owned-browser-executable", default="chrome.exe")
     parser.add_argument(
         "--owned-browser-url",
@@ -2957,6 +4572,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Explicit local WeChat native bridge URL used for read-only capabilities and optional send.",
     )
     parser.add_argument(
+        "--wechat-native-bridge-registry",
+        action="append",
+        default=[],
+        help="Read-only JSON registry file with local WeChat native bridge URLs.",
+    )
+    parser.add_argument(
         "--allow-wechat-native-bridge-send",
         action="store_true",
         help="Allow explicit WeChat native bridge sends when the dry-run contract is ready.",
@@ -2980,6 +4601,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument("--agent-app", action="append", default=None)
     parser.add_argument("--cli-agent", action="append", default=None)
+    parser.add_argument(
+        "--isolate-agent-app-scenarios",
+        action="store_true",
+        help="Run agent app no-loss probes one agent at a time so one blocked app cannot hide the others.",
+    )
+    parser.add_argument(
+        "--isolate-agent-cli-scenarios",
+        action="store_true",
+        help="Run agent CLI no-loss probes one agent at a time so one blocked CLI cannot hide the others.",
+    )
     parser.add_argument("--project-name", default="openwukong")
     parser.add_argument("--task-name", default="major-real-no-loss")
     parser.add_argument(
@@ -3027,6 +4658,92 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Forbidden app bridge readback marker. Repeat for multiple markers.",
     )
     parser.add_argument(
+        "--allow-codex-app-server-thread-start",
+        action="store_true",
+        help="Allow Codex app-server thread/start only; does not run turn/start.",
+    )
+    parser.add_argument(
+        "--codex-app-server-thread-start-timeout",
+        type=float,
+        default=5.0,
+    )
+    parser.add_argument(
+        "--allow-codex-app-server-turn-start",
+        action="store_true",
+        help="Allow Codex app-server turn/start after the verified dry-run contract is ready.",
+    )
+    parser.add_argument(
+        "--codex-app-server-turn-start-timeout",
+        type=float,
+        default=30.0,
+    )
+    parser.add_argument(
+        "--run-agent-app-bridge-fixture-smoke",
+        action="store_true",
+        help="Run an owned local DevTools fixture smoke that validates the app bridge sender contract without touching user apps.",
+    )
+    parser.add_argument(
+        "--agent-app-bridge-fixture-message",
+        default="OPENWUKONG_APP_BRIDGE_FIXTURE_SMOKE",
+        help="Message used for the optional owned app bridge fixture smoke.",
+    )
+    parser.add_argument(
+        "--agent-app-bridge-fixture-acceptance-marker",
+        action="append",
+        default=[],
+        help="Required owned fixture readback marker. Repeat for multiple markers.",
+    )
+    parser.add_argument(
+        "--agent-app-bridge-fixture-forbid-marker",
+        action="append",
+        default=[],
+        help="Forbidden owned fixture readback marker. Repeat for multiple markers.",
+    )
+    parser.add_argument(
+        "--run-agent-native-bridge-fixture-smoke",
+        action="store_true",
+        help="Run an owned local HTTP agent native bridge fixture smoke without touching user apps.",
+    )
+    parser.add_argument(
+        "--agent-native-bridge-fixture-message",
+        default="OPENWUKONG_AGENT_NATIVE_BRIDGE_FIXTURE_SMOKE",
+        help="Message used for the optional owned agent native bridge fixture smoke.",
+    )
+    parser.add_argument(
+        "--agent-native-bridge-fixture-acceptance-marker",
+        action="append",
+        default=[],
+        help="Required owned agent native fixture readback marker. Repeat for multiple markers.",
+    )
+    parser.add_argument(
+        "--agent-native-bridge-fixture-forbid-marker",
+        action="append",
+        default=[],
+        help="Forbidden owned agent native fixture readback marker. Repeat for multiple markers.",
+    )
+    parser.add_argument(
+        "--run-wechat-native-bridge-fixture-smoke",
+        action="store_true",
+        help="Run an owned local WeChat native bridge fixture smoke without touching personal chats.",
+    )
+    parser.add_argument(
+        "--wechat-native-bridge-fixture-message",
+        default="OPENWUKONG_WECHAT_FIXTURE: PASS",
+        help="Message used for the optional owned WeChat native bridge fixture smoke.",
+    )
+    parser.add_argument(
+        "--wechat-native-bridge-fixture-acceptance-marker",
+        action="append",
+        default=[],
+        help="Required owned WeChat fixture readback marker. Repeat for multiple markers.",
+    )
+    parser.add_argument(
+        "--wechat-native-bridge-fixture-forbid-marker",
+        action="append",
+        default=[],
+        help="Forbidden owned WeChat fixture readback marker. Repeat for multiple markers.",
+    )
+    parser.add_argument(
         "--debugger-url",
         action="append",
         default=[],
@@ -3037,6 +4754,27 @@ def main(argv: Optional[list[str]] = None) -> int:
         action="append",
         default=[],
         help="Explicit IDE extension/native bridge URL forwarded to agent app no-loss probes.",
+    )
+    parser.add_argument(
+        "--probe-existing-ide-extension-bridge",
+        action="store_true",
+        help="Attach-only read-only probe for an already-running IDE extension bridge; does not launch or reload the IDE.",
+    )
+    parser.add_argument(
+        "--ide-extension-bridge-url",
+        default=DEFAULT_IDE_EXTENSION_BRIDGE_URL,
+        help="Already-running IDE extension bridge URL used by the attach-only readiness probe.",
+    )
+    parser.add_argument(
+        "--ide-extension-agent-id",
+        default="cursor",
+        help="Agent adapter id to validate through the already-running IDE extension bridge.",
+    )
+    parser.add_argument(
+        "--ide-extension-request-timeout-sec",
+        type=float,
+        default=0.5,
+        help="Per-request timeout for attach-only IDE extension readiness probes.",
     )
     parser.add_argument(
         "--agent-native-bridge-url",
@@ -3051,6 +4789,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Read-only JSON registry file with agent app native bridge URLs.",
     )
     parser.add_argument(
+        "--codex-app-server-ws-url",
+        action="append",
+        default=[],
+        help="Explicit local Codex app-server WebSocket URL forwarded to agent app no-loss probes.",
+    )
+    parser.add_argument(
         "--workspace-path",
         default="",
         help="Optional workspace path included in IDE bridge capability probes.",
@@ -3061,7 +4805,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         help="Launch an isolated VS Code-compatible IDE extension host, validate an IDE bridge chat adapter, and forward it to app probes.",
     )
     parser.add_argument("--owned-ide-executable", default="cursor.exe")
-    parser.add_argument("--owned-ide-bridge-port", type=int, default=8791)
+    parser.add_argument("--owned-ide-bridge-port", type=int, default=0)
     parser.add_argument("--owned-ide-user-data-dir", default="")
     parser.add_argument("--owned-ide-extensions-dir", default="")
     parser.add_argument("--owned-ide-extension-dir", default="extensions/openwukong-vscode")
@@ -3075,7 +4819,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument("--agent-native-cdp-bridge-helper-agent", default="codex app")
     parser.add_argument("--agent-native-cdp-bridge-helper-agent-id", default="codex")
-    parser.add_argument("--agent-native-cdp-bridge-helper-port", type=int, default=18888)
+    parser.add_argument(
+        "--agent-native-cdp-bridge-helper-port",
+        type=int,
+        default=0,
+        help="Agent native CDP bridge helper port. Use 0 to let the operating system assign an unused loopback port.",
+    )
     parser.add_argument("--agent-native-cdp-bridge-helper-debugger-url", default="")
     parser.add_argument(
         "--agent-native-cdp-bridge-helper-process-name",
@@ -3124,6 +4873,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     report = run_major_scenario_real_no_loss(
         fixture_path=args.fixture,
         output_root=args.output_root,
+        runner_timeout_sec=args.runner_timeout_sec,
+        stop_on_runner_timeout=args.stop_on_runner_timeout,
+        run_primary_scenarios=not args.skip_primary_scenarios,
+        run_agent_app_scenarios=not args.skip_agent_app_scenarios,
+        run_agent_cli_scenarios=not args.skip_agent_cli_scenarios,
+        isolate_agent_app_scenarios=args.isolate_agent_app_scenarios,
+        isolate_agent_cli_scenarios=args.isolate_agent_cli_scenarios,
         allow_owned_browser_helper_launch=args.allow_owned_browser_helper_launch,
         owned_browser_debug_port=args.owned_browser_debug_port,
         owned_browser_executable=args.owned_browser_executable,
@@ -3134,6 +4890,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         wechat_uia_required_markers=tuple(args.wechat_uia_acceptance_marker or ()),
         wechat_uia_forbidden_markers=tuple(args.wechat_uia_forbid_marker or ()),
         wechat_native_bridge_urls=tuple(args.wechat_native_bridge_url or ()),
+        wechat_native_bridge_registry_paths=tuple(
+            args.wechat_native_bridge_registry or ()
+        ),
         allow_wechat_native_bridge_send=args.allow_wechat_native_bridge_send,
         wechat_native_bridge_message=args.wechat_native_bridge_message,
         wechat_native_bridge_required_markers=tuple(
@@ -3154,10 +4913,60 @@ def main(argv: Optional[list[str]] = None) -> int:
         app_bridge_message=args.app_bridge_message,
         app_bridge_required_markers=tuple(args.app_acceptance_marker or ()),
         app_bridge_forbidden_markers=tuple(args.app_forbid_marker or ()),
+        allow_codex_app_server_thread_start=(
+            args.allow_codex_app_server_thread_start
+        ),
+        codex_app_server_thread_start_timeout=(
+            args.codex_app_server_thread_start_timeout
+        ),
+        allow_codex_app_server_turn_start=args.allow_codex_app_server_turn_start,
+        codex_app_server_turn_start_timeout=(
+            args.codex_app_server_turn_start_timeout
+        ),
+        run_agent_app_bridge_fixture_smoke=args.run_agent_app_bridge_fixture_smoke,
+        agent_app_bridge_fixture_message=args.agent_app_bridge_fixture_message,
+        agent_app_bridge_fixture_required_markers=tuple(
+            args.agent_app_bridge_fixture_acceptance_marker
+            or ("OPENWUKONG_ACCEPTANCE: PASS",)
+        ),
+        agent_app_bridge_fixture_forbidden_markers=tuple(
+            args.agent_app_bridge_fixture_forbid_marker or ()
+        ),
+        run_agent_native_bridge_fixture_smoke=(
+            args.run_agent_native_bridge_fixture_smoke
+        ),
+        agent_native_bridge_fixture_message=(
+            args.agent_native_bridge_fixture_message
+        ),
+        agent_native_bridge_fixture_required_markers=tuple(
+            args.agent_native_bridge_fixture_acceptance_marker
+            or ("OPENWUKONG_ACCEPTANCE: PASS",)
+        ),
+        agent_native_bridge_fixture_forbidden_markers=tuple(
+            args.agent_native_bridge_fixture_forbid_marker or ()
+        ),
+        run_wechat_native_bridge_fixture_smoke=(
+            args.run_wechat_native_bridge_fixture_smoke
+        ),
+        wechat_native_bridge_fixture_message=(
+            args.wechat_native_bridge_fixture_message
+        ),
+        wechat_native_bridge_fixture_required_markers=tuple(
+            args.wechat_native_bridge_fixture_acceptance_marker
+            or ("OPENWUKONG_WECHAT_FIXTURE: PASS",)
+        ),
+        wechat_native_bridge_fixture_forbidden_markers=tuple(
+            args.wechat_native_bridge_fixture_forbid_marker or ()
+        ),
         debugger_urls=tuple(args.debugger_url or ()),
         ide_bridge_urls=tuple(args.ide_bridge_url or ()),
+        probe_existing_ide_extension_bridge=args.probe_existing_ide_extension_bridge,
+        ide_extension_bridge_url=args.ide_extension_bridge_url,
+        ide_extension_agent_id=args.ide_extension_agent_id,
+        ide_extension_request_timeout_sec=args.ide_extension_request_timeout_sec,
         agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),
         agent_native_bridge_registry_paths=tuple(args.agent_native_bridge_registry or ()),
+        codex_app_server_ws_urls=tuple(args.codex_app_server_ws_url or ()),
         workspace_path=args.workspace_path,
         allow_owned_ide_bridge_helper_launch=args.allow_owned_ide_bridge_helper_launch,
         owned_ide_executable=args.owned_ide_executable,
@@ -3233,6 +5042,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         _write_stdout(_json_dumps(payload))
     else:
         _write_stdout(format_major_scenario_real_no_loss_report(report))
+    if args.runner_timeout_sec > 0 and bool(payload.get("runner_timed_out", False)):
+        sys.stdout.flush()
+        sys.stderr.flush()
+        _force_exit_process(1)
     return 0 if report.safe_run_ok else 1
 
 

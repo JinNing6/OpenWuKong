@@ -68,6 +68,27 @@ from openwukong.control.agent_task import (
     build_agent_command_plan,
     run_agent_task,
 )
+from openwukong.control.agent_native_probe_binding import (
+    AgentNativeFabricBinding,
+    agent_native_fabric_bindings_from_probe_report,
+    ownership_index_from_agent_native_probe_report,
+)
+from openwukong.control.wechat_native_fabric_binding import (
+    WeChatNativeFabricBinding,
+    ownership_index_from_wechat_native_bridge_registry,
+    wechat_native_fabric_bindings_from_registry,
+)
+from openwukong.control.wechat_native_endpoint_publisher import (
+    FastWin32AccessibilityObserver,
+    LiveWeChatEvidenceBackend,
+    UnavailableWeChatNativeBackend,
+    WeChatNativeBackend,
+    WeChatNativeEndpointConfig,
+    WeChatNativeEndpointPublisher,
+    build_wechat_native_backend,
+    make_wechat_native_endpoint_handler,
+    write_wechat_native_bridge_registry,
+)
 from openwukong.control.command_runner import (
     CommandExecutionPolicy,
     CommandExecutionReport,
@@ -87,6 +108,12 @@ from openwukong.control.command_planner import (
 from openwukong.control.command_process_broker import (
     CommandProcessBroker,
     CommandProcessBrokerConfig,
+)
+from openwukong.control.execution_contract import (
+    NoForegroundContract,
+    NoForegroundValidationReport,
+    build_no_foreground_contract,
+    validate_no_foreground_contract,
 )
 from openwukong.control.fabric import (
     ControlCommandExecutionReport,
@@ -129,6 +156,13 @@ from openwukong.control.transport_capability import (
     TransportCapabilityReport,
     build_transport_capability,
 )
+from openwukong.control.trajectory import (
+    ControlTrajectory,
+    ControlTrajectoryRecorder,
+    ControlTrajectoryStep,
+    TrajectoryArtifact,
+    build_trajectory_artifact,
+)
 from openwukong.control.session_readiness_plan import (
     SessionReadinessAction,
     SessionReadinessExecutionReport,
@@ -168,6 +202,14 @@ __all__ = [
     "AgentTaskRunReport",
     "AgentConversationAcceptanceReport",
     "AgentConversationRunReport",
+    "AgentNativeFabricBinding",
+    "WeChatNativeFabricBinding",
+    "FastWin32AccessibilityObserver",
+    "LiveWeChatEvidenceBackend",
+    "UnavailableWeChatNativeBackend",
+    "WeChatNativeBackend",
+    "WeChatNativeEndpointConfig",
+    "WeChatNativeEndpointPublisher",
     "CommandExecutionPolicy",
     "CommandExecutionReport",
     "CommandExecutionRequest",
@@ -193,6 +235,8 @@ __all__ = [
     "InputActionOptions",
     "InputActionReport",
     "LocalCacheAppCandidateProvider",
+    "NoForegroundContract",
+    "NoForegroundValidationReport",
     "PathExecutableCandidateProvider",
     "PowerShellAuthenticodeSignatureReader",
     "PywinautoUIABackend",
@@ -217,6 +261,10 @@ __all__ = [
     "StartMenuAppCandidateProvider",
     "StaticAppCandidateProvider",
     "TextHit",
+    "ControlTrajectory",
+    "ControlTrajectoryRecorder",
+    "ControlTrajectoryStep",
+    "TrajectoryArtifact",
     "TransportCapabilityReport",
     "WindowsAppResolver",
     "WindowsRunningProcessCandidateProvider",
@@ -225,13 +273,19 @@ __all__ = [
     "build_agent_app_bridge_request",
     "build_agent_surface_binding",
     "build_agent_command_plan",
+    "agent_native_fabric_bindings_from_probe_report",
+    "wechat_native_fabric_bindings_from_registry",
     "compose_agent_conversation_message",
     "build_transport_capability",
     "build_ownership_index",
+    "build_wechat_native_backend",
     "build_command_execution_policy",
+    "build_no_foreground_contract",
     "build_side_effect_policy",
+    "build_trajectory_artifact",
     "evaluate_side_effect_policy",
     "evaluate_agent_conversation_acceptance",
+    "validate_no_foreground_contract",
     "validate_foreground_takeover_request",
     "plan_command_intent",
     "build_session_registry_snapshot",
@@ -249,9 +303,13 @@ __all__ = [
     "execute_session_readiness_plan",
     "load_readiness_manifest_ownership",
     "lower_text",
+    "make_wechat_native_endpoint_handler",
     "normalize_app_name",
+    "ownership_index_from_agent_native_probe_report",
+    "ownership_index_from_wechat_native_bridge_registry",
     "run_agent_task",
     "run_agent_conversation",
     "source_priority",
     "stop_session_readiness_manifest",
+    "write_wechat_native_bridge_registry",
 ]

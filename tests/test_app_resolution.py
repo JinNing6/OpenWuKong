@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from openwukong.control.app_resolution import (
     AppResolutionCandidate,
     AppPathVerifier,
+    LocalAgentCliCandidateProvider,
     StartMenuAppCandidateProvider,
     StaticAppCandidateProvider,
     WindowsAppResolver,
@@ -207,6 +209,70 @@ class AppResolutionModuleTests(unittest.TestCase):
             "C:/ProgramData/Microsoft/Windows/Start Menu/Programs/Cursor/Cursor.lnk",
         )
 
+    def test_cursor_generic_alias_prefers_agent_cli_over_desktop_shell(self):
+        provider = StaticAppCandidateProvider(
+            [
+                AppResolutionCandidate(
+                    source="running-process",
+                    display_name="Cursor.exe",
+                    process_name="Cursor.exe",
+                    executable_name="Cursor.exe",
+                    path="E:/cursor/cursor/cursor/Cursor.exe",
+                    pid=2020,
+                ),
+                AppResolutionCandidate(
+                    source="path",
+                    display_name="cursor-agent",
+                    executable_name="cursor-agent.cmd",
+                    path="C:/Users/me/AppData/Roaming/npm/cursor-agent.cmd",
+                ),
+            ]
+        )
+
+        report = WindowsAppResolver(candidate_providers=(provider,)).resolve("cursor")
+
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertEqual(report.source, "path")
+        self.assertEqual(report.path, "C:/Users/me/AppData/Roaming/npm/cursor-agent.cmd")
+
+    def test_cursor_app_alias_requires_desktop_surface_not_agent_cli(self):
+        cli_only = StaticAppCandidateProvider(
+            [
+                AppResolutionCandidate(
+                    source="path",
+                    display_name="cursor-agent",
+                    executable_name="cursor-agent.cmd",
+                    path="C:/Users/me/AppData/Roaming/npm/cursor-agent.cmd",
+                ),
+            ]
+        )
+        with_desktop = StaticAppCandidateProvider(
+            [
+                AppResolutionCandidate(
+                    source="path",
+                    display_name="cursor-agent",
+                    executable_name="cursor-agent.cmd",
+                    path="C:/Users/me/AppData/Roaming/npm/cursor-agent.cmd",
+                ),
+                AppResolutionCandidate(
+                    source="running-process",
+                    display_name="Cursor.exe",
+                    process_name="Cursor.exe",
+                    executable_name="Cursor.exe",
+                    path="E:/cursor/cursor/cursor/Cursor.exe",
+                    pid=2020,
+                ),
+            ]
+        )
+
+        cli_report = WindowsAppResolver(candidate_providers=(cli_only,)).resolve("cursor app")
+        desktop_report = WindowsAppResolver(candidate_providers=(with_desktop,)).resolve("cursor app")
+
+        self.assertFalse(cli_report.ok)
+        self.assertEqual(cli_report.error, "app_not_found")
+        self.assertTrue(desktop_report.ok)
+        self.assertEqual(desktop_report.path, "E:/cursor/cursor/cursor/Cursor.exe")
+
     def test_windows_shortcut_target_resolver_does_not_pass_path_as_powershell_tail_arg(self):
         calls = []
 
@@ -260,12 +326,49 @@ class AppResolutionModuleTests(unittest.TestCase):
         data = report.to_dict()
 
         self.assertTrue(report.ok)
-        self.assertTrue(report.already_running)
-        self.assertEqual(data["source"], "running-process")
-        self.assertEqual(data["path"], "C:/Users/me/AppData/Local/OpenAI/Codex/Codex.exe")
+        self.assertFalse(report.already_running)
+        self.assertEqual(data["source"], "path")
+        self.assertEqual(data["path"], "C:/Users/me/AppData/Roaming/npm/codex.cmd")
         self.assertEqual(
             [candidate["source"] for candidate in data["candidates"]],
-            ["running-process", "path"],
+            ["path", "running-process"],
+        )
+
+    def test_codex_generic_alias_prefers_background_cli_over_windowsapps_shell(self):
+        provider = StaticAppCandidateProvider(
+            [
+                AppResolutionCandidate(
+                    source="running-process",
+                    display_name="Codex.exe",
+                    process_name="Codex.exe",
+                    executable_name="Codex.exe",
+                    path="C:/Program Files/WindowsApps/OpenAI.Codex/app/Codex.exe",
+                    pid=3001,
+                ),
+                AppResolutionCandidate(
+                    source="running-process",
+                    display_name="codex.exe",
+                    process_name="codex.exe",
+                    executable_name="codex.exe",
+                    path="C:/Program Files/WindowsApps/OpenAI.Codex/app/resources/codex.exe",
+                    pid=3002,
+                ),
+                AppResolutionCandidate(
+                    source="local-agent-cli",
+                    display_name="codex",
+                    executable_name="codex.exe",
+                    path="C:/Users/me/AppData/Local/OpenAI/Codex/bin/958d608/codex.exe",
+                ),
+            ]
+        )
+
+        report = WindowsAppResolver(candidate_providers=(provider,)).resolve("codex")
+
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertEqual(report.source, "local-agent-cli")
+        self.assertEqual(
+            report.path,
+            "C:/Users/me/AppData/Local/OpenAI/Codex/bin/958d608/codex.exe",
         )
 
     def test_codex_resolution_prefers_desktop_shell_over_worker_processes(self):
@@ -321,6 +424,52 @@ class AppResolutionModuleTests(unittest.TestCase):
                 report = WindowsAppResolver(candidate_providers=(provider,)).resolve(app_name)
                 self.assertTrue(report.ok)
                 self.assertEqual(report.identity.app_id, "codex")
+
+    def test_local_agent_cli_provider_discovers_codex_localappdata_bin(self):
+        with tempfile.TemporaryDirectory() as td:
+            newest = Path(td) / "OpenAI" / "Codex" / "bin" / "new" / "codex.exe"
+            older = Path(td) / "OpenAI" / "Codex" / "bin" / "codex.exe"
+            older.parent.mkdir(parents=True, exist_ok=True)
+            older.write_text("old", encoding="utf-8")
+            newest.parent.mkdir(parents=True, exist_ok=True)
+            newest.write_text("new", encoding="utf-8")
+            os.utime(older, (1, 1))
+            os.utime(newest, (2, 2))
+            provider = LocalAgentCliCandidateProvider(local_appdata=td)
+
+            report = WindowsAppResolver(candidate_providers=(provider,)).resolve("codex cli")
+
+        self.assertTrue(report.ok, report.to_dict())
+        self.assertEqual(report.source, "local-agent-cli")
+        self.assertEqual(report.path, str(newest))
+        self.assertEqual(report.selected_candidate.metadata["install_kind"], "openai-codex-local-bin")
+
+    def test_codex_cli_alias_does_not_treat_windowsapps_resource_worker_as_cli(self):
+        provider = StaticAppCandidateProvider(
+            [
+                AppResolutionCandidate(
+                    source="running-process",
+                    display_name="codex.exe",
+                    process_name="codex.exe",
+                    executable_name="codex.exe",
+                    path="C:/Program Files/WindowsApps/OpenAI.Codex/app/resources/codex.exe",
+                    pid=3002,
+                ),
+                AppResolutionCandidate(
+                    source="running-process",
+                    display_name="Codex.exe",
+                    process_name="Codex.exe",
+                    executable_name="Codex.exe",
+                    path="C:/Program Files/WindowsApps/OpenAI.Codex/app/Codex.exe",
+                    pid=3001,
+                ),
+            ]
+        )
+
+        report = WindowsAppResolver(candidate_providers=(provider,)).resolve("codex cli")
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.error, "app_not_found")
 
     def test_codex_app_alias_requires_desktop_surface_not_cli_path(self):
         cli_provider = StaticAppCandidateProvider(

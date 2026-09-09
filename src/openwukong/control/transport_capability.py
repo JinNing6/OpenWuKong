@@ -23,12 +23,15 @@ BLOCKED = "blocked"
 
 _READ_ACTIONS = {
     "inspect",
+    "inspect_controls",
     "locate",
     "observe",
     "read",
     "read_page",
     "read_text",
     "screenshot",
+    "wait",
+    "wait_for_element",
 }
 _CONFIRMATION_ACTIONS = {
     "external_send",
@@ -37,8 +40,20 @@ _CONFIRMATION_ACTIONS = {
     "start_agent",
     "submit_form",
     "submit_task",
+    "launch_application",
+}
+_UIA_FOREGROUND_ACTIONS = {
+    "click",
+    "click_coordinates",
+    "double_click",
+    "drag",
+    "focus",
+    "key_press",
+    "scroll",
+    "type_keys",
 }
 _CONNECTOR_TRANSPORTS = {
+    "app-native-bridge-required": "agent-native-bridge",
     "browser-devtools-or-extension": "chrome-devtools-protocol",
     "git-cli": "workspace-bound-git-cli",
     "ide-extension-connector": "ide-extension-bridge",
@@ -121,6 +136,19 @@ def build_transport_capability(
     requires_confirmation = _requires_confirmation(action, intent)
     fallbacks = _fallback_transport_ids(route_plan)
 
+    if selected == "desktop-app-launch":
+        return _foreground_report(
+            route_plan,
+            action,
+            route_id,
+            selected,
+            requires_confirmation=True,
+            risk_flags=("application_launch", "foreground_focus_change"),
+            fallback_transports=fallbacks,
+            selected_transport="windows-process-launcher",
+            transport_channel="foreground_process",
+        )
+
     if selected in _CONNECTOR_TRANSPORTS:
         return _report(
             route_plan,
@@ -138,6 +166,17 @@ def build_transport_capability(
         )
 
     if selected == "uia-semantic":
+        if action in _UIA_FOREGROUND_ACTIONS:
+            return _foreground_report(
+                route_plan,
+                action,
+                route_id,
+                selected,
+                requires_confirmation=requires_confirmation,
+                risk_flags=("foreground_focus_steal", "desktop_input"),
+                fallback_transports=fallbacks,
+                selected_transport="foreground-uia-input",
+            )
         return _report(
             route_plan,
             action,
@@ -150,6 +189,35 @@ def build_transport_capability(
             can_execute_without_focus=True,
             requires_user_confirmation=requires_confirmation,
             verification_requirements=("accessibility_readback",),
+            fallback_transports=fallbacks,
+        )
+
+    if selected == "uia-window-observe":
+        if _is_read_action(action):
+            return _report(
+                route_plan,
+                action,
+                route_id,
+                selected,
+                capability_level=BACKGROUND_READ_ONLY,
+                selected_transport="uia-window-read",
+                transport_channel="accessibility",
+                background_safe=True,
+                can_execute_without_focus=True,
+                verification_requirements=("bound_window_snapshot",),
+                fallback_transports=fallbacks,
+            )
+        return _report(
+            route_plan,
+            action,
+            route_id,
+            selected,
+            capability_level=BLOCKED,
+            selected_transport="none",
+            transport_channel="none",
+            blocked=True,
+            blocking_reason="window_has_no_actionable_controls",
+            risk_flags=("no_actionable_controls",),
             fallback_transports=fallbacks,
         )
 
@@ -178,31 +246,6 @@ def build_transport_capability(
             fallback_transports=fallbacks,
         )
 
-    if selected == "app-native-bridge-required":
-        if _is_read_action(action):
-            return _report(
-                route_plan,
-                action,
-                route_id,
-                selected,
-                capability_level=BACKGROUND_READ_ONLY,
-                selected_transport="win32-msaa-uia-read",
-                transport_channel="accessibility",
-                background_safe=True,
-                can_execute_without_focus=True,
-                verification_requirements=("read_only_accessibility_snapshot",),
-                fallback_transports=fallbacks,
-            )
-        return _foreground_report(
-            route_plan,
-            action,
-            route_id,
-            selected,
-            requires_confirmation=True,
-            risk_flags=("native_connector_missing", "foreground_focus_steal", "clipboard_mutation"),
-            fallback_transports=fallbacks,
-        )
-
     return _report(
         route_plan,
         action,
@@ -227,6 +270,8 @@ def _foreground_report(
     requires_confirmation: bool,
     risk_flags: Iterable[str],
     fallback_transports: Iterable[str],
+    selected_transport: str = "foreground-keyboard-clipboard",
+    transport_channel: str = "foreground_input",
 ) -> TransportCapabilityReport:
     return _report(
         route_plan,
@@ -234,8 +279,8 @@ def _foreground_report(
         route_id,
         selected_route,
         capability_level=FOREGROUND_REQUIRED,
-        selected_transport="foreground-keyboard-clipboard",
-        transport_channel="foreground_input",
+        selected_transport=selected_transport,
+        transport_channel=transport_channel,
         foreground_required=True,
         requires_user_confirmation=requires_confirmation,
         risk_flags=tuple(risk_flags),
@@ -300,6 +345,8 @@ def _connector_verification(route_id: str) -> tuple[str, ...]:
         return ("exit_code", "git_stdout_capture")
     if route_id == "ide-extension-connector":
         return ("bridge_response", "ide_state_snapshot")
+    if route_id == "app-native-bridge-required":
+        return ("native_bridge_response", "agent_transcript_readback", "focus_stability")
     if route_id == "office-object-model-or-addin":
         return ("object_model_readback",)
     return ("connector_result",)

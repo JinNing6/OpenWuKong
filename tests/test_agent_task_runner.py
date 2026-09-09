@@ -150,6 +150,46 @@ class AgentTaskRunnerTests(unittest.TestCase):
         self.assertEqual(data["side_effect_gate"]["decision"], "allow")
         self.assertEqual(data["command_plan"]["argv"][-1], "plan a no-op smoke test")
 
+    def test_cursor_agent_cli_command_plan_uses_non_interactive_print_mode(self):
+        resolver = _resolver_with_cursor_agent()
+        executor = _FakeCommandExecutor()
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = run_agent_task(
+                agent="cursor",
+                task="return a no-op health marker",
+                workspace_root=str(root),
+                output_root=str(root / "out"),
+                execute=True,
+                dry_run=True,
+                allow_agent_task=True,
+                confirmed_effect_ids=(
+                    "agent_task_submission.submit_task",
+                    "agent_start.start_agent",
+                ),
+                resolver=resolver,
+                command_executor=executor,
+            )
+            data = report.to_dict()
+
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(data["decision"], "dry_run_ready")
+        self.assertEqual(data["selected_transport"]["transport_id"], "cursor-agent-cli-managed-terminal")
+        self.assertEqual(data["command_plan"]["command_family"], "cursor-agent -p")
+        self.assertEqual(
+            data["command_plan"]["argv"],
+            [
+                "C:/Users/me/AppData/Roaming/npm/cursor-agent.cmd",
+                "-p",
+                "--output-format",
+                "json",
+                "return a no-op health marker",
+            ],
+        )
+        self.assertEqual(data["agent_command_attempts"], 0)
+        self.assertEqual(len(executor.requests), 0)
+
     def test_confirmed_execute_calls_injected_command_executor(self):
         resolver = _resolver_with_claude()
         executor = _FakeCommandExecutor()
@@ -221,6 +261,23 @@ def _resolver_with_claude():
                         display_name="claude",
                         executable_name="claude.cmd",
                         path="C:/Users/me/AppData/Roaming/npm/claude.cmd",
+                    ),
+                ]
+            ),
+        )
+    )
+
+
+def _resolver_with_cursor_agent():
+    return WindowsAppResolver(
+        candidate_providers=(
+            StaticAppCandidateProvider(
+                [
+                    AppResolutionCandidate(
+                        source="path",
+                        display_name="cursor-agent",
+                        executable_name="cursor-agent.cmd",
+                        path="C:/Users/me/AppData/Roaming/npm/cursor-agent.cmd",
                     ),
                 ]
             ),

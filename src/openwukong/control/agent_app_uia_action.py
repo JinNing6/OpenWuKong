@@ -579,7 +579,7 @@ class AgentAppUiaSemanticDraftWriterAdapter:
         request: AgentAppUiaSemanticActionRequest,
         *,
         cleanup: bool = True,
-        restore_value: str = "",
+        restore_value: str | None = None,
     ) -> AgentAppUiaSemanticDraftWriteReport:
         started = time.perf_counter()
         dry_run = AgentAppUiaSemanticDraftDryRunAdapter().prepare(request)
@@ -661,7 +661,7 @@ class PywinautoUiaSemanticActionOperator:
         request: AgentAppUiaSemanticActionRequest,
         *,
         cleanup: bool = True,
-        restore_value: str = "",
+        restore_value: str | None = None,
     ) -> dict:
         try:
             from pywinauto import Desktop
@@ -691,10 +691,14 @@ class PywinautoUiaSemanticActionOperator:
             result["draft_value"] = _wrapper_value(composer)
             result["value_set"] = request.message in str(result["draft_value"] or "")
             if cleanup:
+                cleanup_target = result["original_value"] if restore_value is None else restore_value
                 result["cleanup_attempted"] = True
-                _set_uia_value(composer, restore_value)
+                _set_uia_value(composer, cleanup_target)
                 result["post_cleanup_value"] = _wrapper_value(composer)
-                result["cleanup_value_set"] = str(result["post_cleanup_value"] or "") == str(restore_value or "")
+                result["cleanup_value_set"] = (
+                    str(result["post_cleanup_value"] or "")
+                    == str(cleanup_target or "")
+                )
         result["readbackText"] = _window_text_snapshot(window)
         return result
 

@@ -74,13 +74,17 @@ class AgentNativeBridgeTests(unittest.TestCase):
             "surface_kind": "desktop_app",
             "app_binding": {
                 "process_name": "Codex.exe",
+                "executable_path": "C:/Program Files/OpenAI/Codex/app/Codex.exe",
                 "pid": 32000,
                 "hwnd": 2491830,
                 "window_title": "Codex",
             },
             "requires_foreground": False,
             "window_input_required": False,
-            "capabilities": ["agent_app_conversation.native_bridge_send_message"],
+            "capabilities": [
+                "agent_app_conversation.native_bridge_send_message",
+                "agent_app_conversation.read_transcript",
+            ],
             "agents": [{"agent_id": "codex", "available": True}],
             "projects": [{"name": "openwukong", "available": True}],
             "tasks": [{"name": "desktop-message", "available": True}],
@@ -263,6 +267,101 @@ class AgentNativeBridgeTests(unittest.TestCase):
         self.assertFalse(dry_run.ok)
         self.assertEqual(dry_run.decision, "agent_native_bridge_app_binding_not_ready")
         self.assertIn("app_binding_not_ready", dry_run.validation_errors)
+        self.assertFalse(send.ok)
+        self.assertEqual(send.decision, "agent_native_bridge_request_not_ready")
+        self.assertEqual(send.bridge_send_attempts, 0)
+        self.assertNotIn("/v1/agent/chat", [item[0] for item in _AgentBridgeHandler.requests])
+
+    def test_dry_run_rejects_claude_desktop_bridge_bound_to_cli_path(self):
+        _AgentBridgeHandler.capabilities_payload.update(
+            {
+                "surface_kind": "desktop_app",
+                "app_binding": {
+                    "process_name": "Claude.exe",
+                    "executable_path": "C:/Users/me/.local/bin/claude.exe",
+                    "window_title": "Claude",
+                },
+                "agents": [{"agent_id": "claude", "available": True}],
+            }
+        )
+        request = build_agent_native_bridge_request(
+            bridge_url=self.bridge_url,
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="desktop-message",
+            message="OPENWUKONG_CLAUDE_APP_DRY_RUN: PASS",
+            composed_message="Project: openwukong\nTask: desktop-message",
+            required_markers=("OPENWUKONG_CLAUDE_APP_DRY_RUN: PASS",),
+        )
+
+        dry_run = AgentNativeBridgeDryRunAdapter(request_timeout=2.0).prepare(request)
+        send = AgentNativeBridgeSenderAdapter(request_timeout=2.0).send(request)
+
+        self.assertFalse(dry_run.ok)
+        self.assertEqual(dry_run.decision, "agent_native_bridge_app_binding_not_ready")
+        self.assertIn("app_binding_not_ready", dry_run.validation_errors)
+        self.assertFalse(dry_run.to_dict()["request"]["app_binding_ready"])
+        self.assertFalse(send.ok)
+        self.assertEqual(send.decision, "agent_native_bridge_request_not_ready")
+        self.assertEqual(send.bridge_send_attempts, 0)
+        self.assertNotIn("/v1/agent/chat", [item[0] for item in _AgentBridgeHandler.requests])
+
+    def test_dry_run_rejects_claude_desktop_bridge_with_name_only_binding(self):
+        _AgentBridgeHandler.capabilities_payload.update(
+            {
+                "surface_kind": "desktop_app",
+                "app_binding": {
+                    "process_name": "Claude.exe",
+                    "window_title": "Claude",
+                },
+                "agents": [{"agent_id": "claude", "available": True}],
+            }
+        )
+        request = build_agent_native_bridge_request(
+            bridge_url=self.bridge_url,
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="desktop-message",
+            message="OPENWUKONG_CLAUDE_APP_DRY_RUN: PASS",
+            composed_message="Project: openwukong\nTask: desktop-message",
+            required_markers=("OPENWUKONG_CLAUDE_APP_DRY_RUN: PASS",),
+        )
+
+        dry_run = AgentNativeBridgeDryRunAdapter(request_timeout=2.0).prepare(request)
+        send = AgentNativeBridgeSenderAdapter(request_timeout=2.0).send(request)
+
+        self.assertFalse(dry_run.ok)
+        self.assertEqual(dry_run.decision, "agent_native_bridge_app_binding_not_ready")
+        self.assertIn("app_binding_not_ready", dry_run.validation_errors)
+        self.assertFalse(dry_run.to_dict()["request"]["app_binding_ready"])
+        self.assertFalse(send.ok)
+        self.assertEqual(send.decision, "agent_native_bridge_request_not_ready")
+        self.assertEqual(send.bridge_send_attempts, 0)
+        self.assertNotIn("/v1/agent/chat", [item[0] for item in _AgentBridgeHandler.requests])
+
+    def test_sender_refuses_bridge_without_readback_capability_for_marker_verification(self):
+        _AgentBridgeHandler.capabilities_payload["capabilities"] = [
+            "agent_app_conversation.native_bridge_send_message"
+        ]
+        request = build_agent_native_bridge_request(
+            bridge_url=self.bridge_url,
+            agent="codex app",
+            agent_id="codex",
+            project_name="openwukong",
+            task_name="desktop-message",
+            message="OPENWUKONG_AGENT_NATIVE_SEND: PASS",
+            composed_message="Project: openwukong\nTask: desktop-message",
+            required_markers=("OPENWUKONG_AGENT_NATIVE_SEND: PASS",),
+        )
+
+        dry_run = AgentNativeBridgeDryRunAdapter(request_timeout=2.0).prepare(request)
+        send = AgentNativeBridgeSenderAdapter(request_timeout=2.0).send(request)
+
+        self.assertFalse(dry_run.ok)
+        self.assertEqual(dry_run.decision, "agent_native_bridge_readback_not_ready")
+        self.assertIn("readback_not_ready", dry_run.validation_errors)
         self.assertFalse(send.ok)
         self.assertEqual(send.decision, "agent_native_bridge_request_not_ready")
         self.assertEqual(send.bridge_send_attempts, 0)

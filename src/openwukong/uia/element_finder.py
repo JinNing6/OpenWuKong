@@ -31,14 +31,17 @@ class ElementInfo:
     process_name: str
     pid: int
     window_title: str
+    is_password: bool = False
+    patterns: tuple[str, ...] = ()
     # 内部引用，用于后续交互操作
     _wrapper: object = dataclasses.field(default=None, repr=False)
 
     def __str__(self) -> str:
         rw = "RW" if self.is_writable else "RO"
+        display_value = "[redacted]" if self.is_password else self.value[:30]
         return (
             f"[{self.control_type}] {self.name or self.automation_id or '(unnamed)'} "
-            f"({rw}) value=\"{self.value[:30]}\" "
+            f"({rw}) value=\"{display_value}\" "
             f"@ {self.process_name}:{self.window_title[:25]}"
         )
 
@@ -166,6 +169,8 @@ class ElementFinder:
         rect = (0, 0, 0, 0)
         enabled = False
         writable = False
+        is_password = False
+        patterns: list[str] = []
 
         try:
             ctrl_type = wrapper.element_info.control_type or "Unknown"
@@ -180,9 +185,17 @@ class ElementFinder:
         except Exception:
             pass
         try:
-            value = wrapper.window_text() or ""
+            automation_element = getattr(wrapper.element_info, "element", None)
+            is_password = bool(
+                getattr(automation_element, "CurrentIsPassword", False)
+            )
         except Exception:
             pass
+        if not is_password:
+            try:
+                value = wrapper.window_text() or ""
+            except Exception:
+                pass
         try:
             r = wrapper.rectangle()
             rect = (r.left, r.top, r.right, r.bottom)
@@ -197,13 +210,30 @@ class ElementFinder:
             if ctrl_type == "Edit" and enabled:
                 writable = True
                 try:
-                    ro = wrapper.get_value_pattern_attribute("IsReadOnly")
-                    if ro:
+                    if bool(wrapper.iface_value.CurrentIsReadOnly):
                         writable = False
                 except Exception:
                     pass
         except Exception:
             pass
+        if is_password:
+            value = ""
+            writable = False
+        for attr_name, pattern_name in (
+            ("iface_value", "Value"),
+            ("iface_invoke", "Invoke"),
+            ("iface_selection_item", "SelectionItem"),
+            ("iface_toggle", "Toggle"),
+            ("iface_expand_collapse", "ExpandCollapse"),
+            ("iface_text", "Text"),
+        ):
+            if is_password and pattern_name in {"Value", "Text"}:
+                continue
+            try:
+                if getattr(wrapper, attr_name, None) is not None:
+                    patterns.append(pattern_name)
+            except Exception:
+                continue
 
         return ElementInfo(
             control_type=ctrl_type,
@@ -216,6 +246,8 @@ class ElementFinder:
             process_name=proc_name,
             pid=pid,
             window_title=win_title,
+            is_password=is_password,
+            patterns=tuple(dict.fromkeys(patterns)),
             _wrapper=wrapper,
         )
 

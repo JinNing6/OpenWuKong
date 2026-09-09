@@ -18,6 +18,15 @@ from openwukong.connectors import ConnectorTarget
 from openwukong.connectors.ide_extension import IDEExtensionBridgeClient
 
 
+_RISKY_COMMANDS_BY_ADAPTER = {
+    "cursor": {
+        # R117 proved this writes a draft but can also trigger the Windows
+        # "session-start" open-with picker through Cursor's focus path.
+        "workbench.action.chat.open": "opens Cursor composer through showAndFocus and can trigger the session-start system picker",
+    }
+}
+
+
 @dataclasses.dataclass(frozen=True)
 class IDEBridgeCapabilityCaptureReport:
     bridge_url: str
@@ -49,9 +58,11 @@ class IDEBridgeCapabilityCaptureReport:
 
     def to_dict(self) -> dict:
         review_candidates = build_review_candidates(self.commands)
+        risky_candidates = build_risky_candidates(self.commands)
         active_mapping = build_active_adapter_mapping(
             self.adapter_mapping,
             review_candidates,
+            risky_candidates,
         )
         return {
             "mode": self.mode,
@@ -69,8 +80,10 @@ class IDEBridgeCapabilityCaptureReport:
             "adapter_mapping": self.adapter_mapping,
             "active_mapping": active_mapping,
             "cursor_review_candidates": review_candidates.get("cursor", []),
+            "cursor_risky_candidates": risky_candidates.get("cursor", []),
             "copilot_review_candidates": review_candidates.get("copilot", []),
             "codex_review_candidates": review_candidates.get("codex", []),
+            "risky_candidate_reasons": _risky_candidate_reasons(risky_candidates),
             "response": dict(self.response),
             "elapsed_ms": round(self.elapsed_ms, 3),
         }
@@ -149,12 +162,19 @@ def build_adapter_mapping(chat_adapters) -> dict:
             + _string_list(adapter.get("command_candidates", []))
             + available_candidates
         )
+        risky_commands = _risky_commands_for_adapter(adapter_id)
+        risky_candidates = [command for command in command_candidates if command in risky_commands]
+        safe_candidates = [command for command in command_candidates if command not in risky_commands]
+        safe_command_id = command_id if command_id not in risky_commands else ""
         mapping[adapter_id] = {
             "label": str(adapter.get("label", "") or adapter_id),
-            "commandId": command_id if available and command_id else "",
-            "commandCandidates": command_candidates,
-            "available": available,
-            "availableCandidates": available_candidates,
+            "commandId": safe_command_id if available and safe_command_id else "",
+            "commandCandidates": safe_candidates,
+            "available": available and bool(safe_command_id),
+            "availableCandidates": [
+                command for command in available_candidates if command not in risky_commands
+            ],
+            "riskyCommandCandidates": risky_candidates,
         }
     return mapping
 
@@ -172,7 +192,6 @@ def build_review_candidates(commands: tuple[str, ...] | list[str]) -> dict:
                 "composer.openComposer",
                 "composer.createNew",
                 "aichat.newchataction",
-                "workbench.action.chat.open",
             ],
         ),
         "copilot": _select_known_candidates(
@@ -189,7 +208,19 @@ def build_review_candidates(commands: tuple[str, ...] | list[str]) -> dict:
     }
 
 
-def build_active_adapter_mapping(adapter_mapping: dict, review_candidates: dict) -> dict:
+def build_risky_candidates(commands: tuple[str, ...] | list[str]) -> dict:
+    command_set = set(str(command or "").strip() for command in commands if str(command or "").strip())
+    return {
+        adapter_id: _select_known_candidates(command_set, list(command_reasons.keys()))
+        for adapter_id, command_reasons in _RISKY_COMMANDS_BY_ADAPTER.items()
+    }
+
+
+def build_active_adapter_mapping(
+    adapter_mapping: dict,
+    review_candidates: dict,
+    risky_candidates: dict | None = None,
+) -> dict:
     active: dict = {}
     if isinstance(adapter_mapping, dict):
         for adapter_id, value in adapter_mapping.items():
@@ -199,7 +230,11 @@ def build_active_adapter_mapping(adapter_mapping: dict, review_candidates: dict)
         if not isinstance(existing, dict):
             existing = {}
         merged_candidates = _stable_unique(
-            _string_list(existing.get("commandCandidates", [])) + list(candidates or [])
+            list(candidates or []) + _string_list(existing.get("commandCandidates", []))
+        )
+        risky_for_adapter = _stable_unique(
+            _string_list(existing.get("riskyCommandCandidates", []))
+            + _string_list((risky_candidates or {}).get(adapter_id, []))
         )
         active[adapter_id] = {
             "label": str(existing.get("label", "") or adapter_id),
@@ -207,6 +242,7 @@ def build_active_adapter_mapping(adapter_mapping: dict, review_candidates: dict)
             "commandCandidates": merged_candidates,
             "available": bool(existing.get("available", False)),
             "availableCandidates": _string_list(existing.get("availableCandidates", [])),
+            "riskyCommandCandidates": risky_for_adapter,
         }
     return active
 
@@ -243,11 +279,28 @@ def _select_known_candidates(command_set: set[str], preferred_order: list[str]) 
     return [command_id for command_id in preferred_order if command_id in command_set]
 
 
+def _risky_commands_for_adapter(adapter_id: str) -> dict[str, str]:
+    return _RISKY_COMMANDS_BY_ADAPTER.get(str(adapter_id or "").strip(), {})
+
+
+def _risky_candidate_reasons(risky_candidates: dict) -> dict[str, str]:
+    reasons: dict[str, str] = {}
+    if not isinstance(risky_candidates, dict):
+        return reasons
+    for adapter_id, command_ids in risky_candidates.items():
+        command_reasons = _risky_commands_for_adapter(str(adapter_id))
+        for command_id in _string_list(command_ids):
+            reason = command_reasons.get(command_id)
+            if reason:
+                reasons[command_id] = reason
+    return reasons
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Capture read-only IDE bridge capabilities from /v1/ide/capabilities."
     )
-    parser.add_argument("bridge_url", help="IDE bridge URL, for example http://127.0.0.1:8787")
+    parser.add_argument("bridge_url", help="Resolved IDE bridge URL, for example a dynamic URL read from the local bridge registry.")
     parser.add_argument("--workspace-path", default="", help="Optional workspace path to include in the target payload.")
     parser.add_argument("--timeout", type=float, default=5.0, help="HTTP request timeout in seconds.")
     parser.add_argument("--output", default="", help="Optional path to write the JSON report.")

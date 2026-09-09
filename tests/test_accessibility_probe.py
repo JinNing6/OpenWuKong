@@ -10,6 +10,9 @@ from openwukong.evaluation.accessibility_probe import (
     StaticAccessibilityObserver,
     WindowsCapabilityProbe,
     _element_from_wrapper,
+    _merge_win32_fallback_windows,
+    _merge_process_only_fallback_windows,
+    _process_only_fallback_windows_from_rows,
     main,
 )
 
@@ -261,6 +264,114 @@ class AccessibilityProbeTests(unittest.TestCase):
         self.assertEqual(window["semantic_input_count"], 0)
         self.assertEqual(window["text_readable_count"], 1)
         self.assertIn("input_without_semantic_pattern", window["risks"])
+
+    def test_win32_fallback_adds_top_level_window_missing_from_uia(self):
+        existing = AccessibilityWindowSnapshot(
+            pid=30608,
+            process_name="Codex.exe",
+            window_title="Codex",
+            class_name="Chrome_WidgetWin_1",
+            hwnd=658028,
+            elements=(_element("Document", name="Codex", patterns=("Text",)),),
+        )
+        duplicate = AccessibilityWindowSnapshot(
+            pid=30608,
+            process_name="codex",
+            window_title="Codex",
+            class_name="Chrome_WidgetWin_1",
+            hwnd=658028,
+            elements=(),
+        )
+        missed = AccessibilityWindowSnapshot(
+            pid=42028,
+            process_name="claude",
+            window_title="Claude",
+            class_name="Chrome_WidgetWin_1",
+            hwnd=855894,
+            elements=(),
+        )
+
+        merged = _merge_win32_fallback_windows(
+            (existing,),
+            (duplicate, missed),
+            max_windows=10,
+        )
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(merged[0].process_name, "Codex.exe")
+        self.assertEqual(merged[0].element_count, 1)
+        self.assertEqual(merged[1].process_name, "claude")
+        self.assertEqual(merged[1].window_title, "Claude")
+        self.assertEqual(merged[1].element_count, 0)
+        self.assertEqual(merged[1].hwnd, 855894)
+
+    def test_process_only_fallback_keeps_running_wechat_visible_to_readiness(self):
+        fallback = _process_only_fallback_windows_from_rows(
+            (
+                {"pid": 4628, "name": "Weixin.exe", "executable_path": "E:/software/Weixin/Weixin.exe"},
+                {"pid": 16444, "name": "Cursor.exe", "executable_path": "E:/cursor/Cursor.exe"},
+                {"pid": 9999, "name": "notepad.exe", "executable_path": "C:/Windows/notepad.exe"},
+            )
+        )
+
+        process_names = {window.process_name for window in fallback}
+        wechat = next(window for window in fallback if window.process_name == "Weixin.exe")
+
+        self.assertIn("Weixin.exe", process_names)
+        self.assertIn("Cursor.exe", process_names)
+        self.assertNotIn("notepad.exe", process_names)
+        self.assertEqual(wechat.window_title, "Weixin.exe")
+        self.assertEqual(wechat.hwnd, 0)
+        self.assertEqual(wechat.element_count, 0)
+        self.assertEqual(wechat.capability_level(), "window_only")
+        self.assertEqual(wechat.recommended_routes()[0], "app-native-bridge-required")
+        self.assertIn("process_only_no_top_level_window", wechat.scan_error)
+
+    def test_process_only_fallback_routes_claude_as_agent_app_native_bridge_required(self):
+        fallback = _process_only_fallback_windows_from_rows(
+            (
+                {
+                    "pid": 13176,
+                    "name": "claude.exe",
+                    "executable_path": "C:/Users/me/AppData/Local/Programs/Claude/Claude.exe",
+                },
+            )
+        )
+
+        report = WindowsCapabilityProbe(observer=StaticAccessibilityObserver(fallback)).run()
+        window = report.to_dict(include_elements=False)["windows"][0]
+
+        self.assertEqual(window["process_name"], "claude.exe")
+        self.assertEqual(window["recommended_routes"][0], "app-native-bridge-required")
+        self.assertEqual(window["control_route_plan"]["app_family"], "agent-app")
+        self.assertEqual(
+            window["control_route_plan"]["primary_route"]["route_id"],
+            "app-native-bridge-required",
+        )
+        self.assertEqual(
+            window["control_route_plan"]["control_decision"],
+            "block_until_deterministic_route",
+        )
+
+    def test_process_only_fallback_does_not_duplicate_existing_process_window(self):
+        existing = AccessibilityWindowSnapshot(
+            pid=4628,
+            process_name="Weixin.exe",
+            window_title="文件传输助手 - 微信",
+            hwnd=1001,
+        )
+        fallback = _process_only_fallback_windows_from_rows(
+            ({"pid": 4628, "name": "Weixin.exe"},)
+        )
+
+        merged = _merge_process_only_fallback_windows(
+            (existing,),
+            fallback,
+            max_windows=10,
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].window_title, "文件传输助手 - 微信")
 
 
 if __name__ == "__main__":

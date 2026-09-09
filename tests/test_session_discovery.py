@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from openwukong.connectors import ConnectorTarget
@@ -170,6 +171,73 @@ class SessionDiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(dispatch.to_dict()["decision"], "dispatch_connector")
         self.assertEqual(dispatch.to_dict()["selected_connector_id"], "ide-extension")
+
+    def test_default_discovery_does_not_probe_fixed_cursor_ide_bridge_ports(self):
+        probe = _FakeHTTPProbe()
+        discovery = SessionDiscovery(
+            SessionDiscoveryOptions(environment={}),
+            http_probe=probe,
+        )
+
+        result = discovery.enrich(
+            ConnectorTarget(process_name="Cursor.exe", window_title="Cursor")
+        )
+
+        self.assertEqual(result.ide_bridge_url, "")
+        self.assertEqual(probe.post_calls, [])
+
+    def test_discovers_dynamic_ide_bridge_url_from_local_registry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "ide-bridges"
+            registry.mkdir()
+            (registry / "cursor.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "openwukong-ide-bridge-registry-v1",
+                        "ide_bridges": [
+                            {
+                                "type": "ide_bridge",
+                                "enabled": True,
+                                "app_name": "Cursor",
+                                "bridge_url": "http://127.0.0.1:45678",
+                                "dynamic_port": True,
+                            },
+                            {
+                                "type": "ide_bridge",
+                                "enabled": True,
+                                "app_name": "Cursor",
+                                "bridge_url": "http://example.com:45679",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            probe = _FakeHTTPProbe(
+                post_responses={
+                    "http://127.0.0.1:45678/v1/ide/capabilities": {
+                        "ok": True,
+                        "metadata": {"ide_name": "Cursor"},
+                    }
+                }
+            )
+            discovery = SessionDiscovery(
+                SessionDiscoveryOptions(
+                    ide_bridge_registry_paths=(str(registry),),
+                    environment={},
+                ),
+                http_probe=probe,
+            )
+
+            result = discovery.enrich(
+                ConnectorTarget(process_name="Cursor.exe", window_title="Cursor")
+            )
+
+        self.assertEqual(result.ide_bridge_url, "http://127.0.0.1:45678")
+        self.assertEqual(
+            [item[0] for item in probe.post_calls],
+            ["http://127.0.0.1:45678/v1/ide/capabilities"],
+        )
 
     def test_discovers_terminal_workspace_only_when_window_identity_matches_root(self):
         with tempfile.TemporaryDirectory() as tmp:

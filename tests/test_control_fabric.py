@@ -203,6 +203,30 @@ class ControlFabricTests(unittest.TestCase):
         self.assertEqual(data["selected_connector_id"], "browser")
         self.assertTrue(data["connector_ready"])
 
+    def test_default_runtime_requires_agent_native_endpoint_for_codex_app(self):
+        fabric = ControlFabric.with_default_connectors()
+
+        report = fabric.dispatch(
+            ConnectorTarget(process_name="Codex.exe", window_title="Codex"),
+            ControlIntent(
+                action="send_message",
+                text="OPENWUKONG",
+                preferred_route_id="app-native-bridge-required",
+                preferred_connector_id="agent-native-bridge",
+            ),
+        )
+        data = report.to_dict()
+
+        self.assertEqual(data["decision"], "connector_required")
+        self.assertEqual(data["execution_mode"], "none")
+        self.assertEqual(data["selected_route"], "app-native-bridge-required")
+        self.assertEqual(data["selected_connector_id"], "")
+        self.assertIn("agent-native-bridge", data["candidate_connector_ids"])
+        self.assertIn("agent-native-bridge", data["installed_connector_ids"])
+        self.assertEqual(data["transport_capability_level"], "background-native")
+        self.assertTrue(data["background_safe"])
+        self.assertFalse(data["foreground_required"])
+
     def test_runtime_dispatches_terminal_connector_only_for_bound_workspace_session(self):
         fabric = ControlFabric(
             connector_manager=ConnectorManager([TerminalCommandConnector()]),

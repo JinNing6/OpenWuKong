@@ -45,6 +45,7 @@ OpenWukong 的目标是构建一个可靠的 `AIOS Copilot`，第一阶段聚焦
 | 火眼金睛 | 扫描窗口、进程、项目与 Agent 状态 | `src/openwukong/monitor/` |
 | 自动督导 | 目标匹配、读状态、续发、重试、快照 | `src/openwukong/supervisor/` |
 | 连接器优先 | Terminal / Git / Browser / IDE bridge / UIA fallback | `src/openwukong/connectors/` |
+| Windows 通用操作 | UIA 控件清单、语义模式、窗口截图及经批准的键鼠操作 | `src/openwukong/connectors/desktop_uia.py` |
 | 路由安全门 | app family → route policy → allow / block | `src/openwukong/connectors/route_policy.py` |
 | L1 离线回放 | 用 fixture 压测路由、错靶、低置信度 | `src/openwukong/evaluation/simulation.py` |
 | L3 影子模式 | 真实桌面只读规划，保持 `control_attempts=0` | `src/openwukong/evaluation/shadow.py` |
@@ -83,6 +84,45 @@ python -m pip install -e ".[dev,gui]"
 # 6. 打开悟空督导面板
 .\start.bat ui
 ```
+
+## Windows 通用操作
+
+通用桌面连接器借鉴 UFO² 的底层动作词汇，但仍由 OpenWukong 的路由、安全门和证据链统一调度。默认连接器已经注册到 Control Fabric：
+
+- 后台只读：`inspect_controls`、`read_text`、`screenshot`、`wait_for_element`
+- 后台语义操作：`set_value`、`invoke`、`select`、`toggle`
+- 前台操作：`click`、`double_click`、`drag`、`scroll`、`type_keys`、`key_press`、`focus`
+- 应用启动：仅允许 `notepad`、`calc`、`mspaint`，且不接受命令行参数
+
+先用 PID 和窗口标题读取控件清单：
+
+```powershell
+python -m openwukong.evaluation.control_fabric_execute `
+  --pid 4242 --process-name notepad.exe --window-title "Untitled - Notepad" `
+  --action inspect_controls --allow-control --json
+```
+
+真实键鼠操作采用两阶段批准。第一次只生成批准请求并返回非零退出码，不会点击：
+
+```powershell
+python -m openwukong.evaluation.control_fabric_execute `
+  --pid 4242 --process-name notepad.exe --window-title "Untitled - Notepad" `
+  --action click --parameters-json '{"automation_id":"save"}' `
+  --allow-control --allow-foreground-interaction `
+  --output foreground-request.json --json
+```
+
+确认目标后，将 `foreground-request.json` 内 `foreground_takeover_request.status` 改为 `approved`，再以完全相同的 PID、窗口和动作重试：
+
+```powershell
+python -m openwukong.evaluation.control_fabric_execute `
+  --pid 4242 --process-name notepad.exe --window-title "Untitled - Notepad" `
+  --action click --parameters-json '{"automation_id":"save"}' `
+  --allow-control --allow-foreground-interaction `
+  --foreground-approval-file foreground-request.json --json
+```
+
+批准请求会绑定 PID、窗口、动作和定位参数；其中任何一项改变，旧批准都会失效。密码控件不会读取或返回值，歧义定位不会执行。
 
 ## Project Structure
 

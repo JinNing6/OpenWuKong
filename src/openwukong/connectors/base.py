@@ -23,6 +23,12 @@ class ConnectorTarget:
     resource_url: str = ""
     debugger_url: str = ""
     ide_bridge_url: str = ""
+    agent_native_bridge_url: str = ""
+    wechat_native_bridge_url: str = ""
+    conversation_name: str = ""
+    background_screenshot_focus_stable: bool = True
+    background_screenshot_count: int = 0
+    background_screenshot_success_count: int = 0
 
     def identity_text(self) -> str:
         """Flatten the target identity into a lowercase blob for scoring."""
@@ -37,6 +43,9 @@ class ConnectorTarget:
             self.resource_url,
             self.debugger_url,
             self.ide_bridge_url,
+            self.agent_native_bridge_url,
+            self.wechat_native_bridge_url,
+            self.conversation_name,
         ]
         return " ".join((part or "").strip().lower() for part in parts if part).strip()
 
@@ -83,3 +92,23 @@ class SessionConnector(ABC):
         cooldown: float = 10.0,
     ) -> ConnectorActionResult:
         """Inject a message into the target session."""
+
+    def execute_action(
+        self,
+        target: ConnectorTarget,
+        intent: object,
+        cooldown: float = 10.0,
+    ) -> ConnectorActionResult:
+        """Execute a normalized action, defaulting to the legacy message path.
+
+        Existing session connectors only need ``send_message``. Connectors with
+        richer action vocabularies can override this method without forcing
+        every connector to understand desktop-specific intent fields.
+        """
+        message = ""
+        for name in ("text", "value", "url", "action"):
+            value = str(getattr(intent, name, "") or "").strip()
+            if value:
+                message = value
+                break
+        return self.send_message(target, message, cooldown=cooldown)

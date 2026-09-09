@@ -1,10 +1,15 @@
 import unittest
+import sys
+import types
+from unittest import mock
 
+from openwukong.control import agent_app_uia_action as uia_action_module
 from openwukong.control.agent_app_uia_action import (
     AgentAppUiaSemanticActionDryRunAdapter,
     AgentAppUiaSemanticDraftWriterAdapter,
     AgentAppUiaSemanticActionSenderAdapter,
     AgentAppUiaSemanticDraftDryRunAdapter,
+    PywinautoUiaSemanticActionOperator,
     build_agent_app_uia_semantic_action_request,
 )
 
@@ -279,6 +284,52 @@ class AgentAppUiaActionContractTests(unittest.TestCase):
         self.assertEqual(data["cleanup_value_set_attempts"], 1)
         self.assertTrue(data["cleanup_verified"])
         self.assertTrue(data["foreground_focus_stable"])
+
+    def test_pywinauto_draft_writer_restores_original_value_by_default(self):
+        state = {"value": "existing user draft"}
+        fake_window = object()
+        fake_composer = object()
+
+        request = build_agent_app_uia_semantic_action_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="PaoPaoHeZi",
+            task_name="",
+            message="OPENWUKONG_UIA_DRAFT_PROBE",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=_cursor_probe_with_editor_filter_and_chat_candidates(),
+        )
+
+        with mock.patch.dict(
+            sys.modules,
+            {"pywinauto": types.SimpleNamespace(Desktop=lambda backend: object())},
+        ), mock.patch.object(
+            uia_action_module,
+            "_find_window_wrapper",
+            lambda desktop, target: fake_window,
+        ), mock.patch.object(
+            uia_action_module,
+            "_find_descendant_wrapper",
+            lambda window, composer: fake_composer,
+        ), mock.patch.object(
+            uia_action_module,
+            "_wrapper_value",
+            lambda wrapper: state["value"],
+        ), mock.patch.object(
+            uia_action_module,
+            "_set_uia_value",
+            lambda wrapper, value: state.__setitem__("value", value),
+        ), mock.patch.object(
+            uia_action_module,
+            "_window_text_snapshot",
+            lambda window: state["value"],
+        ):
+            result = PywinautoUiaSemanticActionOperator().draft(request)
+
+        self.assertEqual(result["original_value"], "existing user draft")
+        self.assertEqual(result["draft_value"], "OPENWUKONG_UIA_DRAFT_PROBE")
+        self.assertEqual(result["post_cleanup_value"], "existing user draft")
+        self.assertTrue(result["cleanup_value_set"])
 
 
 def _ready_uia_probe():

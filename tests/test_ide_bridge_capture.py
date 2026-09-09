@@ -180,6 +180,84 @@ class IDEBridgeCaptureTests(unittest.TestCase):
         self.assertEqual(data["active_mapping"]["cursor"]["commandId"], "")
         self.assertFalse(data["active_mapping"]["cursor"]["available"])
 
+    def test_capture_classifies_cursor_chat_open_as_risky_not_active(self):
+        class _RawCursorCommandClient:
+            def read_capabilities(self, bridge_url, target):
+                del bridge_url, target
+                return {
+                    "ok": True,
+                    "metadata": {"ide_name": "Cursor"},
+                    "commands": [
+                        "composer.startComposerPrompt",
+                        "composer.sendToAgent",
+                        "workbench.action.chat.open",
+                    ],
+                    "chat_adapters": [
+                        {
+                            "adapter_id": "cursor",
+                            "label": "Cursor Chat",
+                            "command_id": "",
+                            "command_candidates": [],
+                            "available": False,
+                            "available_candidates": [],
+                        }
+                    ],
+                }
+
+        report = capture_ide_bridge_capabilities(
+            "http://127.0.0.1:8791",
+            bridge_client=_RawCursorCommandClient(),
+        )
+        data = report.to_dict()
+
+        self.assertIn("workbench.action.chat.open", data["cursor_risky_candidates"])
+        self.assertNotIn("workbench.action.chat.open", data["cursor_review_candidates"])
+        self.assertNotIn(
+            "workbench.action.chat.open",
+            data["active_mapping"]["cursor"]["commandCandidates"],
+        )
+        self.assertEqual(
+            data["active_mapping"]["cursor"]["commandCandidates"][0],
+            "composer.startComposerPrompt",
+        )
+
+    def test_capture_prioritizes_reviewed_cursor_candidates_ahead_of_stale_config_candidates(self):
+        class _StaleConfiguredCursorCommandClient:
+            def read_capabilities(self, bridge_url, target):
+                del bridge_url, target
+                return {
+                    "ok": True,
+                    "metadata": {"ide_name": "Cursor"},
+                    "commands": [
+                        "composer.sendToAgent",
+                        "workbench.action.chat.open",
+                    ],
+                    "chat_adapters": [
+                        {
+                            "adapter_id": "cursor",
+                            "label": "Cursor Chat",
+                            "command_id": "composer.sendToAgent",
+                            "command_candidates": ["composer.sendToAgent"],
+                            "available": True,
+                            "available_candidates": ["composer.sendToAgent"],
+                        }
+                    ],
+                }
+
+        report = capture_ide_bridge_capabilities(
+            "http://127.0.0.1:8791",
+            bridge_client=_StaleConfiguredCursorCommandClient(),
+        )
+        data = report.to_dict()
+
+        self.assertEqual(data["active_mapping"]["cursor"]["commandId"], "composer.sendToAgent")
+        self.assertTrue(data["active_mapping"]["cursor"]["available"])
+        self.assertEqual(
+            data["active_mapping"]["cursor"]["commandCandidates"],
+            ["composer.sendToAgent"],
+        )
+        self.assertIn("workbench.action.chat.open", data["cursor_risky_candidates"])
+
     def test_cli_writes_capture_report_json(self):
         with tempfile.TemporaryDirectory() as td:
             output_path = Path(td) / "ide_bridge_capabilities.json"

@@ -116,6 +116,13 @@ class AgentAppTransportMatrixReport:
                 for candidate in self.candidates
                 if candidate.ready and candidate.capability_level == BACKGROUND_READ_ONLY
             ),
+            "computer_use_read_only": sum(
+                1
+                for candidate in self.candidates
+                if candidate.transport_id == "computer-use-window2"
+                and candidate.ready
+                and candidate.capability_level == BACKGROUND_READ_ONLY
+            ),
             "foreground_required": levels.get(FOREGROUND_REQUIRED, 0),
             "blocked": levels.get(BLOCKED, 0),
         }
@@ -154,10 +161,16 @@ def build_agent_app_transport_matrix(
     *,
     app_bridge_composer_probe: dict | object | None = None,
     app_bridge_send_report: dict | object | None = None,
+    codex_app_server_turn_start_report: dict | object | None = None,
+    computer_use_probe: dict | object | None = None,
 ) -> AgentAppTransportMatrixReport:
     data = _dict_from_report(probe)
     composer_probe = _dict_from_report(app_bridge_composer_probe)
     send_report = _dict_from_report(app_bridge_send_report)
+    codex_turn_report = _dict_from_report(codex_app_server_turn_start_report)
+    computer_probe = _dict_from_report(computer_use_probe) or _dict_value(
+        data.get("computer_use_probe")
+    )
     app_uia_probe = _dict_value(data.get("app_uia_probe"))
     agent = str(data.get("agent", "") or app_uia_probe.get("agent", "") or "").strip()
     agent_id = str(
@@ -175,9 +188,11 @@ def build_agent_app_transport_matrix(
                 task_name=task_name,
                 app_bridge_composer_probe=composer_probe,
                 app_bridge_send_report=send_report,
+                codex_app_server_turn_start_report=codex_turn_report,
             )
         )
         + _uia_candidates(app_uia_probe)
+        + _computer_use_candidates(computer_probe)
         + [_foreground_candidate(app_uia_probe)]
     )
     return AgentAppTransportMatrixReport(
@@ -197,11 +212,13 @@ def _endpoint_candidates(
     task_name: str,
     app_bridge_composer_probe: dict,
     app_bridge_send_report: dict,
+    codex_app_server_turn_start_report: dict,
 ) -> tuple[AgentAppTransportCandidate, ...]:
     endpoint_list = tuple(_dict_value(endpoint) for endpoint in endpoints)
     candidates: list[AgentAppTransportCandidate] = []
     agent_native = [item for item in endpoint_list if _endpoint_type(item) == "agent_native_bridge"]
     ide_bridge = [item for item in endpoint_list if _endpoint_type(item) == "ide_bridge"]
+    codex_app_server = [item for item in endpoint_list if _endpoint_type(item) == "codex_app_server_ws"]
     devtools = [item for item in endpoint_list if _endpoint_type(item) == "devtools"]
 
     if agent_native:
@@ -232,6 +249,13 @@ def _endpoint_candidates(
                 ),
             )
         )
+    if codex_app_server:
+        candidates.append(
+            _codex_app_server_candidate(
+                codex_app_server,
+                turn_start_report=codex_app_server_turn_start_report,
+            )
+        )
     if devtools:
         candidates.append(
             _devtools_page_candidate(
@@ -250,6 +274,86 @@ def _endpoint_candidates(
         if browser_candidate is not None:
             candidates.append(browser_candidate)
     return tuple(candidates)
+
+
+def _codex_app_server_candidate(
+    endpoints: Iterable[dict],
+    *,
+    turn_start_report: dict | None = None,
+) -> AgentAppTransportCandidate:
+    endpoint_list = tuple(_dict_value(endpoint) for endpoint in endpoints)
+    ready = any(bool(endpoint.get("ready", False)) for endpoint in endpoint_list)
+    error = _first_error(endpoint_list)
+    evidence = _endpoint_evidence(endpoint_list)
+    metadata = _dict_value(endpoint_list[0].get("metadata") if endpoint_list else {})
+    turn_report = _dict_value(turn_start_report)
+    turn_verified = _codex_app_server_turn_start_verified(turn_report)
+    if metadata:
+        evidence.update(
+            {
+                "codex_home": str(metadata.get("codex_home", "") or ""),
+                "user_agent": str(metadata.get("user_agent", "") or ""),
+                "observed_thread_count": int(metadata.get("observed_thread_count", 0) or 0),
+                "probe_decision": str(metadata.get("probe_decision", "") or ""),
+                "thread_api_ready": bool(metadata.get("thread_api_ready", False)),
+                "send_contract_ready": bool(metadata.get("send_contract_ready", False)),
+                "owned_loopback_app_server": bool(
+                    metadata.get("owned_loopback_app_server", False)
+                ),
+                "surface_kind": str(metadata.get("surface_kind", "") or ""),
+            }
+        )
+    if turn_report:
+        evidence.update(
+            {
+                "turn_start_decision": str(turn_report.get("decision", "") or ""),
+                "turn_completed": bool(turn_report.get("turn_completed", False)),
+                "turn_status": str(turn_report.get("turn_status", "") or ""),
+                "foreground_no_steal_verified": bool(
+                    turn_report.get("foreground_no_steal_verified", False)
+                ),
+                "strict_assistant_readback_verified": turn_verified,
+                "assistant_readback_text_length": len(
+                    str(turn_report.get("assistant_readback_text", "") or "")
+                ),
+            }
+        )
+    return AgentAppTransportCandidate(
+        transport_id="codex-app-server-ws",
+        transport_channel="codex_app_server_ws",
+        capability_level=BACKGROUND_NATIVE if ready else BLOCKED,
+        operation_scope="send-readback" if turn_verified else "thread-readiness",
+        ready=ready,
+        can_send_without_focus=bool(ready and turn_verified),
+        can_draft_without_focus=False,
+        requires_user_confirmation=True,
+        blocking_reason=_codex_app_server_blocking_reason(
+            ready=ready,
+            turn_verified=turn_verified,
+            turn_start_report=turn_report,
+            endpoint_error=error,
+        ),
+        risk_flags=(
+            ()
+            if ready and turn_verified
+            else _codex_app_server_risk_flags(
+                ready=ready,
+                turn_start_report=turn_report,
+            )
+        ),
+        verification_requirements=(
+            "app_server_initialize_ok",
+            "thread_list_read_only_ok",
+            (
+                "strict_assistant_marker_readback"
+                if turn_verified
+                else "turn_send_contract_required"
+            ),
+            "readback_markers",
+            "no_window_input",
+        ),
+        evidence=evidence,
+    )
 
 
 def _bridge_candidate(
@@ -274,6 +378,80 @@ def _bridge_candidate(
         verification_requirements=verification_requirements,
         evidence=_endpoint_evidence(endpoint_list),
     )
+
+
+def _codex_app_server_turn_start_verified(report: dict) -> bool:
+    if not report:
+        return False
+    assistant_text = str(report.get("assistant_readback_text", "") or "")
+    required_markers = [
+        str(marker)
+        for marker in _list_value(report.get("required_markers"))
+        if str(marker or "")
+    ]
+    missing_markers = _list_value(report.get("missing_required_markers"))
+    forbidden_seen = _list_value(report.get("seen_forbidden_markers"))
+    required_markers_seen = bool(
+        required_markers and all(marker in assistant_text for marker in required_markers)
+    )
+    return bool(
+        report.get("ok", False)
+        and str(report.get("decision", "") or "")
+        == "codex_app_server_turn_start_verified"
+        and _counter(report, "control_attempts") == 0
+        and _counter(report, "window_input_attempts") == 0
+        and _counter(report, "app_server_turn_start_attempts") == 1
+        and bool(report.get("turn_completed", False))
+        and str(report.get("turn_status", "") or "") == "completed"
+        and bool(report.get("foreground_no_steal_verified", False))
+        and not missing_markers
+        and not forbidden_seen
+        and required_markers_seen
+    )
+
+
+def _codex_app_server_blocking_reason(
+    *,
+    ready: bool,
+    turn_verified: bool,
+    turn_start_report: dict,
+    endpoint_error: str,
+) -> str:
+    if not ready:
+        return endpoint_error or "codex_app_server_ws_not_ready"
+    if turn_verified:
+        return ""
+    if turn_start_report:
+        return str(
+            turn_start_report.get("decision", "")
+            or "codex_app_server_turn_start_not_verified"
+        )
+    return "turn_send_contract_required"
+
+
+def _codex_app_server_risk_flags(
+    *,
+    ready: bool,
+    turn_start_report: dict,
+) -> tuple[str, ...]:
+    flags: list[str] = []
+    if not ready:
+        flags.append("codex_app_server_ws_not_ready")
+    if not turn_start_report:
+        flags.append("turn_start_not_verified")
+    elif _counter(turn_start_report, "window_input_attempts"):
+        flags.append("window_input_attempts_nonzero")
+    elif _counter(turn_start_report, "control_attempts"):
+        flags.append("control_attempts_nonzero")
+    elif not bool(turn_start_report.get("foreground_no_steal_verified", False)):
+        flags.append("foreground_not_verified")
+    elif _list_value(turn_start_report.get("missing_required_markers")):
+        flags.append("required_marker_missing")
+    elif _list_value(turn_start_report.get("seen_forbidden_markers")):
+        flags.append("forbidden_marker_seen")
+    else:
+        flags.append("turn_start_not_verified")
+    return tuple(dict.fromkeys(flags))
 
 
 def _devtools_page_candidate(
@@ -527,6 +705,102 @@ def _uia_candidates(app_uia_probe: dict) -> list[AgentAppTransportCandidate]:
     ]
 
 
+def _computer_use_candidates(probe: dict) -> list[AgentAppTransportCandidate]:
+    if not probe:
+        return []
+    native_pipe_ready = bool(probe.get("native_pipe_ready", False))
+    ready = bool(
+        probe.get("ready", False)
+        and native_pipe_ready
+        and (
+            bool(probe.get("window_state_ready", False))
+            or bool(probe.get("background_snapshot_ready", False))
+            or bool(probe.get("accessibility_tree_available", False))
+        )
+        and _counter(probe, "control_attempts") == 0
+        and _counter(probe, "window_input_attempts") == 0
+    )
+    return [
+        AgentAppTransportCandidate(
+            transport_id="computer-use-window2",
+            transport_channel="computer_use_window2",
+            capability_level=BACKGROUND_READ_ONLY if ready else BLOCKED,
+            operation_scope="inspect-snapshot-only",
+            ready=ready,
+            can_send_without_focus=False,
+            can_draft_without_focus=False,
+            requires_user_confirmation=True,
+            blocking_reason=_computer_use_blocking_reason(probe, ready=ready),
+            risk_flags=_computer_use_risk_flags(probe, ready=ready),
+            verification_requirements=(
+                "sky.list_apps_or_list_windows",
+                "get_window_state",
+                "background_screenshot_or_accessibility",
+                "no_window_input_for_read_only",
+                "foreground_activation_gate_for_input_actions",
+            ),
+            evidence=_computer_use_evidence(probe),
+        )
+    ]
+
+
+def _computer_use_blocking_reason(probe: dict, *, ready: bool) -> str:
+    if ready:
+        return "computer_use_input_requires_foreground_activation"
+    if not bool(probe.get("native_pipe_ready", False)):
+        return str(probe.get("decision", "") or "native_pipe_unavailable")
+    if _counter(probe, "control_attempts"):
+        return "control_attempts_nonzero"
+    if _counter(probe, "window_input_attempts"):
+        return "window_input_attempts_nonzero"
+    if not (
+        bool(probe.get("window_state_ready", False))
+        or bool(probe.get("background_snapshot_ready", False))
+        or bool(probe.get("accessibility_tree_available", False))
+    ):
+        return str(probe.get("decision", "") or "window_state_not_ready")
+    return str(probe.get("decision", "") or "computer_use_not_ready")
+
+
+def _computer_use_risk_flags(probe: dict, *, ready: bool) -> tuple[str, ...]:
+    flags: list[str] = ["computer_use_fallback"]
+    if bool(probe.get("input_actions_activate_window", True)):
+        flags.append("input_actions_activate_window")
+        flags.append("not_background_write_transport")
+    if not bool(probe.get("native_pipe_ready", False)):
+        flags.append("native_pipe_unavailable")
+    if _counter(probe, "control_attempts"):
+        flags.append("control_attempts_nonzero")
+    if _counter(probe, "window_input_attempts"):
+        flags.append("window_input_attempts_nonzero")
+    if ready:
+        flags.append("read_only_only")
+    return tuple(dict.fromkeys(flags))
+
+
+def _computer_use_evidence(probe: dict) -> dict:
+    keys = (
+        "ready",
+        "native_pipe_ready",
+        "window_state_ready",
+        "background_snapshot_ready",
+        "input_actions_activate_window",
+        "accessibility_tree_available",
+        "observed_window_count",
+        "screenshot_count",
+        "computer_use_attempts",
+        "control_attempts",
+        "window_input_attempts",
+        "decision",
+        "error",
+    )
+    evidence: dict = {}
+    for key in keys:
+        if key in probe:
+            evidence[key] = probe.get(key)
+    return evidence
+
+
 def _foreground_candidate(app_uia_probe: dict) -> AgentAppTransportCandidate:
     return AgentAppTransportCandidate(
         transport_id="foreground-request",
@@ -627,9 +901,11 @@ def _candidate_rank(transport_id: str) -> int:
         "agent-native-bridge": 0,
         "ide-extension-bridge": 1,
         "app-devtools-page-target": 2,
-        "uia-semantic-send": 3,
-        "uia-semantic-draft": 4,
-        "app-devtools-browser-target": 5,
+        "codex-app-server-ws": 3,
+        "uia-semantic-send": 4,
+        "uia-semantic-draft": 5,
+        "app-devtools-browser-target": 6,
+        "computer-use-window2": 7,
         "foreground-request": 99,
     }
     return order.get(str(transport_id or ""), 50)
@@ -710,6 +986,11 @@ def summarize_agent_app_transport_matrices(cases: Iterable[dict]) -> dict:
             1
             for item in matrices
             if int(_dict_value(item.get("summary")).get("background_read_only", 0) or 0) > 0
+        ),
+        "computer_use_read_only_cases": sum(
+            1
+            for item in matrices
+            if int(_dict_value(item.get("summary")).get("computer_use_read_only", 0) or 0) > 0
         ),
         "selected_send_transport_counts": dict(
             sorted(

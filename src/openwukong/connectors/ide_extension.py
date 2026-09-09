@@ -69,6 +69,16 @@ class IDEExtensionBridgeClient:
             },
         )
 
+    def read_codex_capabilities(self, bridge_url: str, target: ConnectorTarget) -> dict:
+        return self._post_json(
+            bridge_url,
+            "/v1/ide/codex/capabilities",
+            {
+                "action": "read_codex_capabilities",
+                "target": _target_payload(target),
+            },
+        )
+
     def send_message(
         self,
         bridge_url: str,
@@ -92,6 +102,7 @@ class IDEExtensionBridgeClient:
         target: ConnectorTarget,
         command_id: str,
         arguments: list,
+        safety_profile: str = "",
     ) -> dict:
         return self._post_json(
             bridge_url,
@@ -100,6 +111,7 @@ class IDEExtensionBridgeClient:
                 "action": "execute_command",
                 "command_id": command_id,
                 "arguments": arguments,
+                "safety_profile": str(safety_profile or ""),
                 "target": _target_payload(target),
             },
         )
@@ -119,6 +131,74 @@ class IDEExtensionBridgeClient:
                 "adapter_id": adapter_id,
                 "target": _target_payload(target),
                 "message": message,
+            },
+        )
+
+    def cursor_draft_hook(
+        self,
+        bridge_url: str,
+        target: ConnectorTarget,
+        *,
+        message: str,
+        allow_write: bool = False,
+        safety_profile: str = "",
+        composer_ids: list[str] | None = None,
+        include_diagnostics: bool = False,
+    ) -> dict:
+        return self._post_json(
+            bridge_url,
+            "/v1/ide/cursor/draft-hook",
+            {
+                "action": "cursor_draft_hook",
+                "target": _target_payload(target),
+                "message": message,
+                "allow_write": bool(allow_write),
+                "safety_profile": str(safety_profile or ""),
+                "composer_ids": list(composer_ids or []),
+                "include_diagnostics": bool(include_diagnostics),
+            },
+        )
+
+    def cursor_glass_agent_query(
+        self,
+        bridge_url: str,
+        target: ConnectorTarget,
+        *,
+        message: str,
+        allow_write: bool = False,
+        safety_profile: str = "",
+    ) -> dict:
+        return self._post_json(
+            bridge_url,
+            "/v1/ide/cursor/glass-agent-query",
+            {
+                "action": "cursor_glass_agent_query",
+                "target": _target_payload(target),
+                "message": message,
+                "allow_write": bool(allow_write),
+                "safety_profile": str(safety_profile or ""),
+            },
+        )
+
+    def cursor_composer_state(
+        self,
+        bridge_url: str,
+        target: ConnectorTarget,
+        *,
+        composer_ids: list[str] | None = None,
+        max_composers: int = 8,
+        include_handles: bool = False,
+        safety_profile: str = "",
+    ) -> dict:
+        return self._post_json(
+            bridge_url,
+            "/v1/ide/cursor/composer-state",
+            {
+                "action": "cursor_composer_state",
+                "target": _target_payload(target),
+                "composer_ids": list(composer_ids or [])[: max(1, int(max_composers or 1))],
+                "include_handles": bool(include_handles),
+                "safety_profile": str(safety_profile or ""),
             },
         )
 

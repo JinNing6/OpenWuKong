@@ -294,6 +294,60 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
             ],
         )
 
+    def test_claude_desktop_probe_rejects_claude_code_cli_process_debugger(self):
+        http_probe = _FakeHTTPProbe(
+            {
+                "http://127.0.0.1:9666/json/version": {
+                    "Browser": "Chrome/126.0 Electron",
+                    "webSocketDebuggerUrl": "ws://127.0.0.1:9666/devtools/browser/abc",
+                },
+                "http://127.0.0.1:9666/json/list": [
+                    {
+                        "id": "page-1",
+                        "type": "page",
+                        "title": "Claude Code",
+                        "url": "app://claude-code/index.html",
+                        "webSocketDebuggerUrl": "ws://127.0.0.1:9666/devtools/page/page-1",
+                    }
+                ],
+            }
+        )
+
+        report = run_agent_native_connector_probe(
+            agent="claude desktop",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=StaticAccessibilityObserver(()),
+            resolver=_resolver_with_claude_desktop_start_apps(),
+            process_provider=lambda: (
+                NativeProcessSnapshot(
+                    pid=75596,
+                    process_name="claude.exe",
+                    executable_path="C:/Users/me/.local/bin/claude.exe",
+                    command_line=(
+                        "claude.exe --remote-debugging-port=9666 "
+                        "--user-data-dir=C:/Users/me/.claude-code"
+                    ),
+                    listening_ports=(9666,),
+                ),
+            ),
+            http_probe=http_probe,
+            debugger_urls=("http://127.0.0.1:9666",),
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "agent_app_window_not_found")
+        self.assertEqual(data["endpoint_count"], 1)
+        self.assertEqual(data["ready_endpoint_count"], 0)
+        self.assertEqual(
+            data["endpoints"][0]["error"],
+            "devtools_endpoint_not_bound_to_agent_process",
+        )
+        self.assertEqual(http_probe.calls, [])
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+
     def test_auto_listening_non_devtools_port_is_suppressed(self):
         http_probe = _FakeHTTPProbe()
 
@@ -380,6 +434,58 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(data["endpoints"][0]["adapter_mapping"]["cursor"]["commandId"], "cursor.chat.submit")
         self.assertEqual(bridge_calls[0][0], "http://127.0.0.1:8787")
         self.assertEqual(bridge_calls[0][1]["workspace_path"], "")
+
+    def test_ide_bridge_endpoint_preserves_explicit_workspace_target_metadata(self):
+        def fake_ide_bridge_probe(bridge_url, **kwargs):
+            return _FakeIDEBridgeReport(
+                mode="ide-bridge-capability-capture",
+                safety_mode="read_only",
+                ok=True,
+                control_attempts=0,
+                bridge_url=bridge_url,
+                metadata={"ide_name": "Cursor", "workspaceFolders": []},
+                command_count=1,
+                commands=["cursor.chat.submit"],
+                chat_adapters=[
+                    {
+                        "adapter_id": "cursor",
+                        "label": "Cursor Chat",
+                        "command_id": "cursor.chat.submit",
+                        "available": True,
+                        "available_candidates": ["cursor.chat.submit"],
+                    }
+                ],
+                adapter_mapping={
+                    "cursor": {
+                        "label": "Cursor Chat",
+                        "commandId": "cursor.chat.submit",
+                        "available": True,
+                        "availableCandidates": ["cursor.chat.submit"],
+                        "commandCandidates": ["cursor.chat.submit"],
+                    }
+                },
+            )
+
+        report = run_agent_native_connector_probe(
+            agent="cursor",
+            project_name="openwukong",
+            task_name="new-background-task",
+            observer=_observer_with_cursor_target(),
+            resolver=_resolver_with_cursor_desktop(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            ide_bridge_urls=("http://127.0.0.1:8787",),
+            ide_bridge_probe=fake_ide_bridge_probe,
+            workspace_path="E:/ideaProjects/agent/openwukong",
+        )
+        endpoint = report.to_dict()["endpoints"][0]
+
+        self.assertEqual(
+            endpoint["metadata"]["requested_workspace_path"],
+            "E:/ideaProjects/agent/openwukong",
+        )
+        self.assertEqual(endpoint["metadata"]["requested_workspace_name"], "openwukong")
+        self.assertEqual(endpoint["metadata"]["workspace_target_source"], "explicit_probe_request")
 
     def test_reports_ready_agent_native_bridge_endpoint_from_explicit_bridge_url(self):
         bridge_calls = []
@@ -649,6 +755,175 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertFalse(data["endpoints"][0]["metadata"]["app_binding_ready"])
         self.assertEqual(data["endpoints"][0]["error"], "agent_native_bridge_app_binding_not_ready")
 
+    def test_claude_desktop_native_bridge_rejects_cli_app_binding_path(self):
+        bridge_calls = []
+        capability_report = {
+            "ok": True,
+            "background_safe": True,
+            "surface_kind": "desktop_app",
+            "app_binding": {
+                "process_name": "Claude.exe",
+                "executable_path": "C:/Users/me/.local/bin/claude.exe",
+                "pid": 5150,
+                "hwnd": 70039,
+                "window_title": "Claude",
+            },
+            "capabilities": ["agent_app_conversation.native_bridge_send_message"],
+            "agents": [{"agent_id": "claude", "available": True}],
+            "projects": [{"name": "openwukong", "available": True}],
+            "tasks": [{"name": "desktop-message", "available": True}],
+        }
+
+        def fake_agent_native_bridge_probe(request):
+            bridge_calls.append(request)
+            return _FakeIDEBridgeReport(
+                mode="agent-native-bridge-dry-run",
+                safety_mode="dry_run",
+                ok=True,
+                decision="agent_native_bridge_dry_run_ready",
+                bridge_send_attempts=0,
+                control_attempts=0,
+                capability_report=capability_report,
+                request=request.to_dict(capability_report),
+            )
+
+        report = run_agent_native_connector_probe(
+            agent="claude desktop",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_claude_target(hwnd=70039),
+            resolver=_resolver_with_claude_desktop_start_apps(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            agent_native_bridge_urls=("http://127.0.0.1:18889",),
+            agent_native_bridge_probe=fake_agent_native_bridge_probe,
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["ready_endpoint_count"], 0)
+        self.assertEqual(data["endpoints"][0]["endpoint_type"], "agent_native_bridge")
+        self.assertFalse(data["endpoints"][0]["ready"])
+        self.assertEqual(
+            data["endpoints"][0]["metadata"]["app_binding_surface_kind"],
+            "cli",
+        )
+        self.assertEqual(
+            data["endpoints"][0]["error"],
+            "agent_native_bridge_app_binding_not_ready",
+        )
+        self.assertEqual(bridge_calls[0].agent_id, "claude")
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+
+    def test_claude_desktop_native_bridge_rejects_name_only_app_binding(self):
+        bridge_calls = []
+        capability_report = {
+            "ok": True,
+            "background_safe": True,
+            "surface_kind": "desktop_app",
+            "app_binding": {
+                "process_name": "Claude.exe",
+                "window_title": "Claude",
+            },
+            "capabilities": ["agent_app_conversation.native_bridge_send_message"],
+            "agents": [{"agent_id": "claude", "available": True}],
+            "projects": [{"name": "openwukong", "available": True}],
+            "tasks": [{"name": "desktop-message", "available": True}],
+        }
+
+        def fake_agent_native_bridge_probe(request):
+            bridge_calls.append(request)
+            return _FakeIDEBridgeReport(
+                mode="agent-native-bridge-dry-run",
+                safety_mode="dry_run",
+                ok=True,
+                decision="agent_native_bridge_dry_run_ready",
+                bridge_send_attempts=0,
+                control_attempts=0,
+                capability_report=capability_report,
+                request=request.to_dict(capability_report),
+            )
+
+        report = run_agent_native_connector_probe(
+            agent="claude desktop",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_claude_target(hwnd=70039),
+            resolver=_resolver_with_claude_desktop_start_apps(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            agent_native_bridge_urls=("http://127.0.0.1:18889",),
+            agent_native_bridge_probe=fake_agent_native_bridge_probe,
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["ready_endpoint_count"], 0)
+        self.assertEqual(data["endpoints"][0]["endpoint_type"], "agent_native_bridge")
+        self.assertFalse(data["endpoints"][0]["ready"])
+        self.assertEqual(
+            data["endpoints"][0]["error"],
+            "agent_native_bridge_app_binding_not_ready",
+        )
+        self.assertEqual(bridge_calls[0].expected_app_pids, (5150,))
+        self.assertEqual(bridge_calls[0].expected_app_hwnds, (70039,))
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+
+    def test_claude_desktop_native_bridge_without_visible_target_rejects_name_only_app_binding(self):
+        capability_report = {
+            "ok": True,
+            "background_safe": True,
+            "surface_kind": "desktop_app",
+            "app_binding": {
+                "process_name": "Claude.exe",
+                "window_title": "Claude",
+            },
+            "capabilities": ["agent_app_conversation.native_bridge_send_message"],
+            "agents": [{"agent_id": "claude", "available": True}],
+            "projects": [{"name": "openwukong", "available": True}],
+            "tasks": [{"name": "desktop-message", "available": True}],
+        }
+
+        def fake_agent_native_bridge_probe(request):
+            return _FakeIDEBridgeReport(
+                mode="agent-native-bridge-dry-run",
+                safety_mode="dry_run",
+                ok=True,
+                decision="agent_native_bridge_dry_run_ready",
+                bridge_send_attempts=0,
+                control_attempts=0,
+                capability_report=capability_report,
+                request=request.to_dict(capability_report),
+            )
+
+        report = run_agent_native_connector_probe(
+            agent="claude desktop",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=StaticAccessibilityObserver(()),
+            resolver=_resolver_with_claude_desktop_start_apps(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            agent_native_bridge_urls=("http://127.0.0.1:18889",),
+            agent_native_bridge_probe=fake_agent_native_bridge_probe,
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "agent_app_window_not_found")
+        self.assertEqual(data["endpoint_count"], 1)
+        self.assertEqual(data["ready_endpoint_count"], 0)
+        self.assertEqual(
+            data["endpoints"][0]["error"],
+            "agent_native_bridge_app_binding_not_ready",
+        )
+        self.assertFalse(data["endpoints"][0]["metadata"]["app_binding_ready"])
+        self.assertFalse(data["endpoints"][0]["ready"])
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+
     def test_ide_bridge_endpoint_does_not_reuse_cursor_adapter_for_codex_app(self):
         def fake_ide_bridge_probe(bridge_url, **kwargs):
             del kwargs
@@ -700,6 +975,203 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(data["endpoints"][0]["preferred_chat_adapter"], "")
         self.assertFalse(data["endpoints"][0]["ready"])
 
+    def test_reports_ready_codex_app_server_ws_endpoint_from_explicit_url(self):
+        calls = []
+
+        def fake_codex_app_server_probe(ws_url, **kwargs):
+            calls.append((ws_url, dict(kwargs)))
+            return _FakeIDEBridgeReport(
+                mode="codex-app-server-ws-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="codex_app_server_ws_ready",
+                control_attempts=0,
+                window_input_attempts=0,
+                background_safe=True,
+                ws_url=ws_url,
+                request_attempts=2,
+                initialize_ok=True,
+                thread_list_ok=True,
+                observed_thread_count=1,
+                codex_home="C:/Users/me/.codex",
+                user_agent="Codex Desktop/0.136.0-alpha.2",
+                platform_family="windows",
+                platform_os="10.0.26100",
+            )
+
+        report = run_agent_native_connector_probe(
+            agent="codex app",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_codex_target(task_name="desktop-message"),
+            resolver=_resolver_with_codex_desktop(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            codex_app_server_ws_urls=("ws://127.0.0.1:19731",),
+            codex_app_server_probe=fake_codex_app_server_probe,
+        )
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"], data)
+        self.assertEqual(data["decision"], "agent_native_connector_ready")
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["endpoint_count"], 1)
+        self.assertEqual(data["ready_endpoint_count"], 1)
+        endpoint = data["endpoints"][0]
+        self.assertEqual(endpoint["endpoint_type"], "codex_app_server_ws")
+        self.assertEqual(endpoint["bridge_url"], "ws://127.0.0.1:19731")
+        self.assertEqual(endpoint["commands"], ["initialize", "thread/list"])
+        self.assertTrue(endpoint["metadata"]["thread_api_ready"])
+        self.assertFalse(endpoint["metadata"]["send_contract_ready"])
+        self.assertEqual(endpoint["metadata"]["observed_thread_count"], 1)
+        self.assertEqual(calls[0][0], "ws://127.0.0.1:19731")
+
+    def test_reports_owned_ephemeral_codex_app_server_ws_endpoint_from_local_cli_process(self):
+        calls = []
+
+        def fake_codex_app_server_probe(ws_url, **kwargs):
+            calls.append((ws_url, dict(kwargs)))
+            return _FakeIDEBridgeReport(
+                mode="codex-app-server-ws-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="codex_app_server_ws_ready",
+                control_attempts=0,
+                window_input_attempts=0,
+                background_safe=True,
+                ws_url=ws_url,
+                request_attempts=2,
+                initialize_ok=True,
+                thread_list_ok=True,
+                observed_thread_count=1,
+                codex_home="C:/Users/me/.codex",
+                user_agent="Codex Desktop/0.142.3",
+                platform_family="windows",
+                platform_os="windows",
+            )
+
+        report = run_agent_native_connector_probe(
+            agent="codex app",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_codex_target(task_name="desktop-message"),
+            resolver=_resolver_with_codex_desktop(),
+            process_provider=lambda: (
+                NativeProcessSnapshot(
+                    pid=44060,
+                    process_name="codex.exe",
+                    executable_path=(
+                        "C:/Users/Zhangjinqian/AppData/Local/OpenAI/Codex/bin/"
+                        "aec6b7c6fcdfb66a/codex.exe"
+                    ),
+                    command_line=(
+                        "codex.exe app-server --listen ws://127.0.0.1:19731"
+                    ),
+                    listening_ports=(19731,),
+                ),
+            ),
+            http_probe=_FakeHTTPProbe(),
+            codex_app_server_ws_urls=("ws://127.0.0.1:19731",),
+            codex_app_server_probe=fake_codex_app_server_probe,
+        )
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"], data)
+        endpoint = data["endpoints"][0]
+        self.assertTrue(endpoint["ready"])
+        self.assertEqual(endpoint["endpoint_type"], "codex_app_server_ws")
+        self.assertEqual(
+            endpoint["source"],
+            "explicit-owned-codex-app-server-ws-url",
+        )
+        self.assertEqual(
+            endpoint["metadata"]["surface_kind"],
+            "owned_ephemeral_app_server",
+        )
+        self.assertTrue(endpoint["metadata"]["owned_loopback_app_server"])
+        self.assertTrue(endpoint["metadata"]["turn_start_foreground_safe"])
+        self.assertTrue(endpoint["metadata"]["force_fresh_thread_start"])
+        self.assertTrue(endpoint["metadata"]["thread_api_ready"])
+        self.assertFalse(endpoint["metadata"]["send_contract_ready"])
+        self.assertEqual(calls[0][0], "ws://127.0.0.1:19731")
+
+    def test_blocks_windowsapps_codex_app_server_ws_probe_before_rpc(self):
+        calls = []
+
+        def fake_codex_app_server_probe(ws_url, **kwargs):
+            calls.append((ws_url, dict(kwargs)))
+            return _FakeIDEBridgeReport(ok=True)
+
+        report = run_agent_native_connector_probe(
+            agent="codex app",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_codex_target(task_name="desktop-message"),
+            resolver=_resolver_with_codex_desktop(),
+            process_provider=lambda: (
+                NativeProcessSnapshot(
+                    pid=30928,
+                    process_name="codex.exe",
+                    executable_path=(
+                        "C:/Program Files/WindowsApps/"
+                        "OpenAI.Codex_26.527.7698.0_x64__2p2nqsd0c76g0/"
+                        "app/resources/codex.exe"
+                    ),
+                    command_line=(
+                        "codex.exe app-server --analytics-default-enabled"
+                    ),
+                    listening_ports=(19731,),
+                ),
+            ),
+            http_probe=_FakeHTTPProbe(),
+            codex_app_server_ws_urls=("ws://127.0.0.1:19731",),
+            codex_app_server_probe=fake_codex_app_server_probe,
+        )
+        data = report.to_dict()
+
+        self.assertEqual(calls, [])
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["endpoint_count"], 1)
+        endpoint = data["endpoints"][0]
+        self.assertEqual(endpoint["endpoint_type"], "codex_app_server_ws")
+        self.assertFalse(endpoint["ready"])
+        self.assertEqual(endpoint["commands"], [])
+        self.assertEqual(
+            endpoint["error"],
+            "codex_app_server_windowsapps_probe_blocked",
+        )
+        self.assertEqual(
+            endpoint["metadata"]["probe_block_reason"],
+            "windowsapps_codex_app_server_foreground_risk",
+        )
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+
+    def test_codex_app_server_ws_endpoint_is_ignored_for_non_codex_agent(self):
+        calls = []
+
+        def fake_codex_app_server_probe(ws_url, **kwargs):
+            calls.append((ws_url, dict(kwargs)))
+            return _FakeIDEBridgeReport(ok=True)
+
+        report = run_agent_native_connector_probe(
+            agent="cursor",
+            project_name="PaoPaoHeZi",
+            task_name="desktop-message",
+            observer=_observer_with_cursor_target(),
+            resolver=_resolver_with_cursor_desktop(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            codex_app_server_ws_urls=("ws://127.0.0.1:19731",),
+            codex_app_server_probe=fake_codex_app_server_probe,
+        )
+        data = report.to_dict()
+
+        self.assertEqual(calls, [])
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["endpoint_count"], 0)
+        self.assertEqual(data["ready_endpoint_count"], 0)
+
     def test_target_visible_but_no_debug_port_reports_native_connector_not_exposed(self):
         report = run_agent_native_connector_probe(
             agent="codex app",
@@ -724,6 +1196,41 @@ class AgentNativeConnectorProbeTests(unittest.TestCase):
         self.assertEqual(data["control_attempts"], 0)
         self.assertEqual(data["endpoint_count"], 0)
         self.assertEqual(data["app_uia_probe"]["target_matched"], True)
+
+    def test_attaches_computer_use_probe_without_control_or_window_input(self):
+        computer_use_calls = []
+
+        def fake_computer_use_probe():
+            computer_use_calls.append(True)
+            return {
+                "mode": "computer-use-static-probe",
+                "safety_mode": "read_only",
+                "ready": False,
+                "native_pipe_ready": False,
+                "decision": "native_pipe_unavailable",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "computer_use_attempts": 0,
+                "input_actions_activate_window": True,
+            }
+
+        report = run_agent_native_connector_probe(
+            agent="codex app",
+            project_name="openwukong",
+            task_name="desktop-message",
+            observer=_observer_with_codex_target(task_name="desktop-message"),
+            resolver=_resolver_with_codex_desktop(),
+            process_provider=lambda: (),
+            http_probe=_FakeHTTPProbe(),
+            computer_use_probe_runner=fake_computer_use_probe,
+        )
+        data = report.to_dict()
+
+        self.assertEqual(len(computer_use_calls), 1)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["computer_use_probe"]["decision"], "native_pipe_unavailable")
+        self.assertEqual(data["computer_use_probe"]["window_input_attempts"], 0)
+        self.assertEqual(data["computer_use_probe"]["computer_use_attempts"], 0)
 
     def test_no_debug_port_takes_precedence_over_target_visibility(self):
         observer = StaticAccessibilityObserver(
@@ -962,6 +1469,33 @@ def _observer_with_cursor_target(*, hwnd=70038):
     )
 
 
+def _observer_with_claude_target(*, hwnd=70039):
+    return StaticAccessibilityObserver(
+        [
+            AccessibilityWindowSnapshot(
+                pid=5150,
+                process_name="Claude.exe",
+                window_title="Claude",
+                hwnd=int(hwnd or 0),
+                elements=(
+                    AccessibilityElementSnapshot(
+                        control_type="ListItem",
+                        name="openwukong",
+                        rect=(10, 20, 300, 90),
+                        patterns=("Selection",),
+                    ),
+                    AccessibilityElementSnapshot(
+                        control_type="ListItem",
+                        name="desktop-message",
+                        rect=(10, 100, 300, 160),
+                        patterns=("Selection",),
+                    ),
+                ),
+            )
+        ]
+    )
+
+
 def _resolver_with_codex_desktop():
     return WindowsAppResolver(
         candidate_providers=(
@@ -993,6 +1527,22 @@ def _resolver_with_cursor_desktop():
                         executable_name="Cursor.exe",
                         path="C:/Users/me/AppData/Local/Programs/cursor/Cursor.exe",
                         pid=99496,
+                    ),
+                ]
+            ),
+        )
+    )
+
+
+def _resolver_with_claude_desktop_start_apps():
+    return WindowsAppResolver(
+        candidate_providers=(
+            StaticAppCandidateProvider(
+                [
+                    AppResolutionCandidate(
+                        source="start-apps",
+                        display_name="Claude",
+                        metadata={"app_id": "Claude_pzs8sxrjxfjjc!Claude"},
                     ),
                 ]
             ),

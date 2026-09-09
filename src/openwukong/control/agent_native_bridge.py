@@ -13,6 +13,14 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from pathlib import Path
+
+from openwukong.control.app_resolution import (
+    AppResolutionCandidate,
+    claude_candidate_surface_kind,
+    codex_candidate_surface_kind,
+    cursor_candidate_surface_kind,
+)
 
 
 AGENT_NATIVE_BRIDGE_SCHEMA_VERSION = "agent-native-bridge-v1"
@@ -24,6 +32,17 @@ _SEND_CAPABILITY_NAMES = {
     "agent.chat.send_message",
     "agent.send_message",
     "send_message",
+}
+_READBACK_CAPABILITY_NAMES = {
+    "agent_app_conversation.read_transcript",
+    "agent_app_conversation.readback",
+    "agent_app_conversation.verify_readback",
+    "agent.chat.read_transcript",
+    "agent.chat.readback",
+    "conversation.read",
+    "conversation.read_transcript",
+    "read_transcript",
+    "readback",
 }
 
 
@@ -87,6 +106,7 @@ class AgentNativeBridgeRequest:
             "project_ready": _project_ready(capabilities, self.project_name),
             "task_ready": _task_ready(capabilities, self.task_name),
             "send_action_ready": _send_action_ready(capabilities),
+            "readback_action_ready": _readback_action_ready(capabilities),
             "background_safe": _background_safe(capabilities),
             "agent": self.agent,
             "agent_id": self.agent_id,
@@ -164,6 +184,10 @@ class AgentNativeBridgeDryRunReport:
         return _send_action_ready(self.capability_report)
 
     @property
+    def readback_action_ready(self) -> bool:
+        return _readback_action_ready(self.capability_report)
+
+    @property
     def background_safe(self) -> bool:
         return _background_safe(self.capability_report)
 
@@ -193,6 +217,8 @@ class AgentNativeBridgeDryRunReport:
             return "agent_native_bridge_task_not_ready"
         if not self.send_action_ready:
             return "agent_native_bridge_send_action_not_ready"
+        if not self.readback_action_ready:
+            return "agent_native_bridge_readback_not_ready"
         if not self.background_safe:
             return "agent_native_bridge_background_not_safe"
         if self.validation_errors:
@@ -217,6 +243,7 @@ class AgentNativeBridgeDryRunReport:
             "project_ready": self.project_ready,
             "task_ready": self.task_ready,
             "send_action_ready": self.send_action_ready,
+            "readback_action_ready": self.readback_action_ready,
             "background_safe": self.background_safe,
             "validation_errors": list(self.validation_errors),
             "error": self.error,
@@ -540,6 +567,8 @@ def _validate_request(
         errors.append("task_not_ready")
     if not _send_action_ready(capability_report):
         errors.append("send_action_not_ready")
+    if not _readback_action_ready(capability_report):
+        errors.append("readback_not_ready")
     if not _background_safe(capability_report):
         errors.append("background_not_safe")
     return tuple(errors)
@@ -599,10 +628,14 @@ def _surface_ready(capability_report: dict, required_surface_kind: str) -> bool:
 
 
 def _app_binding_ready(capability_report: dict, request: AgentNativeBridgeRequest) -> bool:
-    if _normalize_kind(request.required_surface_kind) != "desktop_app":
+    required_desktop = _normalize_kind(request.required_surface_kind) == "desktop_app"
+    if not required_desktop:
         return True
     binding = _app_binding(capability_report)
     if not binding:
+        return False
+    binding_surface = _binding_surface_kind(request.agent_id, binding)
+    if binding_surface == "cli":
         return False
     expected_names = {
         _normalize_process_name(name)
@@ -613,15 +646,23 @@ def _app_binding_ready(capability_report: dict, request: AgentNativeBridgeReques
     if expected_names and actual_name not in expected_names:
         return False
     expected_pids = {int(pid) for pid in request.expected_app_pids if int(pid or 0) > 0}
+    pid_matched = False
     if expected_pids:
         pid = _int_value(binding, "pid")
         if pid not in expected_pids:
             return False
+        pid_matched = True
     expected_hwnds = {int(hwnd) for hwnd in request.expected_app_hwnds if int(hwnd or 0) > 0}
+    hwnd_matched = False
     if expected_hwnds:
         hwnd = _int_value(binding, "hwnd")
         if hwnd not in expected_hwnds:
             return False
+        hwnd_matched = True
+    if required_desktop and not (
+        binding_surface == "desktop" or pid_matched or hwnd_matched
+    ):
+        return False
     return bool(
         actual_name
         or _int_value(binding, "pid")
@@ -664,6 +705,135 @@ def _binding_process_name(binding: dict) -> str:
         value = _normalize_process_name(binding.get(key, ""))
         if value:
             return value
+    return ""
+
+
+def _binding_surface_kind(agent_id: str, binding: dict) -> str:
+    if not binding:
+        return ""
+    candidate = AppResolutionCandidate(
+        source="native-bridge-app-binding",
+        display_name=str(
+            binding.get("window_title", "")
+            or binding.get("windowTitle", "")
+            or binding.get("title", "")
+            or binding.get("process_name", "")
+            or binding.get("processName", "")
+            or ""
+        ),
+        path=_binding_raw_path(binding),
+        executable_name=_binding_raw_executable_name(binding),
+        process_name=_binding_raw_process_name(binding),
+        pid=_int_value(binding, "pid"),
+        metadata={"command_line": _binding_raw_command_line(binding)},
+    )
+    normalized = _normalize(agent_id)
+    if normalized == "claude":
+        return claude_candidate_surface_kind(candidate) or _binding_surface_kind_from_text(
+            normalized,
+            binding,
+        )
+    if normalized == "codex":
+        return codex_candidate_surface_kind(candidate) or _binding_surface_kind_from_text(
+            normalized,
+            binding,
+        )
+    if normalized == "cursor":
+        return cursor_candidate_surface_kind(candidate) or _binding_surface_kind_from_text(
+            normalized,
+            binding,
+        )
+    return ""
+
+
+def _binding_surface_kind_from_text(agent_id: str, binding: dict) -> str:
+    text = "\n".join(
+        (
+            _binding_raw_process_name(binding),
+            _binding_raw_path(binding),
+            _binding_raw_command_line(binding),
+        )
+    ).replace("\\", "/").casefold()
+    if agent_id == "claude":
+        if any(
+            fragment in text
+            for fragment in (
+                "/.local/bin/",
+                "/appdata/roaming/npm/",
+                "/appdata/roaming/claude/claude-code/",
+                "/node_modules/@anthropic-ai/claude-code/",
+                "/.claude-code",
+            )
+        ):
+            return "cli"
+        if any(
+            fragment in text
+            for fragment in (
+                "/program files/windowsapps/claude_",
+                "/programs/claude/",
+                "/anthropic/",
+                "/anthropicclaude/",
+            )
+        ):
+            return "desktop"
+    if agent_id == "codex":
+        if any(
+            fragment in text
+            for fragment in (
+                "/.local/bin/",
+                "/appdata/local/openai/codex/bin/",
+                "/appdata/roaming/npm/",
+            )
+        ):
+            return "cli"
+        if (
+            "/program files/windowsapps/openai.codex" in text
+            or text.endswith("/app/codex.exe")
+        ):
+            return "desktop"
+    if agent_id == "cursor":
+        if "cursor-agent" in text:
+            return "cli"
+        if "cursor.exe" in text:
+            return "desktop"
+    return ""
+
+
+def _binding_raw_process_name(binding: dict) -> str:
+    for key in ("process_name", "processName", "executable_name", "executableName"):
+        value = str(binding.get(key, "") or "").strip()
+        if value:
+            return value
+    path = _binding_raw_path(binding)
+    return Path(path).name if path else ""
+
+
+def _binding_raw_executable_name(binding: dict) -> str:
+    for key in ("executable_name", "executableName"):
+        value = str(binding.get(key, "") or "").strip()
+        if value:
+            return value
+    path = _binding_raw_path(binding)
+    return Path(path).name if path else _binding_raw_process_name(binding)
+
+
+def _binding_raw_path(binding: dict) -> str:
+    for key in ("executable_path", "executablePath", "path"):
+        value = str(binding.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _binding_raw_command_line(binding: dict) -> str:
+    for key in ("command_line", "commandLine", "cmdline", "argv"):
+        value = binding.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, list):
+            parts = [str(item or "").strip() for item in value if str(item or "").strip()]
+            if parts:
+                return " ".join(parts)
     return ""
 
 
@@ -759,6 +929,38 @@ def _send_action_ready(capability_report: dict) -> bool:
                 or action.get("name", "")
             )
             if value in {_normalize(item) for item in _SEND_CAPABILITY_NAMES}:
+                return True
+    return False
+
+
+def _readback_action_ready(capability_report: dict) -> bool:
+    for key in (
+        "readback_action_ready",
+        "readback_ready",
+        "can_readback",
+        "can_read_transcript",
+        "transcript_readback_ready",
+    ):
+        if key in capability_report:
+            return bool(capability_report.get(key, False))
+    capabilities = capability_report.get("capabilities")
+    if isinstance(capabilities, list):
+        values = {_normalize(item) for item in capabilities}
+        if values & {_normalize(item) for item in _READBACK_CAPABILITY_NAMES}:
+            return True
+    actions = capability_report.get("actions")
+    if isinstance(actions, list):
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            if action.get("available", True) is False:
+                continue
+            value = _normalize(
+                action.get("action", "")
+                or action.get("id", "")
+                or action.get("name", "")
+            )
+            if value in {_normalize(item) for item in _READBACK_CAPABILITY_NAMES}:
                 return True
     return False
 

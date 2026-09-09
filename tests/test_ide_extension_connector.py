@@ -125,6 +125,30 @@ class _BridgeHandler(http.server.BaseHTTPRequestHandler):
             )
             return
 
+        if self.path == "/v1/ide/codex/capabilities":
+            self._send_json(
+                {
+                    "ok": True,
+                    "decision": "codex_webview_bridge_required",
+                    "extension": {
+                        "installed": True,
+                        "version": "26.5623.31443",
+                        "display_name": "Codex",
+                    },
+                    "prompt_send_ready": False,
+                    "requires_webview_bridge": True,
+                    "command_roles": [
+                        {
+                            "command_id": "chatgpt.addToThread",
+                            "role": "context_only",
+                            "prompt_send": False,
+                            "available": True,
+                        }
+                    ],
+                }
+            )
+            return
+
         if self.path == "/v1/ide/chat":
             if payload.get("adapter_id") == "missing":
                 self._send_json(
@@ -344,6 +368,26 @@ class IDEExtensionConnectorTests(unittest.TestCase):
         self.assertTrue(result.payload["chat_adapters"][0]["available"])
         path, payload = _BridgeHandler.requests[0]
         self.assertEqual(path, "/v1/ide/capabilities")
+        self.assertEqual(payload["target"]["workspace_path"], "E:\\ideaProjects\\agent\\openwukong")
+
+    def test_bridge_client_reads_codex_extension_capabilities(self):
+        from openwukong.connectors.ide_extension import IDEExtensionBridgeClient
+
+        client = IDEExtensionBridgeClient()
+        target = ConnectorTarget(
+            process_name="Cursor.exe",
+            workspace_path="E:\\ideaProjects\\agent\\openwukong",
+            ide_bridge_url=self.bridge_url,
+        )
+
+        data = client.read_codex_capabilities(self.bridge_url, target)
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "codex_webview_bridge_required")
+        self.assertFalse(data["prompt_send_ready"])
+        path, payload = _BridgeHandler.requests[0]
+        self.assertEqual(path, "/v1/ide/codex/capabilities")
+        self.assertEqual(payload["action"], "read_codex_capabilities")
         self.assertEqual(payload["target"]["workspace_path"], "E:\\ideaProjects\\agent\\openwukong")
 
     def test_ide_chat_sends_message_through_named_adapter(self):

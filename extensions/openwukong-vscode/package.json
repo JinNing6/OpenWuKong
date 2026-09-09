@@ -32,10 +32,32 @@
       "properties": {
         "openwukong.bridge.port": {
           "type": "number",
-          "default": 8787,
-          "minimum": 1024,
+          "default": 0,
+          "minimum": 0,
           "maximum": 65535,
-          "description": "Local port used by the OpenWukong IDE bridge."
+          "description": "Local port used by the OpenWukong IDE bridge. Use 0 to let the operating system assign an unused loopback port."
+        },
+        "openwukong.bridge.autoPortOnConflict": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the preferred local bridge port is already in use, silently try nearby ports instead of interrupting the IDE session."
+        },
+        "openwukong.bridge.portFallbackAttempts": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Number of consecutive local ports to try when autoPortOnConflict is enabled."
+        },
+        "openwukong.bridge.dynamicPortOnConflict": {
+          "type": "boolean",
+          "default": true,
+          "description": "After the preferred and fallback ports are unavailable, bind to an operating-system-assigned unused port and publish it through the local bridge registry."
+        },
+        "openwukong.bridge.silentAutoStartFailures": {
+          "type": "boolean",
+          "default": true,
+          "description": "Suppress auto-start failure notifications so the bridge does not interrupt normal IDE work."
         },
         "openwukong.bridge.host": {
           "type": "string",
@@ -50,6 +72,8 @@
         "openwukong.bridge.allowedCommands": {
           "type": "array",
           "default": [
+            "openwukong.readScratch",
+            "openwukong.writeScratch",
             "workbench.action.files.save",
             "vscode.editorChat.start"
           ],
@@ -79,10 +103,36 @@
           },
           "description": "Named IDE chat adapters. Configure commandId or commandCandidates after inspecting commands exposed by the current IDE/product."
         },
+        "openwukong.bridge.chatCommandAwaitTimeoutMs": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 100,
+          "maximum": 60000,
+          "description": "Maximum time to wait for a chat adapter command to resolve before returning a dispatch-pending response. This prevents long-running Agent commands from blocking the local bridge."
+        },
+        "openwukong.bridge.cursorReadCommandAwaitTimeoutMs": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 100,
+          "maximum": 60000,
+          "description": "Maximum time to wait for Cursor read-only composer commands before returning state_status=pending. This keeps transcript/readback probes from blocking the local bridge while an Agent turn is active."
+        },
+        "openwukong.bridge.cursorDraftHookCommandAwaitTimeoutMs": {
+          "type": "number",
+          "default": 2500,
+          "minimum": 100,
+          "maximum": 60000,
+          "description": "Maximum time to wait for Cursor draft-hook command discovery or isolated draft commands before returning a structured pending response instead of blocking the local bridge."
+        },
         "openwukong.bridge.autoStart": {
           "type": "boolean",
           "default": false,
-          "description": "Start the local IDE bridge when the extension activates."
+          "description": "Start the local IDE bridge when the extension activates. Keep this disabled in normal Cursor workspaces; use the start command or an isolated profile for tests."
+        },
+        "openwukong.bridge.autoStartRequiresWorkspace": {
+          "type": "boolean",
+          "default": true,
+          "description": "When autoStart is enabled, skip empty IDE windows until a workspace folder is present so background bridge discovery cannot bind an empty Cursor window."
         }
       }
     }

@@ -358,6 +358,54 @@ class WindowsRunningProcessCandidateProvider:
         return tuple(items)
 
 
+class LocalAgentCliCandidateProvider:
+    def __init__(
+        self,
+        *,
+        local_appdata: str | Path = "",
+    ):
+        self.local_appdata = Path(local_appdata) if str(local_appdata or "").strip() else None
+
+    def candidates(
+        self,
+        app_name: str,
+        identity: AppIdentity,
+    ) -> tuple[AppResolutionCandidate, ...]:
+        del app_name
+        if identity.app_id != "codex":
+            return ()
+        root = self.local_appdata
+        if root is None:
+            value = os.environ.get("LOCALAPPDATA", "")
+            if not value:
+                return ()
+            root = Path(value)
+        bin_root = root / "OpenAI" / "Codex" / "bin"
+        if not bin_root.is_dir():
+            return ()
+        paths = sorted(
+            (path for path in bin_root.rglob("codex.exe") if path.is_file()),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        if not paths:
+            return ()
+        path = paths[0]
+        return (
+            AppResolutionCandidate(
+                source="local-agent-cli",
+                display_name="codex",
+                path=str(path),
+                executable_name=path.name,
+                metadata={
+                    "agent_id": "codex",
+                    "install_kind": "openai-codex-local-bin",
+                    "discovered_version_count": len(paths),
+                },
+            ),
+        )
+
+
 class LocalCacheAppCandidateProvider:
     def __init__(self, cache_path: str | Path, *, verifier: AppPathVerifier | None = None):
         self.cache_path = Path(cache_path) if str(cache_path or "").strip() else None
@@ -703,6 +751,7 @@ class WindowsAppResolver:
             if candidate_providers is not None
             else (
                 WindowsRunningProcessCandidateProvider(),
+                LocalAgentCliCandidateProvider(),
                 StartMenuAppCandidateProvider(start_menu_roots),
                 WindowsStartAppsCandidateProvider(),
                 AppPathsRegistryCandidateProvider(),
@@ -736,6 +785,7 @@ class WindowsAppResolver:
         ranked = sorted(
             deduped,
             key=lambda candidate: (
+                agent_candidate_selection_priority(name, identity, candidate),
                 candidate_selection_priority(candidate),
                 -candidate_score(candidate, identity),
                 candidate_key(candidate),
@@ -745,7 +795,9 @@ class WindowsAppResolver:
         ties = [
             candidate
             for candidate in ranked
-            if candidate_selection_priority(candidate) == candidate_selection_priority(best)
+            if agent_candidate_selection_priority(name, identity, candidate)
+            == agent_candidate_selection_priority(name, identity, best)
+            and candidate_selection_priority(candidate) == candidate_selection_priority(best)
             and candidate_score(candidate, identity) == candidate_score(best, identity)
             and candidate_unique_value(candidate) != candidate_unique_value(best)
         ]
@@ -840,9 +892,24 @@ def default_app_identities() -> tuple[AppIdentity, ...]:
         ),
         AppIdentity(
             app_id="cursor",
-            aliases=("cursor",),
-            exact_names=("Cursor",),
-            executable_names=("Cursor.exe",),
+            aliases=(
+                "cursor",
+                "cursor cli",
+                "cursor agent",
+                "cursor-agent",
+                "cursor app",
+                "cursor desktop",
+                "cursor desktop app",
+                "cursor ide",
+            ),
+            exact_names=("Cursor", "Cursor Agent", "Cursor CLI", "Cursor Desktop"),
+            executable_names=(
+                "Cursor.exe",
+                "cursor-agent.exe",
+                "cursor-agent.cmd",
+                "cursor-agent.bat",
+                "cursor-agent",
+            ),
         ),
         AppIdentity(
             app_id="codex",
@@ -926,7 +993,7 @@ def _start_menu_name_matches_identity(name: str, identity: AppIdentity) -> bool:
 
 
 def requested_agent_surface_kind(app_name: str, identity: AppIdentity) -> str:
-    if identity.app_id not in {"claude", "codex"}:
+    if identity.app_id not in {"claude", "codex", "cursor"}:
         return ""
     normalized = " ".join(str(app_name or "").replace("-", " ").lower().split())
     tokens = set(normalized.split())
@@ -936,6 +1003,8 @@ def requested_agent_surface_kind(app_name: str, identity: AppIdentity) -> str:
         return "desktop"
     if identity.app_id == "claude" and "code" in tokens:
         return "cli"
+    if identity.app_id == "cursor" and "agent" in tokens:
+        return "cli"
     return ""
 
 
@@ -944,17 +1013,24 @@ def codex_candidate_surface_kind(candidate: AppResolutionCandidate) -> str:
     exe = _candidate_file_name(candidate)
     exe_lower = lower_text(exe)
     name = normalize_app_name(candidate.display_name)
+    if candidate.source == "local-agent-cli":
+        return "cli"
     if exe_lower in {"codex.cmd", "codex.bat", "codex"}:
         return "cli"
-    if exe_lower == "codex.exe" and (
-        "/.local/bin/" in path_text
-        or "/appdata/roaming/npm/" in path_text
-        or "/extensions/" in path_text
-        or "/resources/" in path_text
-    ):
-        return "cli"
-    if exe == "Codex.exe":
-        return "desktop"
+    if exe_lower == "codex.exe":
+        if "/app/resources/" in path_text or ".cursor/extensions/" in path_text:
+            return ""
+        if (
+            path_text.endswith("/app/codex.exe")
+            or "/program files/windowsapps/openai.codex" in path_text
+        ):
+            return "desktop"
+        if (
+            "/.local/bin/" in path_text
+            or "/appdata/local/openai/codex/bin/" in path_text
+            or "/appdata/roaming/npm/" in path_text
+        ):
+            return "cli"
     if candidate.source in {"start-apps", "start-menu"} and name in {
         "codex",
         "openaicodex",
@@ -974,6 +1050,7 @@ def claude_candidate_surface_kind(candidate: AppResolutionCandidate) -> str:
     if exe == "claude.exe" and (
         "/.local/bin/" in path_text
         or "/appdata/roaming/npm/" in path_text
+        or "/appdata/roaming/claude/claude-code/" in path_text
     ):
         return "cli"
     if candidate.source == "start-apps" and name in {"claude", "claudedesktop", "anthropicclaude"}:
@@ -988,6 +1065,32 @@ def claude_candidate_surface_kind(candidate: AppResolutionCandidate) -> str:
     ):
         return "desktop"
     if candidate.source == "path" and exe == "claude.exe":
+        return "cli"
+    return ""
+
+
+def cursor_candidate_surface_kind(candidate: AppResolutionCandidate) -> str:
+    exe = lower_text(_candidate_file_name(candidate))
+    name = normalize_app_name(candidate.display_name)
+    if exe in {
+        "cursor-agent.exe",
+        "cursor-agent.cmd",
+        "cursor-agent.bat",
+        "cursor-agent",
+    }:
+        return "cli"
+    if exe == "cursor.exe":
+        return "desktop"
+    if candidate.source in {"start-apps", "start-menu"} and name in {
+        "cursor",
+        "cursorapp",
+        "cursordesktop",
+    }:
+        return "desktop"
+    if candidate.source in {"start-menu", "path"} and name in {
+        "cursoragent",
+        "cursorcli",
+    }:
         return "cli"
     return ""
 
@@ -1011,10 +1114,52 @@ def _prefer_requested_agent_surface_candidates(
             if claude_candidate_surface_kind(candidate) == requested_surface
         )
         return preferred
+    if identity.app_id == "cursor" and requested_surface:
+        preferred = tuple(
+            candidate
+            for candidate in candidates
+            if cursor_candidate_surface_kind(candidate) == requested_surface
+        )
+        return preferred
     return candidates
 
 
+def agent_candidate_selection_priority(
+    app_name: str,
+    identity: AppIdentity,
+    candidate: AppResolutionCandidate,
+) -> int:
+    requested_surface = requested_agent_surface_kind(app_name, identity)
+    if identity.app_id == "codex":
+        return _surface_selection_priority(
+            codex_candidate_surface_kind(candidate),
+            requested_surface=requested_surface,
+        )
+    if identity.app_id == "claude":
+        return _surface_selection_priority(
+            claude_candidate_surface_kind(candidate),
+            requested_surface=requested_surface,
+        )
+    if identity.app_id == "cursor":
+        return _surface_selection_priority(
+            cursor_candidate_surface_kind(candidate),
+            requested_surface=requested_surface,
+        )
+    return 0
+
+
+def _surface_selection_priority(kind: str, *, requested_surface: str = "") -> int:
+    if requested_surface:
+        return 0 if kind == requested_surface else 50
+    if kind == "cli":
+        return 0
+    if kind == "desktop":
+        return 10
+    return 20
+
+
 def candidate_score(candidate: AppResolutionCandidate, identity: AppIdentity) -> int:
+    surface_bonus = _agent_candidate_surface_score_bonus(candidate, identity)
     if candidate.already_running:
         raw_executable_names = tuple(str(item or "").strip() for item in identity.executable_names if str(item or "").strip())
         primary_executable_name = raw_executable_names[0] if raw_executable_names else ""
@@ -1024,7 +1169,7 @@ def candidate_score(candidate: AppResolutionCandidate, identity: AppIdentity) ->
             Path(candidate.path).name if candidate.path else "",
         }
         if primary_executable_name and primary_executable_name in raw_candidate_executable_names:
-            return 1000
+            return 1000 + surface_bonus
         executable_names = tuple(lower_text(item) for item in raw_executable_names)
         candidate_executable_names = {
             lower_text(candidate.process_name),
@@ -1032,19 +1177,28 @@ def candidate_score(candidate: AppResolutionCandidate, identity: AppIdentity) ->
             lower_text(Path(candidate.path).name),
         }
         if executable_names and candidate_executable_names & set(executable_names):
-            return 980
-        return 960
+            return 980 + surface_bonus
+        return 960 + surface_bonus
     names = candidate_names(candidate)
     exact = {normalize_app_name(item) for item in identity.exact_names if normalize_app_name(item)}
     aliases = {normalize_app_name(item) for item in identity.aliases if normalize_app_name(item)}
     executable_names = {lower_text(item) for item in identity.executable_names if lower_text(item)}
     if lower_text(candidate.executable_name) in executable_names or lower_text(Path(candidate.path).name) in executable_names:
-        return 950
+        return 950 + surface_bonus
     if names & exact:
-        return 900
+        return 900 + surface_bonus
     if names & aliases:
-        return 800
-    return 100
+        return 800 + surface_bonus
+    return 100 + surface_bonus
+
+
+def _agent_candidate_surface_score_bonus(
+    candidate: AppResolutionCandidate,
+    identity: AppIdentity,
+) -> int:
+    if identity.app_id == "claude" and claude_candidate_surface_kind(candidate) == "cli":
+        return 1
+    return 0
 
 
 def candidate_excluded(candidate: AppResolutionCandidate, identity: AppIdentity) -> bool:
@@ -1095,10 +1249,11 @@ def source_priority(source: str) -> int:
     order = {
         "running-process": 0,
         "local-cache": 1,
-        "start-apps": 2,
-        "start-menu": 3,
-        "app-paths-registry": 4,
-        "path": 5,
+        "local-agent-cli": 2,
+        "start-apps": 3,
+        "start-menu": 4,
+        "app-paths-registry": 5,
+        "path": 6,
     }
     return order.get(str(source or ""), 99)
 
@@ -1211,6 +1366,7 @@ __all__ = [
     "AppPathVerifier",
     "AppResolutionCandidate",
     "AppResolutionReport",
+    "LocalAgentCliCandidateProvider",
     "LocalCacheAppCandidateProvider",
     "PathExecutableCandidateProvider",
     "PowerShellAuthenticodeSignatureReader",
@@ -1229,6 +1385,7 @@ __all__ = [
     "candidate_selection_priority",
     "candidate_unique_value",
     "codex_candidate_surface_kind",
+    "cursor_candidate_surface_kind",
     "dedupe_candidates",
     "default_app_identities",
     "default_start_menu_roots",

@@ -80,12 +80,17 @@ class _DevToolsVersionHandler(http.server.BaseHTTPRequestHandler):
 class _FakeCdpWebSocketHandler(socketserver.StreamRequestHandler):
     def handle(self):
         key = ""
+        headers = {}
         while True:
             line = self.rfile.readline().decode("ascii").strip()
             if not line:
                 break
+            if ":" in line:
+                name, value = line.split(":", 1)
+                headers[name.strip().lower()] = value.strip()
             if line.lower().startswith("sec-websocket-key:"):
                 key = line.split(":", 1)[1].strip()
+        self.server.last_headers = headers
 
         accept = base64.b64encode(
             hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
@@ -182,6 +187,59 @@ class _FakeBrowserTargetWebSocketHandler(_FakeCdpWebSocketHandler):
         )
 
 
+class _RejectOriginCdpWebSocketHandler(_FakeCdpWebSocketHandler):
+    def handle(self):
+        key = ""
+        headers = {}
+        while True:
+            line = self.rfile.readline().decode("ascii").strip()
+            if not line:
+                break
+            if ":" in line:
+                name, value = line.split(":", 1)
+                headers[name.strip().lower()] = value.strip()
+            if line.lower().startswith("sec-websocket-key:"):
+                key = line.split(":", 1)[1].strip()
+        self.server.last_headers = headers
+        if "origin" in headers:
+            self.server.rejected_origin_count += 1
+            self.wfile.write(
+                (
+                    "HTTP/1.1 403 Forbidden\r\n"
+                    "Content-Length: 21\r\n"
+                    "\r\n"
+                    "origin not permitted"
+                ).encode("ascii")
+            )
+            return
+
+        accept = base64.b64encode(
+            hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+        ).decode("ascii")
+        self.wfile.write(
+            (
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                f"Sec-WebSocket-Accept: {accept}\r\n"
+                "\r\n"
+            ).encode("ascii")
+        )
+        message = self._read_client_json()
+        self.server.last_request = message
+        self._send_server_json(
+            {
+                "id": message["id"],
+                "result": {
+                    "result": {
+                        "type": "string",
+                        "value": "ok:no-origin",
+                    }
+                },
+            }
+        )
+
+
 class _FakeDevToolsClient:
     def __init__(self, targets):
         self.targets = tuple(targets)
@@ -234,6 +292,7 @@ class BrowserConnectorTests(unittest.TestCase):
     def test_devtools_client_evaluates_runtime_expression_over_websocket(self):
         server = socketserver.TCPServer(("127.0.0.1", 0), _FakeCdpWebSocketHandler)
         server.last_request = {}
+        server.last_headers = {}
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
@@ -255,9 +314,39 @@ class BrowserConnectorTests(unittest.TestCase):
             thread.join(timeout=2)
 
         self.assertEqual(result["value"], "ok:document.title")
+        self.assertNotIn("origin", server.last_headers)
         self.assertEqual(server.last_request["method"], "Runtime.evaluate")
         self.assertEqual(server.last_request["params"]["expression"], "document.title")
         self.assertTrue(server.last_request["params"]["returnByValue"])
+
+    def test_devtools_client_omits_origin_for_chrome_remote_allow_origin_guard(self):
+        server = socketserver.TCPServer(("127.0.0.1", 0), _RejectOriginCdpWebSocketHandler)
+        server.last_request = {}
+        server.last_headers = {}
+        server.rejected_origin_count = 0
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            target = BrowserDevToolsTarget(
+                target_id="page-1",
+                type="page",
+                title="DevTools Page",
+                url="https://example.test/devtools",
+                web_socket_debugger_url=f"ws://127.0.0.1:{server.server_address[1]}/devtools/page/page-1",
+            )
+            result = BrowserDevToolsClient().evaluate(
+                "http://127.0.0.1:9222",
+                target,
+                "document.title",
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(result["value"], "ok:no-origin")
+        self.assertEqual(server.rejected_origin_count, 0)
+        self.assertNotIn("origin", server.last_headers)
 
     def test_devtools_client_calls_generic_cdp_method_over_websocket(self):
         server = socketserver.TCPServer(("127.0.0.1", 0), _FakeCdpWebSocketHandler)

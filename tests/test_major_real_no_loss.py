@@ -1,5 +1,7 @@
+import dataclasses
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -26,8 +28,12 @@ class _FakeMainReport(_FakeReport):
 
 
 def _major_report(
+    output_root="",
     primary=None,
     app=None,
+    bridge_fixture_smoke=None,
+    native_fixture_smoke=None,
+    wechat_fixture_smoke=None,
     cli=None,
     helper=None,
     native_helper=None,
@@ -35,20 +41,321 @@ def _major_report(
     app_devtools_launch=None,
 ):
     return MajorScenarioRealNoLossReport(
-        output_root="",
+        output_root=output_root,
         artifact_path="",
         primary_report=dict(primary or {}),
         owned_ide_bridge_helper_report=dict(helper or {}),
         agent_native_cdp_bridge_helper_report=dict(native_helper or {}),
         agent_app_report=dict(app or {}),
+        agent_app_bridge_fixture_smoke_report=dict(bridge_fixture_smoke or {}),
+        agent_native_bridge_fixture_smoke_report=dict(native_fixture_smoke or {}),
         agent_cli_report=dict(cli or {}),
+        wechat_native_bridge_fixture_smoke_report=dict(wechat_fixture_smoke or {}),
         agent_app_devtools_resolution_report=dict(app_devtools_resolution or {}),
         agent_app_devtools_owned_launch_report=dict(app_devtools_launch or {}),
         requirements=(),
     )
 
 
+def _fake_dynamic_devtools_readiness_url(action):
+    argv_text = " ".join(str(item) for item in action.get("argv", ()))
+    if "Claude.exe" in argv_text:
+        return "http://127.0.0.1:19556"
+    if "Cursor.exe" in argv_text:
+        return "http://127.0.0.1:19557"
+    return "http://127.0.0.1:19555"
+
+
 class MajorRealNoLossTests(unittest.TestCase):
+    def test_runner_times_out_hung_primary_runner_and_writes_progress(self):
+        release = threading.Event()
+
+        def _preflight_runner():
+            return _FakeReport(
+                {
+                    "mode": "desktop-system-dialog-preflight",
+                    "safety_mode": "read_only_desktop_scan",
+                    "ok": True,
+                    "decision": "system_dialog_clear",
+                    "control_allowed": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "native_call_attempts": 0,
+                    "system_dialog_detected": False,
+                    "system_dialog_count": 0,
+                    "system_dialog_snapshots": [],
+                }
+            )
+
+        def _primary_runner(_fixture, **_kwargs):
+            release.wait(10)
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"tasks": []},
+                output_root=tmp,
+                runner_timeout_sec=0.01,
+                run_agent_app_scenarios=False,
+                run_agent_cli_scenarios=False,
+                system_dialog_preflight_runner=_preflight_runner,
+                primary_runner=_primary_runner,
+            )
+            release.set()
+            data = report.to_dict()
+            progress = json.loads(
+                (Path(tmp) / "major-real-no-loss-progress.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertFalse(data["safe_run_ok"])
+        self.assertFalse(data["goal_complete"])
+        self.assertTrue(data["runner_timed_out"])
+        self.assertEqual(
+            data["subreports"]["primary"]["decision"],
+            "runner_stage_timeout",
+        )
+        self.assertEqual(data["subreports"]["primary"]["stage_name"], "primary")
+        self.assertFalse(data["subreports"]["primary"]["attempt_counters_reliable"])
+        self.assertEqual(progress["stages"][-1]["stage_name"], "primary")
+        self.assertEqual(progress["stages"][-1]["status"], "timed_out")
+
+    def test_runner_can_stop_after_first_stage_timeout_and_write_final_report(self):
+        release = threading.Event()
+        app_calls = []
+        cli_calls = []
+
+        def _preflight_runner():
+            return _FakeReport(
+                {
+                    "mode": "desktop-system-dialog-preflight",
+                    "safety_mode": "read_only_desktop_scan",
+                    "ok": True,
+                    "decision": "system_dialog_clear",
+                    "control_allowed": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "native_call_attempts": 0,
+                    "system_dialog_detected": False,
+                    "system_dialog_count": 0,
+                    "system_dialog_snapshots": [],
+                }
+            )
+
+        def _primary_runner(_fixture, **_kwargs):
+            release.wait(10)
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            raise AssertionError("agent app runner must not run after timeout")
+
+        def _agent_cli_runner(**kwargs):
+            cli_calls.append(dict(kwargs))
+            raise AssertionError("agent cli runner must not run after timeout")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"tasks": []},
+                output_root=tmp,
+                runner_timeout_sec=0.01,
+                stop_on_runner_timeout=True,
+                system_dialog_preflight_runner=_preflight_runner,
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            release.set()
+            data = report.to_dict()
+
+        self.assertTrue(data["runner_timed_out"])
+        self.assertTrue(data["runner_stage_failed"])
+        self.assertEqual(app_calls, [])
+        self.assertEqual(cli_calls, [])
+        self.assertEqual(
+            data["subreports"]["primary"]["decision"],
+            "runner_stage_timeout",
+        )
+        self.assertEqual(
+            data["subreports"]["agent_app"]["decision"],
+            "skipped_after_runner_timeout",
+        )
+        self.assertEqual(
+            data["subreports"]["agent_cli"]["decision"],
+            "skipped_after_runner_timeout",
+        )
+
+    def test_runner_stops_before_subrunners_when_system_dialog_preflight_fails(self):
+        primary_calls = []
+        app_calls = []
+        cli_calls = []
+        preflight_calls = []
+
+        def _preflight_runner(**kwargs):
+            preflight_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "desktop-system-dialog-preflight",
+                    "safety_mode": "read_only_desktop_scan",
+                    "ok": False,
+                    "decision": "system_dialog_detected",
+                    "control_allowed": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "native_call_attempts": 0,
+                    "system_dialog_detected": True,
+                    "system_dialog_count": 1,
+                    "system_dialog_snapshots": [
+                        {
+                            "hwnd": 301,
+                            "title": "Error",
+                            "process_name": "Codex.exe",
+                            "text": (
+                                "Error launching app\n"
+                                "Unable to find Electron app at "
+                                "C:/Program Files/WindowsApps/OpenAI.Codex_26.527/"
+                                "?type=click&tag=11634605478613629973"
+                            ),
+                        }
+                    ],
+                }
+            )
+
+        def _primary_runner(*args, **kwargs):
+            primary_calls.append((args, kwargs))
+            raise AssertionError("primary runner must not run after preflight failure")
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(kwargs)
+            raise AssertionError("agent app runner must not run after preflight failure")
+
+        def _agent_cli_runner(**kwargs):
+            cli_calls.append(kwargs)
+            raise AssertionError("agent cli runner must not run after preflight failure")
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_major_scenario_real_no_loss(
+                fixture={"tasks": []},
+                output_root=td,
+                system_dialog_preflight_runner=_preflight_runner,
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+        data = report.to_dict()
+
+        self.assertFalse(data["safe_run_ok"])
+        self.assertFalse(data["goal_complete"])
+        self.assertTrue(data["system_dialog_preflight_failed"])
+        self.assertEqual(
+            data["system_dialog_preflight"]["decision"],
+            "system_dialog_detected",
+        )
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(data["agent_command_attempts"], 0)
+        self.assertEqual(len(preflight_calls), 1)
+        self.assertEqual(primary_calls, [])
+        self.assertEqual(app_calls, [])
+        self.assertEqual(cli_calls, [])
+        self.assertEqual(
+            data["subreports"]["system_dialog_preflight"]["system_dialog_count"],
+            1,
+        )
+
+    def test_runner_passes_existing_system_dialog_preflight_to_primary_runner(self):
+        preflight_report = {
+            "mode": "desktop-system-dialog-preflight",
+            "safety_mode": "read_only_desktop_scan",
+            "ok": True,
+            "decision": "system_dialog_clear",
+            "control_allowed": False,
+            "control_attempts": 0,
+            "window_input_attempts": 0,
+            "native_call_attempts": 0,
+            "system_dialog_detected": False,
+            "system_dialog_count": 0,
+            "system_dialog_snapshots": [],
+        }
+        primary_preflight = []
+
+        def _preflight_runner():
+            return _FakeReport(preflight_report)
+
+        def _primary_runner(*_args, **kwargs):
+            runner = kwargs.get("system_dialog_preflight_runner")
+            self.assertTrue(callable(runner))
+            primary_preflight.append(runner())
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "safety_mode": "real_no_loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "owned_app_launch_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "transport_matrix": {"scenarios": []},
+                }
+            )
+
+        def _agent_app_runner(**_kwargs):
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "safety_mode": "real_no_loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_cli_runner(**_kwargs):
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "safety_mode": "real_no_loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            run_major_scenario_real_no_loss(
+                fixture={"suite": "empty", "cases": []},
+                output_root=td,
+                system_dialog_preflight_runner=_preflight_runner,
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+
+        self.assertEqual(primary_preflight, [preflight_report])
+
     def test_safe_run_allows_unrelated_focus_change_when_no_automation_attempts(self):
         report = _major_report(
             primary={
@@ -110,6 +417,40 @@ class MajorRealNoLossTests(unittest.TestCase):
         data = report.to_dict()
 
         self.assertFalse(data["background_screenshot_focus_stable"])
+        self.assertFalse(data["automation_focus_safe"])
+        self.assertFalse(data["safe_run_ok"])
+
+    def test_safe_run_fails_when_cli_command_steals_foreground(self):
+        report = _major_report(
+            primary={
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "external_communication_attempts": 0,
+                "owned_app_launch_attempts": 0,
+            },
+            app={
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 0,
+                "agent_command_attempts": 0,
+            },
+            cli={
+                "foreground_focus_stable": False,
+                "foreground_no_steal_verified": False,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "agent_command_attempts": 1,
+            },
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["cli_foreground_focus_stable"])
+        self.assertFalse(data["cli_foreground_no_steal_verified"])
         self.assertFalse(data["automation_focus_safe"])
         self.assertFalse(data["safe_run_ok"])
 
@@ -225,7 +566,7 @@ class MajorRealNoLossTests(unittest.TestCase):
                     "window_input_attempts": 0,
                     "agent_command_attempts": 2,
                     "foreground_focus_stable": True,
-                    "passed_cases": 2,
+                    "passed_cases": 3,
                     "failed_cases": 0,
                     "verified_cases": 1,
                     "cases": [
@@ -241,6 +582,12 @@ class MajorRealNoLossTests(unittest.TestCase):
                             "real_verified": False,
                             "foreground_focus_stable": True,
                         },
+                        {
+                            "agent": "cursor",
+                            "status": "background_cli_unavailable",
+                            "real_verified": False,
+                            "foreground_focus_stable": True,
+                        },
                     ],
                 }
             )
@@ -251,6 +598,7 @@ class MajorRealNoLossTests(unittest.TestCase):
                 output_root=tmp,
                 allow_owned_browser_helper_launch=True,
                 allow_agent_cli_execution=True,
+                cli_agents=("codex", "claude", "cursor"),
                 primary_runner=_primary_runner,
                 agent_app_runner=_agent_app_runner,
                 agent_cli_runner=_agent_cli_runner,
@@ -282,17 +630,64 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(requirements["file_background_search"]["status"], "verified")
         self.assertEqual(requirements["codex_cli_background_task"]["status"], "verified")
         self.assertEqual(requirements["claude_cli_background_task"]["status"], "auth_required")
+        self.assertEqual(requirements["cursor_cli_background_task"]["status"], "gated")
         self.assertEqual(requirements["codex_app_background_chat"]["status"], "gated")
         self.assertEqual(requirements["claude_desktop_background_chat"]["status"], "unavailable")
         self.assertEqual(requirements["cursor_background_chat"]["status"], "gated")
         self.assertIn("wechat_background_send", data["unmet_requirements"])
         self.assertIn("claude_cli_background_task", data["unmet_requirements"])
+        self.assertIn("cursor_cli_background_task", data["unmet_requirements"])
         self.assertEqual(artifact["mode"], "major-scenario-real-no-loss")
 
         self.assertTrue(primary_calls[0]["kwargs"]["allow_owned_browser_helper_launch"])
-        self.assertEqual(app_calls[0]["agents"], ("codex app", "claude desktop", "cursor"))
-        self.assertEqual(cli_calls[0]["agents"], ("codex", "claude"))
+        self.assertEqual(app_calls[0]["agents"], ("codex app", "claude desktop"))
+        self.assertEqual(cli_calls[0]["agents"], ("codex", "claude", "cursor"))
         self.assertTrue(cli_calls[0]["allow_cli_execution"])
+
+    def test_app_requirement_preserves_auth_required_before_native_ready_gating(self):
+        requirement = major_real_no_loss._app_requirement(
+            "cursor_background_chat",
+            "cursor",
+            {
+                "agent": "cursor",
+                "status": "auth_required",
+                "native_ready": True,
+                "app_bridge_send_report": {
+                    "decision": "app_bridge_auth_required",
+                    "auth_required": True,
+                },
+            },
+        ).to_dict()
+
+        self.assertEqual(requirement["status"], "auth_required")
+        self.assertEqual(requirement["blocking_reason"], "auth_required")
+
+    def test_missing_default_cursor_app_case_is_reported_as_protected_gate(self):
+        requirements = {
+            item.requirement_id: item.to_dict()
+            for item in major_real_no_loss._build_requirements(
+                {},
+                {"cases": []},
+                {},
+                include_primary=False,
+                include_agent_app=True,
+                include_agent_cli=False,
+            )
+        }
+
+        cursor = requirements["cursor_background_chat"]
+
+        self.assertEqual(cursor["status"], "gated")
+        self.assertEqual(
+            cursor["blocking_reason"],
+            "gated_cursor_desktop_protected_explicit_bridge_required",
+        )
+        self.assertNotEqual(cursor["blocking_reason"], "case_missing")
+        self.assertTrue(cursor["evidence"]["protected_default"])
+        self.assertEqual(
+            cursor["evidence"]["required_endpoint_kind"],
+            "explicit_ide_bridge_or_isolated_cursor_profile",
+        )
 
     def test_runner_passes_app_bridge_send_options_and_marks_app_requirement_verified(self):
         app_calls = []
@@ -546,6 +941,155 @@ class MajorRealNoLossTests(unittest.TestCase):
             )
 
         self.assertEqual(app_calls[0]["debugger_urls"], ("http://127.0.0.1:9444",))
+
+    def test_runner_passes_codex_app_server_ws_urls_to_agent_app_runner(self):
+        app_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "passed_cases": 1,
+                    "failed_cases": 0,
+                    "native_ready_cases": 1,
+                    "cases": [
+                        {
+                            "agent": "codex app",
+                            "status": "native_connector_ready",
+                            "real_verified": True,
+                            "native_ready": True,
+                            "probe": {
+                                "endpoints": [
+                                    {
+                                        "endpoint_type": "codex_app_server_ws",
+                                        "bridge_url": "ws://127.0.0.1:19731",
+                                        "ready": True,
+                                    }
+                                ]
+                            },
+                            "transport_matrix": {
+                                "send_ready": False,
+                                "best_available_transport": {
+                                    "transport_id": "codex-app-server-ws"
+                                },
+                            },
+                            "codex_app_server_thread_start_required": False,
+                            "codex_app_server_thread_start_ready": False,
+                            "codex_app_server_turn_start_ready": True,
+                            "codex_app_server_turn_contract_ready": True,
+                            "codex_app_server_turn_dry_run": {
+                                "ok": True,
+                                "decision": "codex_app_server_turn_dry_run_ready",
+                                "control_attempts": 0,
+                                "window_input_attempts": 0,
+                                "native_call_attempts": 0,
+                                "app_server_turn_start_attempts": 0,
+                                "request": {
+                                    "thread_id": "thread-abc",
+                                    "turn_start_params": {
+                                        "threadId": "thread-abc",
+                                        "input": [
+                                            {
+                                                "type": "text",
+                                                "text": "OPENWUKONG_ACCEPTANCE: PASS",
+                                            }
+                                        ],
+                                    },
+                                },
+                            },
+                        }
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("codex app",),
+                cli_agents=(),
+                project_name="openwukong",
+                task_name="desktop-message",
+                codex_app_server_ws_urls=("ws://127.0.0.1:19731",),
+                allow_codex_app_server_thread_start=True,
+                allow_codex_app_server_turn_start=True,
+                codex_app_server_turn_start_timeout=12.5,
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(
+            app_calls[0]["codex_app_server_ws_urls"],
+            ("ws://127.0.0.1:19731",),
+        )
+        self.assertTrue(app_calls[0]["allow_codex_app_server_thread_start"])
+        self.assertTrue(app_calls[0]["allow_codex_app_server_turn_start"])
+        self.assertEqual(app_calls[0]["codex_app_server_turn_start_timeout"], 12.5)
+        self.assertEqual(data["control_attempts"], 0)
+        requirements = {item["requirement_id"]: item for item in data["requirements"]}
+        self.assertEqual(requirements["codex_app_background_chat"]["status"], "gated")
+        self.assertEqual(
+            requirements["codex_app_background_chat"]["blocking_reason"],
+            "native_connector_ready_but_send_not_verified",
+        )
+        readiness_cases = {
+            item["agent"]: item for item in data["agent_app_endpoint_readiness"]["cases"]
+        }
+        self.assertTrue(
+            readiness_cases["codex app"]["codex_app_server_turn_contract_ready"]
+        )
+        self.assertFalse(
+            readiness_cases["codex app"]["codex_app_server_thread_start_required"]
+        )
+        self.assertFalse(
+            readiness_cases["codex app"]["codex_app_server_thread_start_ready"]
+        )
+        self.assertTrue(
+            readiness_cases["codex app"]["codex_app_server_turn_start_ready"]
+        )
+        self.assertEqual(
+            readiness_cases["codex app"]["codex_app_server_turn_dry_run"]["decision"],
+            "codex_app_server_turn_dry_run_ready",
+        )
 
     def test_runner_passes_agent_native_bridge_registry_paths_to_agent_app_runner(self):
         app_calls = []
@@ -1178,6 +1722,11 @@ class MajorRealNoLossTests(unittest.TestCase):
             1,
         )
         self.assertEqual(summary["selected_send_transport_counts"]["none"], 1)
+        readiness = data["objective_readiness_matrix"]
+        self.assertEqual(readiness["mode"], "objective-readiness-matrix")
+        self.assertFalse(readiness["goal_complete"])
+        self.assertIn("codex_app_background_chat", readiness["summary"]["unsatisfied_requirements"])
+        self.assertIn("cursor_background_chat", readiness["summary"]["unsatisfied_requirements"])
 
     def test_prepare_agent_app_devtools_owned_launch_fleet_launches_resolved_apps(self):
         calls = []
@@ -1197,7 +1746,7 @@ class MajorRealNoLossTests(unittest.TestCase):
                         {
                             "status": "started",
                             "pid": 4343,
-                            "readiness_url": action["readiness_url"],
+                            "readiness_url": _fake_dynamic_devtools_readiness_url(action),
                         }
                     ],
                 }
@@ -1265,7 +1814,7 @@ class MajorRealNoLossTests(unittest.TestCase):
             [call["action"]["route_id"] for call in calls],
             ["agent-app-devtools-owned", "agent-app-devtools-owned"],
         )
-        self.assertIn("--remote-debugging-port=19555", calls[0]["action"]["argv"])
+        self.assertIn("--remote-debugging-port=0", calls[0]["action"]["argv"])
         self.assertIn("--user-data-dir", " ".join(calls[0]["action"]["argv"]))
         self.assertEqual(data["helpers"][0]["agent_id"], "codex")
 
@@ -1370,7 +1919,7 @@ class MajorRealNoLossTests(unittest.TestCase):
                         {
                             "status": "started",
                             "pid": 5157,
-                            "readiness_url": action["readiness_url"],
+                            "readiness_url": _fake_dynamic_devtools_readiness_url(action),
                         }
                     ],
                 }
@@ -1441,7 +1990,7 @@ class MajorRealNoLossTests(unittest.TestCase):
                         {
                             "status": "started",
                             "pid": 5158,
-                            "readiness_url": action["readiness_url"],
+                            "readiness_url": _fake_dynamic_devtools_readiness_url(action),
                         }
                     ],
                 }
@@ -1512,7 +2061,7 @@ class MajorRealNoLossTests(unittest.TestCase):
                         {
                             "status": "started",
                             "pid": 6182,
-                            "readiness_url": action["readiness_url"],
+                            "readiness_url": _fake_dynamic_devtools_readiness_url(action),
                         }
                     ],
                 }
@@ -1599,7 +2148,7 @@ class MajorRealNoLossTests(unittest.TestCase):
                         {
                             "status": "started",
                             "pid": 77524,
-                            "readiness_url": action["readiness_url"],
+                            "readiness_url": _fake_dynamic_devtools_readiness_url(action),
                         }
                     ],
                 }
@@ -1681,7 +2230,7 @@ class MajorRealNoLossTests(unittest.TestCase):
                         {
                             "status": "started",
                             "pid": 88457,
-                            "readiness_url": action["readiness_url"],
+                            "readiness_url": _fake_dynamic_devtools_readiness_url(action),
                         }
                     ],
                 }
@@ -1723,10 +2272,67 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(health["browser_websocket_url"], "ws://127.0.0.1:19557/devtools/browser/browser-1")
         self.assertEqual(health["browser_target_count"], 1)
         self.assertEqual(health["browser_targets"][0]["target_id"], "cursor-browser-page")
-        self.assertEqual(
-            devtools_client.calls,
-            [("http://127.0.0.1:19557", "Target.getTargets", {})],
+        self.assertGreaterEqual(len(devtools_client.calls), 1)
+        self.assertTrue(
+            all(
+                call == ("http://127.0.0.1:19557", "Target.getTargets", {})
+                for call in devtools_client.calls
+            )
         )
+
+    def test_wait_for_agent_app_devtools_endpoint_health_waits_until_page_target_appears(self):
+        class _HTTPProbe:
+            def __init__(self):
+                self.list_calls = 0
+
+            def get_json(self, url, timeout=0.2):
+                if url.endswith("/json/version"):
+                    return {
+                        "Browser": "Cursor/1.0",
+                        "Protocol-Version": "1.3",
+                        "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/browser/browser-1",
+                    }
+                if url.endswith("/json/list"):
+                    self.list_calls += 1
+                    if self.list_calls == 1:
+                        return []
+                    return [
+                        {
+                            "id": "cursor-page-1",
+                            "type": "page",
+                            "title": "openwukong - Cursor",
+                            "url": "vscode-file://cursor/workbench.html",
+                            "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/page/cursor-page-1",
+                        }
+                    ]
+                raise AssertionError(url)
+
+        class _DevToolsClient:
+            def __init__(self):
+                self.calls = []
+
+            def call_browser_method(self, debugger_url, method, params=None):
+                self.calls.append((debugger_url, method, dict(params or {})))
+                return {"targetInfos": []}
+
+        http_probe = _HTTPProbe()
+        devtools_client = _DevToolsClient()
+
+        health = major_real_no_loss._wait_for_agent_app_devtools_endpoint_health(
+            "http://127.0.0.1:19557",
+            http_probe=http_probe,
+            devtools_client=devtools_client,
+            timeout_sec=1.0,
+            request_timeout=0.001,
+        )
+
+        self.assertTrue(health["ready"])
+        self.assertEqual(health["error"], "")
+        self.assertGreaterEqual(health["attempts"], 2)
+        self.assertEqual(http_probe.list_calls, 2)
+        self.assertEqual(health["target_count"], 1)
+        self.assertEqual(health["targets"][0]["title"], "openwukong - Cursor")
+        self.assertGreaterEqual(len(devtools_client.calls), 2)
 
     def test_stop_agent_app_devtools_owned_launch_removes_isolated_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2256,22 +2862,22 @@ class MajorRealNoLossTests(unittest.TestCase):
         )
         self.assertEqual(
             cases["codex"]["owned_devtools_launch_plan_template"]["debug_port"],
-            19555,
+            0,
         )
         self.assertEqual(
             cases["codex"]["owned_devtools_launch_plan_template"]["readiness_url"],
-            "http://127.0.0.1:19555",
+            "",
         )
         self.assertEqual(
             cases["codex"]["owned_devtools_launch_plan_template"]["executable"],
             "C:/Program Files/WindowsApps/OpenAI.Codex/app/Codex.exe",
         )
-        self.assertTrue(
+        self.assertFalse(
             cases["codex"]["owned_devtools_launch_plan_template"]["executable_ready"],
         )
-        self.assertIn(
-            "--remote-debugging-port=19555",
-            cases["codex"]["owned_devtools_launch_plan_template"]["argv"],
+        self.assertEqual(
+            cases["codex"]["owned_devtools_launch_plan_template"]["launch_blocking_reason"],
+            "msix_windowsapps_not_background_launchable",
         )
         self.assertEqual(
             cases["codex"]["owned_devtools_launch_plan_template"]["startup_mode"],
@@ -2300,6 +2906,266 @@ class MajorRealNoLossTests(unittest.TestCase):
         )
         self.assertFalse(cases["cursor"]["safe_to_send_now"])
         self.assertTrue(all(item["no_focus_required"] for item in package["cases"]))
+
+    def test_report_exposes_agent_app_endpoint_readiness_summary(self):
+        report = _major_report(
+            app={
+                "mode": "agent-app-real-no-loss",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 0,
+                "agent_command_attempts": 0,
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "cases": [
+                    {
+                        "agent": "codex app",
+                        "status": "gated_native_endpoint_missing",
+                        "real_verified": True,
+                        "native_ready": False,
+                        "probe": {
+                            "agent_id": "codex",
+                            "ready_endpoint_count": 0,
+                            "endpoint_count": 0,
+                            "endpoints": [],
+                        },
+                    },
+                    {
+                        "agent": "cursor",
+                        "status": "native_connector_ready",
+                        "real_verified": True,
+                        "native_ready": True,
+                        "probe": {
+                            "agent_id": "cursor",
+                            "ready_endpoint_count": 1,
+                            "endpoint_count": 1,
+                            "endpoints": [
+                                {
+                                    "endpoint_type": "agent_native_bridge",
+                                    "ready": True,
+                                    "bridge_url": "http://127.0.0.1:18892",
+                                    "source": "registry",
+                                }
+                            ],
+                        },
+                    },
+                ],
+            },
+            app_devtools_resolution={
+                "mode": "agent-app-devtools-resolution",
+                "cases": [
+                    {
+                        "agent": "codex app",
+                        "agent_id": "codex",
+                        "status": "resolved_no_executable_path",
+                        "executable_ready": False,
+                        "executable_path": "",
+                    }
+                ],
+            },
+            # This stale/unavailable IDE bridge must be reported as supplemental
+            # evidence only; the ready native bridge remains the send candidate.
+            # It must not be forwarded as a ready endpoint.
+            # The real R148 state has this shape for Cursor.
+            app_devtools_launch={},
+        )
+        report = dataclasses.replace(
+            report,
+            ide_extension_readiness_report={
+                "mode": "ide-extension-bridge-readiness",
+                "status": "bridge_unavailable",
+                "blocking_reason": "bridge_endpoint_unavailable",
+                "bridge_url": "http://127.0.0.1:8787",
+                "agent_id": "cursor",
+                "bridge_ready": False,
+                "can_execute_without_focus": False,
+                "can_write_without_focus": False,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 0,
+            },
+        )
+
+        readiness = report.to_dict()["agent_app_endpoint_readiness"]
+        cases = {item["agent_id"]: item for item in readiness["cases"]}
+
+        self.assertEqual(readiness["mode"], "agent-app-endpoint-readiness")
+        self.assertEqual(readiness["control_attempts"], 0)
+        self.assertEqual(readiness["window_input_attempts"], 0)
+        self.assertEqual(readiness["bridge_send_attempts"], 0)
+        self.assertEqual(readiness["total_cases"], 2)
+        self.assertEqual(readiness["observed_endpoint_cases"], 1)
+        self.assertEqual(readiness["ready_endpoint_cases"], 1)
+        self.assertEqual(readiness["background_send_contract_candidate_cases"], 1)
+        self.assertEqual(readiness["blocked_cases"], 1)
+        self.assertEqual(cases["codex"]["blocking_reason"], "gated_native_endpoint_missing")
+        self.assertEqual(cases["codex"]["ready_endpoint_url"], "")
+        self.assertFalse(
+            cases["codex"]["owned_devtools_launch_plan_template"]["executable_ready"]
+        )
+        self.assertEqual(
+            cases["cursor"]["ready_endpoint_type"],
+            "agent_native_bridge",
+        )
+        self.assertEqual(
+            cases["cursor"]["ready_endpoint_url"],
+            "http://127.0.0.1:18892",
+        )
+        self.assertTrue(cases["cursor"]["can_prepare_background_send_contract"])
+        self.assertEqual(
+            cases["cursor"]["existing_ide_extension_readiness"]["blocking_reason"],
+            "bridge_endpoint_unavailable",
+        )
+
+    def test_owned_devtools_launch_plan_template_uses_absolute_owned_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = _major_report(
+                output_root=tmp,
+                app={
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [
+                        {
+                            "agent": "claude desktop",
+                            "agent_id": "claude",
+                            "status": "app_surface_not_ready",
+                            "native_ready": False,
+                            "real_verified": False,
+                            "probe": {
+                                "agent_id": "claude",
+                                "endpoint_count": 0,
+                                "ready_endpoint_count": 0,
+                                "endpoints": [],
+                            },
+                        }
+                    ],
+                },
+                app_devtools_resolution={
+                    "mode": "agent-app-devtools-resolution",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "cases": [
+                        {
+                            "agent": "claude desktop",
+                            "agent_id": "claude",
+                            "status": "resolved",
+                            "executable_ready": True,
+                            "executable_path": "C:/Users/me/AppData/Local/Programs/Claude/Claude.exe",
+                        }
+                    ],
+                },
+            )
+            template = report.to_dict()["agent_app_endpoint_readiness"]["cases"][0][
+                "owned_devtools_launch_plan_template"
+            ]
+            user_data_dir = Path(template["user_data_dir"])
+            profile_arg = next(
+                arg
+                for arg in template["argv"]
+                if str(arg).startswith("--user-data-dir=")
+            )
+
+            self.assertTrue(user_data_dir.is_absolute())
+            self.assertTrue(str(user_data_dir).startswith(str(Path(tmp).resolve())))
+            self.assertEqual(profile_arg, f"--user-data-dir={user_data_dir}")
+            self.assertFalse(user_data_dir.exists())
+
+    def test_claude_desktop_devtools_resolution_rejects_cli_executable_path(self):
+        class _Resolver:
+            def resolve(self, agent):
+                self.agent = agent
+                return {
+                    "mode": "app-resolution",
+                    "ok": True,
+                    "decision": "resolved",
+                    "app_name": agent,
+                    "app_id": "claude",
+                    "path": "C:/Users/me/.local/bin/Claude.exe",
+                    "source": "path",
+                    "selected_candidate": {
+                        "source": "path",
+                        "display_name": "Claude",
+                        "path": "C:/Users/me/.local/bin/Claude.exe",
+                        "executable_name": "Claude.exe",
+                    },
+                    "candidates": [],
+                }
+
+        report = major_real_no_loss._build_agent_app_devtools_resolution_report(
+            ("claude desktop",),
+            resolver=_Resolver(),
+        )
+        case = report["cases"][0]
+
+        self.assertEqual(case["agent"], "claude desktop")
+        self.assertEqual(case["agent_id"], "claude")
+        self.assertFalse(case["executable_ready"])
+        self.assertEqual(case["executable_path"], "")
+        self.assertEqual(case["status"], "resolved_no_executable_path")
+        self.assertEqual(
+            case["launch_blocking_reason"],
+            "agent_app_cli_path_not_background_launchable",
+        )
+
+    def test_claude_desktop_owned_devtools_template_blocks_cli_executable_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = _major_report(
+                output_root=tmp,
+                app={
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [
+                        {
+                            "agent": "claude desktop",
+                            "agent_id": "claude",
+                            "status": "app_surface_not_ready",
+                            "native_ready": False,
+                            "real_verified": False,
+                            "probe": {
+                                "agent_id": "claude",
+                                "endpoint_count": 0,
+                                "ready_endpoint_count": 0,
+                                "endpoints": [],
+                            },
+                        }
+                    ],
+                },
+                app_devtools_resolution={
+                    "mode": "agent-app-devtools-resolution",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "cases": [
+                        {
+                            "agent": "claude desktop",
+                            "agent_id": "claude",
+                            "status": "resolved",
+                            "executable_ready": True,
+                            "executable_path": "C:/Users/me/.local/bin/Claude.exe",
+                        }
+                    ],
+                },
+            )
+        template = report.to_dict()["agent_app_endpoint_readiness"]["cases"][0][
+            "owned_devtools_launch_plan_template"
+        ]
+
+        self.assertEqual(
+            template["launch_blocking_reason"],
+            "agent_app_cli_path_not_background_launchable",
+        )
+        self.assertFalse(template["executable_ready"])
+        self.assertEqual(template["executable"], "C:/Users/me/.local/bin/Claude.exe")
+        self.assertEqual(template["argv"], [])
 
     def test_endpoint_acceptance_uses_actual_default_profile_devtools_launch_report(self):
         report = _major_report(
@@ -2633,6 +3499,278 @@ class MajorRealNoLossTests(unittest.TestCase):
             "E:/ideaProjects/agent/openwukong",
         )
 
+    def test_cli_default_agent_apps_do_not_probe_user_cursor(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(["--json"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("codex app", calls[0]["agent_apps"])
+        self.assertIn("claude desktop", calls[0]["agent_apps"])
+        self.assertNotIn("cursor", calls[0]["agent_apps"])
+
+    def test_cli_default_cli_agents_keep_claude_on_app_surface_only(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(["--json"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("codex", calls[0]["cli_agents"])
+        self.assertNotIn("claude", calls[0]["cli_agents"])
+        self.assertIn("cursor", calls[0]["cli_agents"])
+        self.assertNotIn("cursor app", calls[0]["cli_agents"])
+        self.assertNotIn("cursor desktop", calls[0]["cli_agents"])
+
+    def test_claude_installed_app_not_running_is_gated_not_cli_fallback(self):
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            self.assertEqual(kwargs["agents"], ("claude desktop",))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [
+                        {
+                            "agent": "claude desktop",
+                            "status": "app_installed_not_running_connector_required",
+                            "real_verified": False,
+                            "native_ready": False,
+                        }
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            self.assertEqual(kwargs["agents"], ())
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                run_primary_scenarios=False,
+                agent_apps=("claude desktop",),
+                cli_agents=(),
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+                primary_runner=_primary_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(data["agent_command_attempts"], 0)
+        requirements = {item["requirement_id"]: item for item in data["requirements"]}
+        self.assertEqual(requirements["claude_desktop_background_chat"]["status"], "gated")
+        self.assertEqual(
+            requirements["claude_desktop_background_chat"]["blocking_reason"],
+            "app_installed_not_running_connector_required",
+        )
+        self.assertNotIn("claude_cli_background_task", requirements)
+
+    def test_cli_forwards_agent_isolation_options(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--isolate-agent-app-scenarios",
+                    "--isolate-agent-cli-scenarios",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0]["isolate_agent_app_scenarios"])
+        self.assertTrue(calls[0]["isolate_agent_cli_scenarios"])
+
+    def test_runner_can_isolate_agent_app_and_cli_scenarios_per_agent(self):
+        app_calls = []
+        cli_calls = []
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            agent = kwargs["agents"][0]
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "safety_mode": "real_no_loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "passed_cases": 1,
+                    "failed_cases": 0,
+                    "native_ready_cases": 0,
+                    "cases": [
+                        {
+                            "agent": agent,
+                            "status": (
+                                "native_connector_ready"
+                                if agent == "codex app"
+                                else "unavailable"
+                            ),
+                            "real_verified": True,
+                            "native_ready": agent == "codex app",
+                        }
+                    ],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            cli_calls.append(dict(kwargs))
+            agent = kwargs["agents"][0]
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "safety_mode": "real_no_loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 1 if agent == "codex" else 0,
+                    "foreground_focus_stable": True,
+                    "foreground_no_steal_verified": True,
+                    "passed_cases": 1,
+                    "failed_cases": 0,
+                    "cases": [
+                        {
+                            "agent": agent,
+                            "status": (
+                                "verified"
+                                if agent == "codex"
+                                else "cli_auth_required"
+                            ),
+                            "real_verified": agent == "codex",
+                            "foreground_focus_stable": True,
+                        }
+                    ],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                run_primary_scenarios=False,
+                agent_apps=("codex app", "claude desktop"),
+                cli_agents=("codex", "claude"),
+                isolate_agent_app_scenarios=True,
+                isolate_agent_cli_scenarios=True,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(
+            [call["agents"] for call in app_calls],
+            [("codex app",), ("claude desktop",)],
+        )
+        self.assertEqual(
+            [call["agents"] for call in cli_calls],
+            [("codex",), ("claude",)],
+        )
+        self.assertEqual(
+            [item["stage_name"] for item in data["runner_stage_reports"] if item["status"] == "completed"],
+            [
+                "system_dialog_preflight",
+                "agent_app:codex app",
+                "agent_app:claude desktop",
+                "agent_cli:codex",
+                "agent_cli:claude",
+            ],
+        )
+        self.assertEqual(data["agent_command_attempts"], 1)
+        self.assertEqual(data["background_screenshot_count"], 2)
+        requirements = {item["requirement_id"]: item for item in data["requirements"]}
+        self.assertEqual(requirements["codex_cli_background_task"]["status"], "verified")
+        self.assertEqual(requirements["claude_cli_background_task"]["status"], "auth_required")
+        self.assertEqual(requirements["codex_app_background_chat"]["status"], "gated")
+        self.assertEqual(requirements["claude_desktop_background_chat"]["status"], "unavailable")
+
     def test_cli_forwards_agent_app_devtools_endpoint_timeouts(self):
         calls = []
 
@@ -2668,6 +3806,803 @@ class MajorRealNoLossTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(calls[0]["agent_app_devtools_endpoint_wait_timeout_sec"], 17.5)
         self.assertEqual(calls[0]["agent_app_devtools_request_timeout_sec"], 1.25)
+
+    def test_cli_forwards_existing_ide_extension_bridge_probe_options(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--probe-existing-ide-extension-bridge",
+                    "--ide-extension-bridge-url",
+                    "http://127.0.0.1:8787",
+                    "--ide-extension-agent-id",
+                    "cursor",
+                    "--ide-extension-request-timeout-sec",
+                    "0.35",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0]["probe_existing_ide_extension_bridge"])
+        self.assertEqual(calls[0]["ide_extension_bridge_url"], "http://127.0.0.1:8787")
+        self.assertEqual(calls[0]["ide_extension_agent_id"], "cursor")
+        self.assertEqual(calls[0]["ide_extension_request_timeout_sec"], 0.35)
+
+    def test_runner_can_verify_agent_app_bridge_fixture_smoke_without_window_input(self):
+        fixture_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _bridge_fixture_runner(**kwargs):
+            fixture_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-bridge-fixture-smoke",
+                    "safety_mode": "local_owned_devtools_fixture",
+                    "ok": True,
+                    "decision": "agent_app_bridge_fixture_smoke_verified",
+                    "desktop_control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_report": {
+                        "decision": "app_bridge_send_accepted",
+                        "native_call_attempts": 1,
+                        "window_input_attempts": 0,
+                        "keyboard_input_attempts": 0,
+                        "clipboard_write_attempts": 0,
+                    },
+                    "fixture": {
+                        "cdp_request_count": 2,
+                        "http_request_count": 2,
+                    },
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=(),
+                cli_agents=(),
+                run_agent_app_bridge_fixture_smoke=True,
+                agent_app_bridge_fixture_message="OPENWUKONG_FIXTURE_SMOKE",
+                agent_app_bridge_fixture_required_markers=("FIXTURE: PASS",),
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_app_bridge_fixture_smoke_runner=_bridge_fixture_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(fixture_calls[0]["message"], "OPENWUKONG_FIXTURE_SMOKE")
+        self.assertEqual(fixture_calls[0]["required_markers"], ("FIXTURE: PASS",))
+        self.assertTrue(data["agent_app_bridge_fixture_smoke_enabled"])
+        self.assertTrue(data["agent_app_bridge_fixture_smoke_ok"])
+        self.assertEqual(data["agent_app_bridge_fixture_native_call_attempts"], 1)
+        self.assertEqual(data["agent_app_bridge_fixture_control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertTrue(data["safe_run_ok"])
+        self.assertIn("agent_app_bridge_fixture_smoke", data["subreports"])
+
+    def test_agent_app_bridge_fixture_smoke_failure_fails_safe_gate(self):
+        report = _major_report(
+            primary={
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "external_communication_attempts": 0,
+                "owned_app_launch_attempts": 0,
+            },
+            app={
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 0,
+                "agent_command_attempts": 0,
+            },
+            bridge_fixture_smoke={
+                "enabled": True,
+                "ok": False,
+                "decision": "agent_app_bridge_fixture_smoke_failed",
+                "control_attempts": 0,
+                "desktop_control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_report": {"native_call_attempts": 0},
+            },
+            cli={
+                "foreground_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "agent_command_attempts": 0,
+            },
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["agent_app_bridge_fixture_smoke_ok"])
+        self.assertEqual(data["failed_runner_count"], 1)
+        self.assertFalse(data["safe_run_ok"])
+
+    def test_cli_forwards_agent_app_bridge_fixture_smoke_options(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--run-agent-app-bridge-fixture-smoke",
+                    "--agent-app-bridge-fixture-message",
+                    "OPENWUKONG_FIXTURE_SMOKE",
+                    "--agent-app-bridge-fixture-acceptance-marker",
+                    "FIXTURE: PASS",
+                    "--agent-app-bridge-fixture-forbid-marker",
+                    "FIXTURE: FAIL",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0]["run_agent_app_bridge_fixture_smoke"])
+        self.assertEqual(
+            calls[0]["agent_app_bridge_fixture_message"],
+            "OPENWUKONG_FIXTURE_SMOKE",
+        )
+        self.assertEqual(
+            calls[0]["agent_app_bridge_fixture_required_markers"],
+            ("FIXTURE: PASS",),
+        )
+        self.assertEqual(
+            calls[0]["agent_app_bridge_fixture_forbidden_markers"],
+            ("FIXTURE: FAIL",),
+        )
+
+    def test_runner_can_verify_agent_native_bridge_fixture_smoke_without_window_input(self):
+        fixture_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _native_fixture_runner(**kwargs):
+            fixture_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-native-bridge-fixture-smoke",
+                    "safety_mode": "local_owned_http_fixture",
+                    "ok": True,
+                    "decision": "agent_native_bridge_fixture_smoke_verified",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "native_call_attempts": 1,
+                    "send_report": {
+                        "decision": "agent_native_bridge_send_accepted",
+                        "native_call_attempts": 1,
+                        "window_input_attempts": 0,
+                        "keyboard_input_attempts": 0,
+                        "clipboard_write_attempts": 0,
+                        "dry_run_report": {
+                            "readback_action_ready": True,
+                        },
+                    },
+                    "fixture": {
+                        "capability_request_count": 1,
+                        "chat_request_count": 1,
+                    },
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=(),
+                cli_agents=(),
+                run_agent_native_bridge_fixture_smoke=True,
+                agent_native_bridge_fixture_message="OPENWUKONG_NATIVE_FIXTURE",
+                agent_native_bridge_fixture_required_markers=("NATIVE: PASS",),
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_native_bridge_fixture_smoke_runner=_native_fixture_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(fixture_calls[0]["message"], "OPENWUKONG_NATIVE_FIXTURE")
+        self.assertEqual(fixture_calls[0]["required_markers"], ("NATIVE: PASS",))
+        self.assertTrue(data["agent_native_bridge_fixture_smoke_enabled"])
+        self.assertTrue(data["agent_native_bridge_fixture_smoke_ok"])
+        self.assertEqual(data["agent_native_bridge_fixture_native_call_attempts"], 1)
+        self.assertEqual(data["agent_native_bridge_fixture_control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertTrue(data["safe_run_ok"])
+        self.assertIn("agent_native_bridge_fixture_smoke", data["subreports"])
+
+    def test_agent_native_bridge_fixture_smoke_failure_fails_safe_gate(self):
+        report = _major_report(
+            primary={
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "external_communication_attempts": 0,
+                "owned_app_launch_attempts": 0,
+            },
+            app={
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 0,
+                "agent_command_attempts": 0,
+            },
+            native_fixture_smoke={
+                "enabled": True,
+                "ok": False,
+                "decision": "agent_native_bridge_fixture_smoke_failed",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "native_call_attempts": 0,
+                "send_report": {"native_call_attempts": 0},
+            },
+            cli={
+                "foreground_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "agent_command_attempts": 0,
+            },
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["agent_native_bridge_fixture_smoke_ok"])
+        self.assertEqual(data["failed_runner_count"], 1)
+        self.assertFalse(data["safe_run_ok"])
+
+    def test_cli_forwards_agent_native_bridge_fixture_smoke_options(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--run-agent-native-bridge-fixture-smoke",
+                    "--agent-native-bridge-fixture-message",
+                    "OPENWUKONG_NATIVE_FIXTURE",
+                    "--agent-native-bridge-fixture-acceptance-marker",
+                    "NATIVE: PASS",
+                    "--agent-native-bridge-fixture-forbid-marker",
+                    "NATIVE: FAIL",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0]["run_agent_native_bridge_fixture_smoke"])
+        self.assertEqual(
+            calls[0]["agent_native_bridge_fixture_message"],
+            "OPENWUKONG_NATIVE_FIXTURE",
+        )
+        self.assertEqual(
+            calls[0]["agent_native_bridge_fixture_required_markers"],
+            ("NATIVE: PASS",),
+        )
+        self.assertEqual(
+            calls[0]["agent_native_bridge_fixture_forbidden_markers"],
+            ("NATIVE: FAIL",),
+        )
+
+    def test_runner_can_run_agent_native_fixture_scope_without_real_scenario_runners(self):
+        fixture_calls = []
+
+        def _primary_runner(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("primary scenarios must be skipped")
+
+        def _agent_app_runner(**kwargs):
+            del kwargs
+            raise AssertionError("agent app scenarios must be skipped")
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            raise AssertionError("agent cli scenarios must be skipped")
+
+        def _native_fixture_runner(**kwargs):
+            fixture_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-native-bridge-fixture-smoke",
+                    "safety_mode": "local_owned_http_fixture",
+                    "enabled": True,
+                    "ok": True,
+                    "decision": "agent_native_bridge_fixture_smoke_verified",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "native_call_attempts": 1,
+                    "send_report": {
+                        "native_call_attempts": 1,
+                        "window_input_attempts": 0,
+                        "keyboard_input_attempts": 0,
+                        "clipboard_write_attempts": 0,
+                    },
+                    "fixture": {
+                        "capability_request_count": 1,
+                        "chat_request_count": 1,
+                    },
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fixture-only"},
+                output_root=tmp,
+                run_primary_scenarios=False,
+                run_agent_app_scenarios=False,
+                run_agent_cli_scenarios=False,
+                run_agent_native_bridge_fixture_smoke=True,
+                agent_native_bridge_fixture_message="OPENWUKONG_NATIVE_FIXTURE",
+                agent_native_bridge_fixture_required_markers=("NATIVE: PASS",),
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+                agent_native_bridge_fixture_smoke_runner=_native_fixture_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(len(fixture_calls), 1)
+        self.assertTrue(data["scenario_scope"]["primary_scenarios_skipped"])
+        self.assertTrue(data["scenario_scope"]["agent_app_scenarios_skipped"])
+        self.assertTrue(data["scenario_scope"]["agent_cli_scenarios_skipped"])
+        self.assertEqual(data["requirements"], [])
+        self.assertEqual(data["unmet_requirements"], [])
+        self.assertEqual(data["failed_runner_count"], 0)
+        self.assertTrue(data["safe_run_ok"])
+        self.assertFalse(data["goal_complete"])
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(data["agent_native_bridge_fixture_native_call_attempts"], 1)
+
+    def test_cli_forwards_real_scenario_skip_options(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": True,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--skip-primary-scenarios",
+                    "--skip-agent-app-scenarios",
+                    "--skip-agent-cli-scenarios",
+                    "--run-agent-native-bridge-fixture-smoke",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertFalse(calls[0]["run_primary_scenarios"])
+        self.assertFalse(calls[0]["run_agent_app_scenarios"])
+        self.assertFalse(calls[0]["run_agent_cli_scenarios"])
+        self.assertTrue(calls[0]["run_agent_native_bridge_fixture_smoke"])
+
+    def test_cli_forwards_runner_timeout_option(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": True,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--runner-timeout-sec",
+                    "0.25",
+                    "--stop-on-runner-timeout",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(calls[0]["runner_timeout_sec"], 0.25)
+        self.assertTrue(calls[0]["stop_on_runner_timeout"])
+
+    def test_cli_force_exits_after_runner_timeout_report_is_written(self):
+        exits = []
+
+        def _fake_runner(**kwargs):
+            del kwargs
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": False,
+                    "goal_complete": False,
+                    "runner_timed_out": True,
+                    "runner_stage_failed": True,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        def _fake_exit(code):
+            exits.append(code)
+            raise SystemExit(code)
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ), patch.object(
+            major_real_no_loss,
+            "_force_exit_process",
+            _fake_exit,
+        ):
+            with self.assertRaises(SystemExit) as ctx:
+                major_real_no_loss.main(
+                    [
+                        "--json",
+                        "--runner-timeout-sec",
+                        "0.25",
+                    ]
+                )
+
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(exits, [1])
+
+    def test_runner_can_verify_wechat_native_bridge_fixture_smoke_without_window_input(self):
+        fixture_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _wechat_fixture_runner(**kwargs):
+            fixture_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "wechat-native-bridge-fixture-smoke",
+                    "safety_mode": "local_owned_wechat_native_bridge_fixture",
+                    "ok": True,
+                    "decision": "wechat_native_bridge_fixture_smoke_verified",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "native_call_attempts": 1,
+                    "send_attempts": 1,
+                    "send_report": {
+                        "decision": "wechat_native_bridge_send_accepted",
+                        "native_call_attempts": 1,
+                        "window_input_attempts": 0,
+                        "keyboard_input_attempts": 0,
+                        "clipboard_write_attempts": 0,
+                    },
+                    "fixture": {
+                        "capability_request_count": 1,
+                        "send_request_count": 1,
+                    },
+                    "registry": {
+                        "registered": True,
+                        "discovered_urls": ["http://127.0.0.1:18888"],
+                    },
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=(),
+                cli_agents=(),
+                run_wechat_native_bridge_fixture_smoke=True,
+                wechat_native_bridge_fixture_message="OPENWUKONG_WECHAT_FIXTURE",
+                wechat_native_bridge_fixture_required_markers=("WECHAT: PASS",),
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                wechat_native_bridge_fixture_smoke_runner=_wechat_fixture_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(fixture_calls[0]["message"], "OPENWUKONG_WECHAT_FIXTURE")
+        self.assertEqual(fixture_calls[0]["required_markers"], ("WECHAT: PASS",))
+        self.assertTrue(data["wechat_native_bridge_fixture_smoke_enabled"])
+        self.assertTrue(data["wechat_native_bridge_fixture_smoke_ok"])
+        self.assertEqual(data["wechat_native_bridge_fixture_native_call_attempts"], 1)
+        self.assertEqual(data["wechat_native_bridge_fixture_control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertTrue(data["safe_run_ok"])
+        self.assertIn("wechat_native_bridge_fixture_smoke", data["subreports"])
+
+    def test_wechat_native_bridge_fixture_smoke_failure_fails_safe_gate(self):
+        report = _major_report(
+            primary={
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "external_communication_attempts": 0,
+                "owned_app_launch_attempts": 0,
+            },
+            app={
+                "background_screenshot_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 0,
+                "agent_command_attempts": 0,
+            },
+            wechat_fixture_smoke={
+                "enabled": True,
+                "ok": False,
+                "decision": "wechat_native_bridge_fixture_smoke_failed",
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "native_call_attempts": 0,
+                "send_report": {"native_call_attempts": 0},
+            },
+            cli={
+                "foreground_focus_stable": True,
+                "failed_cases": 0,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "agent_command_attempts": 0,
+            },
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["wechat_native_bridge_fixture_smoke_ok"])
+        self.assertEqual(data["failed_runner_count"], 1)
+        self.assertFalse(data["safe_run_ok"])
+
+    def test_cli_forwards_wechat_native_bridge_fixture_smoke_options(self):
+        calls = []
+
+        def _fake_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeMainReport(
+                {
+                    "mode": "major-scenario-real-no-loss",
+                    "safe_run_ok": True,
+                    "goal_complete": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "requirements": [],
+                }
+            )
+
+        with patch.object(
+            major_real_no_loss,
+            "run_major_scenario_real_no_loss",
+            _fake_runner,
+        ):
+            code = major_real_no_loss.main(
+                [
+                    "--json",
+                    "--run-wechat-native-bridge-fixture-smoke",
+                    "--wechat-native-bridge-fixture-message",
+                    "OPENWUKONG_WECHAT_FIXTURE",
+                    "--wechat-native-bridge-fixture-acceptance-marker",
+                    "WECHAT: PASS",
+                    "--wechat-native-bridge-fixture-forbid-marker",
+                    "WECHAT: FAIL",
+                ]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertTrue(calls[0]["run_wechat_native_bridge_fixture_smoke"])
+        self.assertEqual(
+            calls[0]["wechat_native_bridge_fixture_message"],
+            "OPENWUKONG_WECHAT_FIXTURE",
+        )
+        self.assertEqual(
+            calls[0]["wechat_native_bridge_fixture_required_markers"],
+            ("WECHAT: PASS",),
+        )
+        self.assertEqual(
+            calls[0]["wechat_native_bridge_fixture_forbidden_markers"],
+            ("WECHAT: FAIL",),
+        )
 
     def test_runner_passes_uia_semantic_options_and_marks_app_requirement_verified(self):
         app_calls = []
@@ -2980,6 +4915,74 @@ class MajorRealNoLossTests(unittest.TestCase):
             "wechat_native_bridge_dry_run_ready",
         )
 
+    def test_runner_passes_wechat_native_bridge_registry_paths_to_primary_runner(self):
+        primary_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            primary_calls.append({"fixture": fixture, "kwargs": dict(kwargs)})
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "wechat-native-bridges.json"
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=(),
+                cli_agents=(),
+                wechat_native_bridge_registry_paths=(registry_path,),
+                primary_runner=_primary_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(
+            primary_calls[0]["kwargs"]["wechat_native_bridge_registry_paths"],
+            (registry_path,),
+        )
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+
     def test_runner_prepares_owned_ide_bridge_and_forwards_endpoint_to_agent_app(self):
         app_calls = []
         helper_calls = []
@@ -3099,6 +5102,197 @@ class MajorRealNoLossTests(unittest.TestCase):
         )
         requirements = {item["requirement_id"]: item for item in data["requirements"]}
         self.assertEqual(requirements["cursor_background_chat"]["status"], "verified")
+
+    def test_runner_probes_existing_ide_extension_bridge_and_forwards_ready_endpoint(self):
+        app_calls = []
+        readiness_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _ide_extension_readiness_runner(**kwargs):
+            readiness_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "ide-extension-bridge-readiness",
+                    "safety_mode": "read_only",
+                    "status": "ready",
+                    "blocking_reason": "",
+                    "bridge_url": "http://127.0.0.1:8787",
+                    "agent_id": "cursor",
+                    "bridge_ready": True,
+                    "can_write_without_focus": True,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "passed_cases": 1,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("cursor",),
+                cli_agents=(),
+                project_name="openwukong",
+                workspace_path="E:/ideaProjects/agent/openwukong",
+                probe_existing_ide_extension_bridge=True,
+                ide_extension_bridge_url="http://127.0.0.1:8787",
+                ide_extension_agent_id="cursor",
+                ide_extension_request_timeout_sec=0.25,
+                primary_runner=_primary_runner,
+                ide_extension_readiness_runner=_ide_extension_readiness_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+            artifact = json.loads(Path(data["artifact_path"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(readiness_calls[0]["bridge_url"], "http://127.0.0.1:8787")
+        self.assertEqual(readiness_calls[0]["agent_id"], "cursor")
+        self.assertEqual(
+            readiness_calls[0]["workspace_path"],
+            "E:/ideaProjects/agent/openwukong",
+        )
+        self.assertEqual(app_calls[0]["ide_bridge_urls"], ("http://127.0.0.1:8787",))
+        self.assertEqual(data["ide_extension_readiness"]["status"], "ready")
+        self.assertEqual(
+            artifact["subreports"]["ide_extension_readiness"]["bridge_url"],
+            "http://127.0.0.1:8787",
+        )
+
+    def test_runner_records_unavailable_existing_ide_extension_bridge_without_forwarding(self):
+        app_calls = []
+
+        def _primary_runner(fixture, **kwargs):
+            del fixture, kwargs
+            return _FakeReport(
+                {
+                    "mode": "primary-scenario-real-no-loss",
+                    "control_attempts": 0,
+                    "external_communication_attempts": 0,
+                    "window_input_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _ide_extension_readiness_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "ide-extension-bridge-readiness",
+                    "safety_mode": "read_only",
+                    "status": "bridge_unavailable",
+                    "blocking_reason": "bridge_endpoint_unavailable",
+                    "bridge_url": "http://127.0.0.1:8787",
+                    "agent_id": "cursor",
+                    "bridge_ready": False,
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                }
+            )
+
+        def _agent_app_runner(**kwargs):
+            app_calls.append(dict(kwargs))
+            return _FakeReport(
+                {
+                    "mode": "agent-app-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "bridge_send_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "background_screenshot_count": 0,
+                    "background_screenshot_success_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "passed_cases": 1,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        def _agent_cli_runner(**kwargs):
+            del kwargs
+            return _FakeReport(
+                {
+                    "mode": "agent-cli-real-no-loss",
+                    "control_attempts": 0,
+                    "window_input_attempts": 0,
+                    "agent_command_attempts": 0,
+                    "failed_cases": 0,
+                    "cases": [],
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_major_scenario_real_no_loss(
+                fixture={"suite": "fake-major"},
+                output_root=tmp,
+                agent_apps=("cursor",),
+                cli_agents=(),
+                probe_existing_ide_extension_bridge=True,
+                ide_extension_bridge_url="http://127.0.0.1:8787",
+                primary_runner=_primary_runner,
+                ide_extension_readiness_runner=_ide_extension_readiness_runner,
+                agent_app_runner=_agent_app_runner,
+                agent_cli_runner=_agent_cli_runner,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(app_calls[0]["ide_bridge_urls"], ())
+        self.assertEqual(
+            data["ide_extension_readiness"]["blocking_reason"],
+            "bridge_endpoint_unavailable",
+        )
+        self.assertEqual(data["control_attempts"], 0)
 
     def test_prepare_owned_ide_bridge_helper_validates_adapter_with_injected_safe_steps(self):
         calls = {
@@ -3222,6 +5416,124 @@ class MajorRealNoLossTests(unittest.TestCase):
             settings["openwukong.bridge.chatAdapters"]["cursor"]["commandId"],
             "composer.startComposerPrompt",
         )
+
+    def test_prepare_owned_ide_bridge_helper_uses_dynamic_launch_readiness_url(self):
+        calls = {
+            "execute": [],
+            "capture": [],
+            "probe": [],
+            "settings": [],
+        }
+
+        def _execute_plan(plan, **kwargs):
+            calls["execute"].append({"plan": plan.to_dict(), "kwargs": dict(kwargs)})
+            return _FakeReport(
+                {
+                    "mode": "session-readiness-execution",
+                    "safety_mode": "isolated_helper_launch",
+                    "control_attempts": 0,
+                    "launch_attempts": 1,
+                    "manifest_path": kwargs["manifest_path"],
+                    "results": [
+                        {
+                            "status": "started",
+                            "pid": 4242,
+                            "readiness_url": "http://127.0.0.1:19641",
+                        }
+                    ],
+                }
+            )
+
+        def _capture(bridge_url, **kwargs):
+            calls["capture"].append({"bridge_url": bridge_url, "kwargs": dict(kwargs)})
+            return _FakeReport(
+                {
+                    "mode": "ide-bridge-capability-capture",
+                    "ok": True,
+                    "bridge_url": bridge_url,
+                    "active_mapping": {
+                        "cursor": {
+                            "available": len(calls["capture"]) > 1,
+                            "commandId": "composer.startComposerPrompt"
+                            if len(calls["capture"]) > 1
+                            else "",
+                            "commandCandidates": ["composer.startComposerPrompt"],
+                        }
+                    },
+                    "adapter_mapping": {
+                        "cursor": {
+                            "available": len(calls["capture"]) > 1,
+                            "commandId": "composer.startComposerPrompt"
+                            if len(calls["capture"]) > 1
+                            else "",
+                            "commandCandidates": ["composer.startComposerPrompt"],
+                        }
+                    },
+                    "cursor_review_candidates": ["composer.startComposerPrompt"],
+                }
+            )
+
+        def _probe(bridge_url, **kwargs):
+            calls["probe"].append({"bridge_url": bridge_url, "kwargs": dict(kwargs)})
+            return _FakeReport(
+                {
+                    "mode": "ide-bridge-contract-probe",
+                    "control_attempts": 3,
+                    "validated_mapping": {
+                        "cursor": {
+                            "label": "cursor",
+                            "commandId": "composer.startComposerPrompt",
+                            "commandCandidates": ["composer.startComposerPrompt"],
+                            "available": True,
+                        }
+                    },
+                }
+            )
+
+        def _settings_builder(report, **kwargs):
+            calls["settings"].append({"report": dict(report), "kwargs": dict(kwargs)})
+            return {
+                "openwukong.bridge.autoStart": True,
+                "openwukong.bridge.host": kwargs["host"],
+                "openwukong.bridge.port": kwargs["port"],
+                "openwukong.bridge.allowedCommands": ["composer.startComposerPrompt"],
+                "openwukong.bridge.chatAdapters": {
+                    "cursor": {
+                        "label": "cursor",
+                        "commandId": "composer.startComposerPrompt",
+                        "commandCandidates": ["composer.startComposerPrompt"],
+                    }
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = prepare_owned_ide_bridge_helper(
+                output_root=Path(tmp) / "owned-ide",
+                project_name="openwukong",
+                ide_executable="cursor.exe",
+                ide_bridge_port=0,
+                adapter_id="cursor",
+                plan_executor=_execute_plan,
+                capability_capture=_capture,
+                command_contract_probe=_probe,
+                bridge_settings_builder=_settings_builder,
+            )
+            data = report.to_dict()
+            settings = json.loads(Path(data["settings_path"]).read_text(encoding="utf-8"))
+
+        self.assertTrue(data["ready"])
+        self.assertEqual(data["bridge_url"], "http://127.0.0.1:19641")
+        self.assertEqual(calls["capture"][0]["bridge_url"], "http://127.0.0.1:19641")
+        self.assertEqual(calls["probe"][0]["bridge_url"], "http://127.0.0.1:19641")
+        self.assertEqual(calls["settings"][0]["kwargs"]["port"], 0)
+        self.assertEqual(
+            calls["execute"][0]["plan"]["actions"][0]["settings_preview"][
+                "openwukong.bridge.port"
+            ],
+            0,
+        )
+        self.assertEqual(data["pre_probe_settings"]["openwukong.bridge.port"], 0)
+        self.assertEqual(settings["openwukong.bridge.port"], 0)
 
 
 if __name__ == "__main__":

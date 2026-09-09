@@ -104,6 +104,21 @@ class UniversalAppProfileTests(unittest.TestCase):
         self.assertEqual(profiles["excel.exe"]["recommended_route"], "office-object-model-or-addin")
         self.assertEqual(profiles["pwsh.exe"]["recommended_route"], "terminal-native-session")
 
+    def test_profile_marks_process_only_claude_as_native_required_not_unknown_blocked(self):
+        report = profile_applications(
+            (
+                _window("claude.exe", "claude.exe", []),
+            )
+        )
+
+        profile = report.to_dict()["windows"][0]
+
+        self.assertEqual(profile["app_family"], "agent-app")
+        self.assertEqual(profile["recommended_route"], "app-native-bridge-required")
+        self.assertEqual(profile["one_step_status"], "foreground_or_native_required")
+        self.assertTrue(profile["foreground_required"])
+        self.assertFalse(profile["blocked"])
+
     def test_cli_outputs_profile_json_from_static_observer(self):
         observer = StaticAccessibilityObserver([
             _window(

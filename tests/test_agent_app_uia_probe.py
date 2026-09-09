@@ -221,6 +221,41 @@ class AgentAppUiaProbeTests(unittest.TestCase):
         self.assertEqual(data["selected_transport"]["transport_id"], "cursor-desktop-shell")
         self.assertEqual(data["control_attempts"], 0)
 
+    def test_claude_desktop_process_name_without_exe_matches_window(self):
+        observer = StaticAccessibilityObserver(
+            [
+                AccessibilityWindowSnapshot(
+                    pid=60124,
+                    process_name="claude",
+                    window_title="Claude",
+                    elements=(
+                        AccessibilityElementSnapshot(
+                            control_type="Document",
+                            name="Claude",
+                            automation_id="RootWebArea",
+                            rect=(0, 0, 1200, 900),
+                            patterns=("Text",),
+                        ),
+                    ),
+                )
+            ]
+        )
+
+        report = run_agent_app_uia_probe(
+            agent="claude desktop",
+            observer=observer,
+            resolver=_resolver_with_claude_desktop(),
+        )
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["agent_id"], "claude")
+        self.assertEqual(data["selected_transport"]["transport_id"], "claude-desktop-shell")
+        self.assertEqual(data["matched_window_count"], 1)
+        self.assertEqual(data["matched_windows"][0]["process_name"], "claude")
+        self.assertEqual(data["decision"], "agent_app_uia_target_visible_input_not_found")
+        self.assertEqual(data["control_attempts"], 0)
+
     def test_text_match_distinguishes_accessible_tree_from_visible_root_bounds(self):
         observer = StaticAccessibilityObserver(
             [
@@ -306,6 +341,63 @@ class AgentAppUiaProbeTests(unittest.TestCase):
         self.assertEqual(data["background_screenshots"][0]["hwnd"], 7001)
         self.assertTrue(data["background_screenshots"][0]["ok"])
         self.assertFalse(data["background_screenshots"][0]["foreground_changed"])
+
+    def test_external_focus_change_during_background_capture_is_not_focus_risk(self):
+        class ExternalFocusChangeCaptureProvider(FakeBackgroundCaptureProvider):
+            def capture_window(self, hwnd: int, output_path: Path) -> BackgroundWindowCaptureReport:
+                result = super().capture_window(hwnd, output_path)
+                return BackgroundWindowCaptureReport(
+                    hwnd=result.hwnd,
+                    output_path=result.output_path,
+                    ok=result.ok,
+                    mode=result.mode,
+                    width=result.width,
+                    height=result.height,
+                    foreground_hwnd_before=9001,
+                    foreground_hwnd_after=9002,
+                )
+
+        observer = StaticAccessibilityObserver(
+            [
+                AccessibilityWindowSnapshot(
+                    pid=84,
+                    process_name="Codex.exe",
+                    window_title="Codex",
+                    hwnd=7001,
+                    elements=(
+                        AccessibilityElementSnapshot(
+                            control_type="Text",
+                            name="openwukong",
+                            rect=(10, 10, 300, 40),
+                            patterns=("Text",),
+                        ),
+                        AccessibilityElementSnapshot(
+                            control_type="Edit",
+                            name="Ask Codex",
+                            rect=(300, 800, 1000, 880),
+                            is_enabled=True,
+                            patterns=("Value",),
+                        ),
+                    ),
+                )
+            ]
+        )
+        capture = ExternalFocusChangeCaptureProvider()
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_app_uia_probe(
+                agent="codex app",
+                project_name="openwukong",
+                observer=observer,
+                resolver=_resolver_with_codex_desktop(),
+                screenshot_dir=Path(td),
+                window_capture_provider=capture,
+            )
+            data = report.to_dict()
+
+        self.assertTrue(data["background_screenshots"][0]["foreground_changed"])
+        self.assertFalse(data["background_screenshots"][0]["foreground_focus_risk"])
+        self.assertTrue(data["background_screenshot_focus_stable"])
 
     def test_main_can_replay_accessibility_json(self):
         payload = {
@@ -448,6 +540,28 @@ def _resolver_with_cursor_desktop():
                         executable_name="Cursor.exe",
                         path="C:/Users/me/AppData/Local/Programs/cursor/Cursor.exe",
                         pid=99,
+                    ),
+                ]
+            ),
+        )
+    )
+
+
+def _resolver_with_claude_desktop():
+    return WindowsAppResolver(
+        candidate_providers=(
+            StaticAppCandidateProvider(
+                [
+                    AppResolutionCandidate(
+                        source="running-process",
+                        display_name="Claude",
+                        process_name="claude.exe",
+                        executable_name="claude.exe",
+                        path=(
+                            "C:/Program Files/WindowsApps/"
+                            "Claude_1.9659.4.0_x64__pzs8sxrjxfjjc/app/claude.exe"
+                        ),
+                        pid=53448,
                     ),
                 ]
             ),

@@ -81,6 +81,7 @@ def run_browser_devtools_health(
     window_title: str = "",
     resource_url: str = "",
     devtools_client: BrowserDevToolsClient | None = None,
+    identity_timeout_sec: float = 0.0,
 ) -> BrowserDevToolsHealthReport:
     started = time.perf_counter()
     active_client = devtools_client or BrowserDevToolsClient()
@@ -116,10 +117,12 @@ def run_browser_devtools_health(
         )
 
     try:
-        result = active_client.evaluate(
+        identity = _evaluate_page_identity_with_retry(
+            active_client,
             debugger,
             target,
-            _READ_ONLY_PAGE_IDENTITY_EXPRESSION,
+            resource_url=resource_url,
+            timeout_sec=identity_timeout_sec,
         )
     except Exception as exc:
         return BrowserDevToolsHealthReport(
@@ -134,9 +137,19 @@ def run_browser_devtools_health(
             elapsed_ms=(time.perf_counter() - started) * 1000,
         )
 
-    identity = result.get("value") if isinstance(result, dict) else {}
-    if not isinstance(identity, dict):
-        identity = {}
+    if resource_url and _normalize_url(str(identity.get("href", "") or "")) != _normalize_url(resource_url):
+        return BrowserDevToolsHealthReport(
+            debugger_url=debugger,
+            ok=False,
+            endpoint_ready=True,
+            target_matched=True,
+            evaluated_read_only=True,
+            target=target,
+            page_identity=identity,
+            target_count=len(targets),
+            error="devtools_page_identity_mismatch",
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
     return BrowserDevToolsHealthReport(
         debugger_url=debugger,
         ok=True,
@@ -148,6 +161,33 @@ def run_browser_devtools_health(
         target_count=len(targets),
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
+
+
+def _evaluate_page_identity_with_retry(
+    client: BrowserDevToolsClient,
+    debugger_url: str,
+    target: BrowserDevToolsTarget,
+    *,
+    resource_url: str,
+    timeout_sec: float,
+) -> dict:
+    deadline = time.perf_counter() + max(0.0, float(timeout_sec or 0.0))
+    while True:
+        result = client.evaluate(
+            debugger_url,
+            target,
+            _READ_ONLY_PAGE_IDENTITY_EXPRESSION,
+        )
+        identity = result.get("value") if isinstance(result, dict) else {}
+        if not isinstance(identity, dict):
+            identity = {}
+        if not resource_url:
+            return identity
+        if _normalize_url(str(identity.get("href", "") or "")) == _normalize_url(resource_url):
+            return identity
+        if time.perf_counter() >= deadline:
+            return identity
+        time.sleep(0.1)
 
 
 def main(

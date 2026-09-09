@@ -16,6 +16,15 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from openwukong.control.trajectory import (
+    ControlTrajectoryRecorder,
+    build_trajectory_artifact,
+    extract_trajectory_artifacts,
+)
+from openwukong.control.computer_use_transport import build_computer_use_runtime_probe
+from openwukong.control.desktop_system_dialog import (
+    run_desktop_system_dialog_preflight,
+)
 from openwukong.control.session_readiness_plan import (
     SessionReadinessLauncher,
     SessionReadinessTerminator,
@@ -24,6 +33,9 @@ from openwukong.control.wechat_native_bridge import (
     WeChatNativeBridgeDryRunAdapter,
     WeChatNativeBridgeSenderAdapter,
     build_wechat_native_bridge_request,
+)
+from openwukong.control.wechat_native_bridge_registry import (
+    discover_wechat_native_bridge_urls,
 )
 from openwukong.control.wechat_uia_action import (
     WeChatUiaSemanticActionDryRunAdapter,
@@ -41,6 +53,9 @@ from openwukong.evaluation.primary_scenario_smoke import (
     OwnedBrowserHelperReadinessProbe,
     run_primary_scenario_smoke,
 )
+from openwukong.evaluation.primary_transport_matrix import (
+    build_primary_transport_matrix,
+)
 from openwukong.evaluation.simulation import (
     L1SimulationHarness,
     load_simulation_fixture,
@@ -55,6 +70,8 @@ from openwukong.evaluation.window_capture import (
 IDEBridgeProbe = Callable[[str], dict]
 WordBackgroundProbeRunner = Callable[..., object]
 BrowserExecutableResolver = Callable[[str], str]
+ComputerUseProbeRunner = Callable[[], object]
+SystemDialogPreflightRunner = Callable[[], object]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -126,6 +143,7 @@ class PrimaryRealNoLossReport:
     suite: str
     output_root: str
     cases: tuple[PrimaryRealNoLossCase, ...]
+    system_dialog_preflight_report: dict = dataclasses.field(default_factory=dict)
     elapsed_ms: float = 0.0
 
     @property
@@ -142,7 +160,7 @@ class PrimaryRealNoLossReport:
 
     @property
     def control_attempts(self) -> int:
-        return 0
+        return _counter(self.system_dialog_preflight_report, "control_attempts")
 
     @property
     def external_communication_attempts(self) -> int:
@@ -150,7 +168,10 @@ class PrimaryRealNoLossReport:
 
     @property
     def window_input_attempts(self) -> int:
-        return sum(case.window_input_attempts for case in self.cases)
+        return _counter(
+            self.system_dialog_preflight_report,
+            "window_input_attempts",
+        ) + sum(case.window_input_attempts for case in self.cases)
 
     @property
     def uia_semantic_action_ready_cases(self) -> int:
@@ -201,6 +222,28 @@ class PrimaryRealNoLossReport:
         )
 
     @property
+    def computer_use_read_only_cases(self) -> int:
+        return sum(
+            1
+            for case in self.cases
+            if bool(case.details.get("computer_use_read_only_ready", False))
+        )
+
+    @property
+    def computer_use_attempts(self) -> int:
+        return sum(
+            _counter(case.details.get("computer_use_probe", {}), "computer_use_attempts")
+            for case in self.cases
+        )
+
+    @property
+    def computer_use_window_input_attempts(self) -> int:
+        return sum(
+            _counter(case.details.get("computer_use_probe", {}), "window_input_attempts")
+            for case in self.cases
+        )
+
+    @property
     def real_user_filesystem_scan_attempts(self) -> int:
         return sum(case.real_user_filesystem_scan_attempts for case in self.cases)
 
@@ -226,7 +269,7 @@ class PrimaryRealNoLossReport:
 
     @property
     def total_cases(self) -> int:
-        return len(self.cases)
+        return len(self.cases) + (1 if self.system_dialog_preflight_failed else 0)
 
     @property
     def passed_cases(self) -> int:
@@ -234,11 +277,21 @@ class PrimaryRealNoLossReport:
 
     @property
     def failed_cases(self) -> int:
-        return self.total_cases - self.passed_cases
+        return (len(self.cases) - self.passed_cases) + (
+            1 if self.system_dialog_preflight_failed else 0
+        )
 
     @property
     def real_verified_cases(self) -> int:
         return sum(1 for case in self.cases if case.real_verified)
+
+    @property
+    def transport_matrix(self) -> dict:
+        return build_primary_transport_matrix(self.cases).to_dict()
+
+    @property
+    def system_dialog_preflight_failed(self) -> bool:
+        return _system_dialog_preflight_failed(self.system_dialog_preflight_report)
 
     def to_dict(self) -> dict:
         return {
@@ -252,17 +305,23 @@ class PrimaryRealNoLossReport:
             "uia_semantic_action_ready_cases": self.uia_semantic_action_ready_cases,
             "uia_value_set_attempts": self.uia_value_set_attempts,
             "uia_invoke_attempts": self.uia_invoke_attempts,
+            "computer_use_read_only_cases": self.computer_use_read_only_cases,
+            "computer_use_attempts": self.computer_use_attempts,
+            "computer_use_window_input_attempts": self.computer_use_window_input_attempts,
             "real_user_filesystem_scan_attempts": self.real_user_filesystem_scan_attempts,
             "user_file_modification_attempts": self.user_file_modification_attempts,
             "owned_app_launch_attempts": self.owned_app_launch_attempts,
             "background_screenshot_count": self.background_screenshot_count,
             "background_screenshot_success_count": self.background_screenshot_success_count,
             "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
+            "system_dialog_preflight_failed": self.system_dialog_preflight_failed,
+            "system_dialog_preflight": dict(self.system_dialog_preflight_report),
             "output_root": self.output_root,
             "total_cases": self.total_cases,
             "passed_cases": self.passed_cases,
             "failed_cases": self.failed_cases,
             "real_verified_cases": self.real_verified_cases,
+            "transport_matrix": self.transport_matrix,
             "cases": [case.to_dict() for case in self.cases],
             "elapsed_ms": round(self.elapsed_ms, 3),
         }
@@ -278,13 +337,13 @@ def run_primary_real_no_loss(
     owned_browser_helper_terminator: SessionReadinessTerminator | None = None,
     owned_browser_helper_readiness_probe: OwnedBrowserHelperReadinessProbe | None = None,
     owned_browser_helper_action_runner: OwnedBrowserHelperActionRunner | None = None,
-    owned_browser_debug_port: int = 9238,
+    owned_browser_debug_port: int = 0,
     owned_browser_executable: str = "chrome.exe",
     owned_browser_url: str = "",
     browser_executable_resolver: BrowserExecutableResolver | None = None,
     accessibility_observer: object | None = None,
     wechat_win32_observer: object | None = None,
-    ide_bridge_urls: tuple[str, ...] = ("http://127.0.0.1:8787",),
+    ide_bridge_urls: tuple[str, ...] = (),
     ide_bridge_probe: IDEBridgeProbe | None = None,
     word_background_probe_runner: WordBackgroundProbeRunner | None = None,
     background_screenshot_dir: str | Path = "",
@@ -295,23 +354,55 @@ def run_primary_real_no_loss(
     wechat_uia_forbidden_markers: tuple[str, ...] = (),
     wechat_uia_sender: object | None = None,
     wechat_native_bridge_urls: tuple[str, ...] = (),
+    wechat_native_bridge_registry_paths: tuple[str | Path, ...] = (),
     allow_wechat_native_bridge_send: bool = False,
     wechat_native_bridge_message: str = "OPENWUKONG_WECHAT_NATIVE_BRIDGE_SEND",
     wechat_native_bridge_required_markers: tuple[str, ...] = (),
     wechat_native_bridge_forbidden_markers: tuple[str, ...] = (),
     wechat_native_bridge_dry_run_adapter: object | None = None,
     wechat_native_bridge_sender: object | None = None,
+    computer_use_probe_runner: ComputerUseProbeRunner | None = None,
+    system_dialog_preflight_runner: SystemDialogPreflightRunner | None = None,
 ) -> PrimaryRealNoLossReport:
     started = time.perf_counter()
     root = _resolve_output_root(output_root)
     root.mkdir(parents=True, exist_ok=True)
+    progress_events: list[dict] = []
+    _record_primary_progress(progress_events, root, "system_dialog_preflight", "started")
+    system_dialog_preflight = _report_to_dict(
+        (system_dialog_preflight_runner or run_desktop_system_dialog_preflight)()
+    )
+    _record_primary_progress(
+        progress_events,
+        root,
+        "system_dialog_preflight",
+        "completed",
+        decision=str(system_dialog_preflight.get("decision", "") or ""),
+    )
+    if _system_dialog_preflight_failed(system_dialog_preflight):
+        return PrimaryRealNoLossReport(
+            suite=_fixture_suite_name(fixture),
+            output_root=str(root),
+            cases=(),
+            system_dialog_preflight_report=system_dialog_preflight,
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
 
     active_harness = harness or L1SimulationHarness()
+    _record_primary_progress(progress_events, root, "l1_replay", "started")
     l1_report = active_harness.run_suite(fixture)
     plans = [
         _plan_row(result.to_dict())
         for result in l1_report.results
     ]
+    _record_primary_progress(
+        progress_events,
+        root,
+        "l1_replay",
+        "completed",
+        case_count=len(plans),
+    )
+    _record_primary_progress(progress_events, root, "browser_smoke_cases", "started")
     browser_smoke_cases = _browser_smoke_cases(
         fixture,
         output_root=root,
@@ -327,10 +418,41 @@ def run_primary_real_no_loss(
         ),
         owned_browser_url=owned_browser_url,
     )
+    _record_primary_progress(
+        progress_events,
+        root,
+        "browser_smoke_cases",
+        "completed",
+        case_count=len(browser_smoke_cases),
+    )
+    _record_primary_progress(
+        progress_events,
+        root,
+        "wechat_native_bridge_discovery",
+        "started",
+    )
+    effective_wechat_native_bridge_urls = discover_wechat_native_bridge_urls(
+        tuple(wechat_native_bridge_urls or ()),
+        registry_paths=tuple(wechat_native_bridge_registry_paths or ()),
+    )
+    _record_primary_progress(
+        progress_events,
+        root,
+        "wechat_native_bridge_discovery",
+        "completed",
+        bridge_url_count=len(effective_wechat_native_bridge_urls),
+    )
 
     cases: list[PrimaryRealNoLossCase] = []
     for row in plans:
         scenario_id = str(row["plan"].get("scenario_id", "") or "")
+        _record_primary_progress(
+            progress_events,
+            root,
+            scenario_id or "unknown_scenario",
+            "started",
+            case_id=str(row.get("case_id", "") or ""),
+        )
         if scenario_id == "browser.research.collect_sources":
             case = _browser_case(row, root, browser_smoke_cases)
         elif scenario_id == "wechat.chat.draft_reply":
@@ -346,13 +468,14 @@ def run_primary_real_no_loss(
                 tuple(wechat_uia_required_markers or ()),
                 tuple(wechat_uia_forbidden_markers or ()),
                 wechat_uia_sender,
-                tuple(wechat_native_bridge_urls or ()),
+                effective_wechat_native_bridge_urls,
                 allow_wechat_native_bridge_send,
                 wechat_native_bridge_message,
                 tuple(wechat_native_bridge_required_markers or ()),
                 tuple(wechat_native_bridge_forbidden_markers or ()),
                 wechat_native_bridge_dry_run_adapter,
                 wechat_native_bridge_sender,
+                computer_use_probe_runner,
             )
         elif scenario_id == "files.search.find_candidate":
             case = _file_case(row, root)
@@ -363,11 +486,22 @@ def run_primary_real_no_loss(
         else:
             case = _generic_unavailable_case(row, root)
         cases.append(_write_case_artifact(root, case))
+        _record_primary_progress(
+            progress_events,
+            root,
+            scenario_id or "unknown_scenario",
+            "completed",
+            case_id=case.case_id,
+            case_status=case.status,
+            real_verified=case.real_verified,
+        )
 
+    _record_primary_progress(progress_events, root, "primary_report", "completed")
     return PrimaryRealNoLossReport(
         suite=str(l1_report.suite),
         output_root=str(root),
         cases=tuple(cases),
+        system_dialog_preflight_report=system_dialog_preflight,
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
 
@@ -429,6 +563,7 @@ def _first_existing_executable_from_resolution(resolution: object) -> str:
 
 
 def summarize_report(report: PrimaryRealNoLossReport) -> dict:
+    transport_matrix = report.transport_matrix
     return {
         "mode": "primary-scenario-real-no-loss-summary",
         "suite": report.suite,
@@ -440,16 +575,22 @@ def summarize_report(report: PrimaryRealNoLossReport) -> dict:
         "uia_semantic_action_ready_cases": report.uia_semantic_action_ready_cases,
         "uia_value_set_attempts": report.uia_value_set_attempts,
         "uia_invoke_attempts": report.uia_invoke_attempts,
+        "computer_use_read_only_cases": report.computer_use_read_only_cases,
+        "computer_use_attempts": report.computer_use_attempts,
+        "computer_use_window_input_attempts": report.computer_use_window_input_attempts,
         "real_user_filesystem_scan_attempts": report.real_user_filesystem_scan_attempts,
         "user_file_modification_attempts": report.user_file_modification_attempts,
         "owned_app_launch_attempts": report.owned_app_launch_attempts,
         "background_screenshot_count": report.background_screenshot_count,
         "background_screenshot_success_count": report.background_screenshot_success_count,
         "background_screenshot_focus_stable": report.background_screenshot_focus_stable,
+        "system_dialog_preflight_failed": report.system_dialog_preflight_failed,
+        "system_dialog_preflight": dict(report.system_dialog_preflight_report),
         "total_cases": report.total_cases,
         "passed_cases": report.passed_cases,
         "failed_cases": report.failed_cases,
         "real_verified_cases": report.real_verified_cases,
+        "transport_matrix_summary": transport_matrix["summary"],
         "scenarios": [
             case.to_dict(include_details=False)
             for case in report.cases
@@ -572,6 +713,7 @@ def _wechat_case(
     wechat_native_bridge_forbidden_markers: tuple[str, ...],
     wechat_native_bridge_dry_run_adapter: object | None,
     wechat_native_bridge_sender: object | None,
+    computer_use_probe_runner: ComputerUseProbeRunner | None,
 ) -> PrimaryRealNoLossCase:
     observer = accessibility_observer or PywinautoAccessibilityObserver(
         max_windows=40,
@@ -586,6 +728,7 @@ def _wechat_case(
     locator = build_wechat_locator_report(
         matches,
         win32_observer=wechat_win32_observer,
+        computer_use_probe=_call_computer_use_probe(computer_use_probe_runner),
     )
     screenshot_root = _resolve_background_screenshot_dir(
         background_screenshot_dir,
@@ -597,13 +740,21 @@ def _wechat_case(
         screenshot_dir=screenshot_root,
         window_capture_provider=window_capture_provider,
     )
+    background_screenshot_count = len(background_screenshots)
+    background_screenshot_success_count = sum(
+        1 for item in background_screenshots if item.ok
+    )
+    background_screenshot_dicts = [item.to_dict() for item in background_screenshots]
     background_focus_stable = not any(
-        item.foreground_changed for item in background_screenshots
+        item.foreground_focus_risk for item in background_screenshots
     )
     semantic_request = _wechat_uia_semantic_action_request(
         row,
         matches,
         background_screenshot_focus_stable=background_focus_stable,
+        background_screenshot_count=background_screenshot_count,
+        background_screenshot_success_count=background_screenshot_success_count,
+        background_screenshots=background_screenshot_dicts,
         message_override=(
             wechat_uia_message if allow_wechat_uia_semantic_send else ""
         ),
@@ -621,6 +772,9 @@ def _wechat_case(
         row,
         tuple(wechat_native_bridge_urls or ()),
         background_screenshot_focus_stable=background_focus_stable,
+        background_screenshot_count=background_screenshot_count,
+        background_screenshot_success_count=background_screenshot_success_count,
+        background_screenshots=background_screenshot_dicts,
         message=wechat_native_bridge_message,
         required_markers=wechat_native_bridge_required_markers,
         forbidden_markers=wechat_native_bridge_forbidden_markers,
@@ -638,21 +792,25 @@ def _wechat_case(
         or _wechat_native_bridge_send_verified(native_bridge_send_report)
     )
     native_bridge_decision = _wechat_native_bridge_decision(native_bridge_dry_runs)
+    locator_data = locator.to_dict(include_children=False)
     details = {
         "matching_window_count": len(matches),
         "windows": [
             window.to_dict(include_elements=False)
             for window in matches
         ],
-        "locator": locator.to_dict(include_children=False),
-        "background_screenshot_count": len(background_screenshots),
-        "background_screenshot_success_count": sum(
-            1 for item in background_screenshots if item.ok
+        "locator": locator_data,
+        "computer_use_probe": dict(locator_data.get("computer_use_probe", {}) or {}),
+        "computer_use_read_only_ready": bool(
+            locator_data.get("computer_use_read_only_ready", False)
         ),
+        "computer_use_write_control_ready": bool(
+            locator_data.get("computer_use_write_control_ready", False)
+        ),
+        "background_screenshot_count": background_screenshot_count,
+        "background_screenshot_success_count": background_screenshot_success_count,
         "background_screenshot_focus_stable": background_focus_stable,
-        "background_screenshots": [
-            item.to_dict() for item in background_screenshots
-        ],
+        "background_screenshots": background_screenshot_dicts,
         "uia_semantic_action_ready": bool(semantic_action_dry_run.get("ok", False)),
         "uia_semantic_action_dry_run": semantic_action_dry_run,
         "wechat_native_bridge_urls": list(wechat_native_bridge_urls or ()),
@@ -694,6 +852,9 @@ def _wechat_uia_semantic_action_request(
     matches: list[object],
     *,
     background_screenshot_focus_stable: bool,
+    background_screenshot_count: int = 0,
+    background_screenshot_success_count: int = 0,
+    background_screenshots: tuple[dict, ...] | list[dict] = (),
     message_override: str = "",
     required_markers: tuple[str, ...] = (),
     forbidden_markers: tuple[str, ...] = (),
@@ -712,6 +873,9 @@ def _wechat_uia_semantic_action_request(
         message=message,
         windows=tuple(matches),
         background_screenshot_focus_stable=background_screenshot_focus_stable,
+        background_screenshot_count=background_screenshot_count,
+        background_screenshot_success_count=background_screenshot_success_count,
+        background_screenshots=background_screenshots,
         selected_transport={
             "transport_id": "wechat-uia-semantic",
             "transport_channel": "uia",
@@ -757,6 +921,9 @@ def _wechat_native_bridge_dry_runs(
     bridge_urls: tuple[str, ...],
     *,
     background_screenshot_focus_stable: bool,
+    background_screenshot_count: int = 0,
+    background_screenshot_success_count: int = 0,
+    background_screenshots: tuple[dict, ...] | list[dict] = (),
     message: str,
     required_markers: tuple[str, ...],
     forbidden_markers: tuple[str, ...],
@@ -770,6 +937,9 @@ def _wechat_native_bridge_dry_runs(
             row,
             bridge_url,
             background_screenshot_focus_stable=background_screenshot_focus_stable,
+            background_screenshot_count=background_screenshot_count,
+            background_screenshot_success_count=background_screenshot_success_count,
+            background_screenshots=background_screenshots,
             message=message,
             required_markers=required_markers,
             forbidden_markers=forbidden_markers,
@@ -788,10 +958,38 @@ def _wechat_native_bridge_dry_runs(
                 "window_input_attempts": 0,
                 "request": request.to_dict(),
             }
+        report = _enforce_wechat_native_bridge_screenshot_gate(report, request)
         reports.append(report)
         if bool(report.get("ok", False)):
             break
     return requests, reports
+
+
+def _enforce_wechat_native_bridge_screenshot_gate(report: dict, request: object) -> dict:
+    if bool(getattr(request, "background_screenshot_verified", False)):
+        return report
+    data = dict(report)
+    data["ok"] = False
+    data["decision"] = "wechat_native_bridge_background_screenshot_not_verified"
+    errors = [
+        str(item)
+        for item in (data.get("validation_errors") or ())
+        if str(item)
+    ]
+    if "background_screenshot_not_verified" not in errors:
+        errors.append("background_screenshot_not_verified")
+    data["validation_errors"] = errors
+    request_data = data.get("request")
+    if isinstance(request_data, dict):
+        request_copy = dict(request_data)
+    else:
+        request_copy = request.to_dict() if hasattr(request, "to_dict") else {}
+    request_copy["background_screenshot_verified"] = False
+    data["request"] = request_copy
+    data.setdefault("send_attempts", 0)
+    data.setdefault("window_input_attempts", 0)
+    data.setdefault("control_attempts", 0)
+    return data
 
 
 def _wechat_native_bridge_request(
@@ -799,6 +997,9 @@ def _wechat_native_bridge_request(
     bridge_url: str,
     *,
     background_screenshot_focus_stable: bool,
+    background_screenshot_count: int = 0,
+    background_screenshot_success_count: int = 0,
+    background_screenshots: tuple[dict, ...] | list[dict] = (),
     message: str,
     required_markers: tuple[str, ...],
     forbidden_markers: tuple[str, ...],
@@ -816,6 +1017,9 @@ def _wechat_native_bridge_request(
         target_name=target_name,
         message=str(message or "").strip(),
         background_screenshot_focus_stable=background_screenshot_focus_stable,
+        background_screenshot_count=background_screenshot_count,
+        background_screenshot_success_count=background_screenshot_success_count,
+        background_screenshots=background_screenshots,
         selected_transport={
             "transport_id": "wechat-native-bridge",
             "transport_channel": "native_bridge",
@@ -980,6 +1184,21 @@ def _word_case(
             "visible_requested": bool(report_data.get("visible_requested", False)),
             "control_attempts": int(report_data.get("control_attempts", 0) or 0),
             "window_input_attempts": int(report_data.get("window_input_attempts", 0) or 0),
+            "foreground_hwnd_before": int(report_data.get("foreground_hwnd_before", 0) or 0),
+            "foreground_hwnd_after": int(report_data.get("foreground_hwnd_after", 0) or 0),
+            "foreground_focus_stable": bool(report_data.get("foreground_focus_stable", True)),
+            "foreground_snapshot_before": dict(
+                report_data.get("foreground_snapshot_before", {}) or {}
+            ),
+            "foreground_snapshot_after": dict(
+                report_data.get("foreground_snapshot_after", {}) or {}
+            ),
+            "foreground_change_classification": str(
+                report_data.get("foreground_change_classification", "") or "stable"
+            ),
+            "foreground_no_steal_verified": bool(
+                report_data.get("foreground_no_steal_verified", True)
+            ),
             "office_com_attempts": int(report_data.get("office_com_attempts", 0) or 0),
         },
         window_input_attempts=int(report_data.get("window_input_attempts", 0) or 0),
@@ -1006,12 +1225,81 @@ def _write_case_artifact(output_root: Path, case: PrimaryRealNoLossCase) -> Prim
     artifact_dir = output_root / "real_no_loss"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = artifact_dir / f"{_safe_filename(case.case_id)}.json"
-    data = case.to_dict()
+    case_with_artifact = dataclasses.replace(case, artifact_path=str(artifact_path))
+    trajectory_path = _write_case_trajectory(output_root, case_with_artifact)
+    if trajectory_path:
+        details = dict(case_with_artifact.details)
+        details["trajectory_path"] = trajectory_path
+        case_with_artifact = dataclasses.replace(case_with_artifact, details=details)
+    data = case_with_artifact.to_dict()
     artifact_path.write_text(
         json.dumps(data, ensure_ascii=True, indent=2),
         encoding="utf-8",
     )
-    return dataclasses.replace(case, artifact_path=str(artifact_path))
+    return case_with_artifact
+
+
+def _write_case_trajectory(
+    output_root: Path,
+    case: PrimaryRealNoLossCase,
+) -> str:
+    try:
+        recorder = ControlTrajectoryRecorder(
+            output_root / "control_trajectories",
+            scenario=case.scenario_id,
+            target_id=case.case_id,
+            metadata={
+                "runner": "primary-real-no-loss",
+                "real_probe_kind": case.real_probe_kind,
+                "status": case.status,
+            },
+        )
+        artifacts = []
+        if case.artifact_path:
+            artifacts.append(
+                build_trajectory_artifact(
+                    case.artifact_path,
+                    role="case_artifact",
+                    media_type="application/json",
+                )
+            )
+        artifacts.extend(extract_trajectory_artifacts(case.details))
+        recorder.record_step(
+            phase="case_report",
+            action=case.real_probe_kind,
+            report=case,
+            artifacts=tuple(artifacts),
+        )
+        return str(recorder.manifest_path)
+    except OSError:
+        return ""
+
+
+def _record_primary_progress(
+    events: list[dict],
+    output_root: Path,
+    stage_name: str,
+    status: str,
+    **fields,
+) -> None:
+    entry = {
+        "stage_name": str(stage_name or ""),
+        "status": str(status or ""),
+        **dict(fields),
+    }
+    events.append(entry)
+    payload = {
+        "mode": "primary-real-no-loss-progress",
+        "stages": [dict(item) for item in events],
+    }
+    try:
+        output_root.mkdir(parents=True, exist_ok=True)
+        (output_root / "primary-real-no-loss-progress.json").write_text(
+            json.dumps(payload, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 def _search_owned_files(root: Path, query: str) -> list[Path]:
@@ -1120,7 +1408,18 @@ def _case_background_screenshot_success_count(case: PrimaryRealNoLossCase) -> in
 
 def _case_background_screenshot_focus_changed(case: PrimaryRealNoLossCase) -> bool:
     for item in case.details.get("background_screenshots", []) or []:
-        if isinstance(item, dict) and bool(item.get("foreground_changed", False)):
+        if not isinstance(item, dict):
+            continue
+        if "foreground_focus_risk" in item:
+            if bool(item.get("foreground_focus_risk", False)):
+                return True
+            continue
+        classification = str(item.get("foreground_change_classification", "") or "")
+        if classification:
+            if classification == "changed_to_target_window":
+                return True
+            continue
+        if bool(item.get("foreground_changed", False)):
             return True
     return False
 
@@ -1150,6 +1449,48 @@ def _report_to_dict(report: object) -> dict:
     return {"ok": False, "error": "invalid_word_probe_report"}
 
 
+def _system_dialog_preflight_failed(report: dict) -> bool:
+    if not report:
+        return False
+    return bool(
+        report.get("system_dialog_detected", False)
+        or not bool(report.get("ok", True))
+    )
+
+
+def _fixture_suite_name(fixture: object) -> str:
+    if isinstance(fixture, dict):
+        return str(fixture.get("suite", "") or "")
+    return ""
+
+
+def _call_computer_use_probe(runner: ComputerUseProbeRunner | None) -> dict:
+    active_runner = runner or build_computer_use_runtime_probe
+    try:
+        data = _report_to_dict(active_runner())
+    except Exception as exc:
+        data = {
+            "mode": "computer-use-runtime-probe",
+            "safety_mode": "read_only",
+            "ready": False,
+            "native_pipe_ready": False,
+            "control_attempts": 0,
+            "window_input_attempts": 0,
+            "foreground_activation_attempts": 0,
+            "computer_use_attempts": 0,
+            "decision": "computer_use_runtime_probe_failed",
+            "error": str(exc) or exc.__class__.__name__,
+        }
+    if str(data.get("mode", "") or "") != "computer-use-runtime-probe":
+        data.setdefault("mode", "computer-use-runtime-probe")
+    data.setdefault("safety_mode", "read_only")
+    data.setdefault("control_attempts", 0)
+    data.setdefault("window_input_attempts", 0)
+    data.setdefault("foreground_activation_attempts", 0)
+    data.setdefault("computer_use_attempts", 0)
+    return data
+
+
 def _counter(data: dict, key: str) -> int:
     try:
         return int(data.get(key, 0) or 0)
@@ -1166,12 +1507,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--summary-json", action="store_true")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--allow-owned-browser-helper-launch", action="store_true")
-    parser.add_argument("--owned-browser-debug-port", type=int, default=9238)
+    parser.add_argument("--owned-browser-debug-port", type=int, default=0)
     parser.add_argument("--owned-browser-executable", default="chrome.exe")
     parser.add_argument("--owned-browser-url", default="")
     parser.add_argument("--ide-bridge-url", action="append", default=None)
     parser.add_argument("--background-screenshot-dir", default="")
     parser.add_argument("--wechat-native-bridge-url", action="append", default=[])
+    parser.add_argument("--wechat-native-bridge-registry", action="append", default=[])
     parser.add_argument("--allow-wechat-native-bridge-send", action="store_true")
     parser.add_argument(
         "--wechat-native-bridge-message",
@@ -1189,9 +1531,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         owned_browser_executable=args.owned_browser_executable,
         owned_browser_url=args.owned_browser_url,
         browser_executable_resolver=_resolve_installed_browser_executable,
-        ide_bridge_urls=tuple(args.ide_bridge_url or ("http://127.0.0.1:8787",)),
+        ide_bridge_urls=tuple(args.ide_bridge_url or ()),
         background_screenshot_dir=args.background_screenshot_dir,
         wechat_native_bridge_urls=tuple(args.wechat_native_bridge_url or ()),
+        wechat_native_bridge_registry_paths=tuple(
+            args.wechat_native_bridge_registry or ()
+        ),
         allow_wechat_native_bridge_send=args.allow_wechat_native_bridge_send,
         wechat_native_bridge_message=args.wechat_native_bridge_message,
         wechat_native_bridge_required_markers=tuple(

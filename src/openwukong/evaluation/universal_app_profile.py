@@ -233,6 +233,12 @@ def _profile_window(window: object) -> UniversalAppProfile:
 
 def _status_for(window: object, plan: ControlRoutePlan) -> str:
     route_id = plan.primary_route.route_id
+    if route_id == "app-native-bridge-required":
+        if plan.app_family in {"agent-app", "im"}:
+            return "foreground_or_native_required"
+        if int(getattr(window, "element_count", 0) or 0) == 0:
+            return "blocked"
+        return "foreground_or_native_required"
     if route_id in {"no-deterministic-route"} or int(getattr(window, "element_count", 0) or 0) == 0:
         return "blocked"
     if plan.is_blocked:
@@ -247,8 +253,6 @@ def _status_for(window: object, plan: ControlRoutePlan) -> str:
         if int(getattr(window, "input_candidate_count", 0) or 0) > 0:
             return "foreground_or_native_required"
         return "observe_only"
-    if route_id == "app-native-bridge-required":
-        return "foreground_or_native_required"
     return "observe_only"
 
 

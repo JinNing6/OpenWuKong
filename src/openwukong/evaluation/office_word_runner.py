@@ -28,6 +28,12 @@ class OfficeWordBackgroundProbeReport:
     visible_requested: bool = False
     save_verified: bool = False
     readback_verified: bool = False
+    foreground_hwnd_before: int = 0
+    foreground_hwnd_after: int = 0
+    foreground_snapshot_before: dict = dataclasses.field(default_factory=dict)
+    foreground_snapshot_after: dict = dataclasses.field(default_factory=dict)
+    foreground_change_classification: str = "stable"
+    foreground_no_steal_verified: bool = True
     office_com_attempts: int = 0
 
     @property
@@ -51,7 +57,15 @@ class OfficeWordBackgroundProbeReport:
         return 0
 
     @property
+    def foreground_focus_stable(self) -> bool:
+        before = int(self.foreground_hwnd_before or 0)
+        after = int(self.foreground_hwnd_after or 0)
+        return not (before and after and before != after)
+
+    @property
     def decision(self) -> str:
+        if not self.foreground_no_steal_verified:
+            return "word_foreground_stolen"
         if self.ok:
             return "word_background_probe_verified"
         if self.office_com_attempts == 0:
@@ -78,6 +92,13 @@ class OfficeWordBackgroundProbeReport:
             "control_allowed": self.control_allowed,
             "control_attempts": self.control_attempts,
             "window_input_attempts": self.window_input_attempts,
+            "foreground_hwnd_before": int(self.foreground_hwnd_before or 0),
+            "foreground_hwnd_after": int(self.foreground_hwnd_after or 0),
+            "foreground_focus_stable": self.foreground_focus_stable,
+            "foreground_snapshot_before": dict(self.foreground_snapshot_before),
+            "foreground_snapshot_after": dict(self.foreground_snapshot_after),
+            "foreground_change_classification": self.foreground_change_classification,
+            "foreground_no_steal_verified": bool(self.foreground_no_steal_verified),
             "office_com_attempts": int(self.office_com_attempts or 0),
             "error": self.error,
             "elapsed_ms": round(self.elapsed_ms, 3),
@@ -89,10 +110,14 @@ def run_office_word_background_probe(
     document_path: str,
     marker: str = "OPENWUKONG_WORD_BACKGROUND_OK",
     word_factory: Callable[[], object] | None = None,
+    foreground_observer: object | None = None,
 ) -> OfficeWordBackgroundProbeReport:
     started = time.perf_counter()
     path = Path(document_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
+    observer = foreground_observer or WindowsForegroundObserver()
+    foreground_snapshot_before = _foreground_snapshot_before(observer)
+    foreground_before = _safe_int(foreground_snapshot_before.get("hwnd"))
     marker_text = str(marker or "").strip() or "OPENWUKONG_WORD_BACKGROUND_OK"
     body = (
         "OpenWukong Word background COM probe\n"
@@ -109,12 +134,26 @@ def run_office_word_background_probe(
         try:
             app = factory()
         except Exception as exc:
+            foreground_snapshot_after = _foreground_snapshot_after(observer)
+            foreground_after = _safe_int(foreground_snapshot_after.get("hwnd"))
+            foreground_change = _classify_foreground_change(
+                foreground_snapshot_before,
+                foreground_snapshot_after,
+            )
             return OfficeWordBackgroundProbeReport(
                 document_path=str(path),
                 marker=marker_text,
                 ok=False,
                 error=str(exc) or exc.__class__.__name__,
                 elapsed_ms=(time.perf_counter() - started) * 1000,
+                foreground_hwnd_before=foreground_before,
+                foreground_hwnd_after=foreground_after,
+                foreground_snapshot_before=foreground_snapshot_before,
+                foreground_snapshot_after=foreground_snapshot_after,
+                foreground_change_classification=foreground_change,
+                foreground_no_steal_verified=_foreground_no_steal_verified(
+                    foreground_change
+                ),
                 office_com_attempts=0,
             )
         word_started = True
@@ -150,6 +189,12 @@ def run_office_word_background_probe(
             if read_document is not None:
                 _close_document(read_document)
     except Exception as exc:
+        foreground_snapshot_after = _foreground_snapshot_after(observer)
+        foreground_after = _safe_int(foreground_snapshot_after.get("hwnd"))
+        foreground_change = _classify_foreground_change(
+            foreground_snapshot_before,
+            foreground_snapshot_after,
+        )
         return OfficeWordBackgroundProbeReport(
             document_path=str(path),
             marker=marker_text,
@@ -160,6 +205,14 @@ def run_office_word_background_probe(
             word_started=word_started,
             save_verified=save_verified,
             readback_verified=marker_text in readback_text,
+            foreground_hwnd_before=foreground_before,
+            foreground_hwnd_after=foreground_after,
+            foreground_snapshot_before=foreground_snapshot_before,
+            foreground_snapshot_after=foreground_snapshot_after,
+            foreground_change_classification=foreground_change,
+            foreground_no_steal_verified=_foreground_no_steal_verified(
+                foreground_change
+            ),
             office_com_attempts=office_attempts,
         )
     finally:
@@ -167,16 +220,29 @@ def run_office_word_background_probe(
             _quit_word(app)
 
     readback_verified = marker_text in readback_text
+    foreground_snapshot_after = _foreground_snapshot_after(observer)
+    foreground_after = _safe_int(foreground_snapshot_after.get("hwnd"))
+    foreground_change = _classify_foreground_change(
+        foreground_snapshot_before,
+        foreground_snapshot_after,
+    )
+    foreground_no_steal = _foreground_no_steal_verified(foreground_change)
     return OfficeWordBackgroundProbeReport(
         document_path=str(path),
         marker=marker_text,
         readback_text=readback_text,
-        ok=bool(save_verified and readback_verified),
+        ok=bool(save_verified and readback_verified and foreground_no_steal),
         elapsed_ms=(time.perf_counter() - started) * 1000,
         word_started=word_started,
         visible_requested=False,
         save_verified=save_verified,
         readback_verified=readback_verified,
+        foreground_hwnd_before=foreground_before,
+        foreground_hwnd_after=foreground_after,
+        foreground_snapshot_before=foreground_snapshot_before,
+        foreground_snapshot_after=foreground_snapshot_after,
+        foreground_change_classification=foreground_change,
+        foreground_no_steal_verified=foreground_no_steal,
         office_com_attempts=office_attempts,
     )
 
@@ -245,6 +311,14 @@ def _create_word_application() -> object:
         raise RuntimeError(f"word_com_dispatch_failed: {exc}") from exc
 
 
+class WindowsForegroundObserver:
+    def get_foreground_snapshot(self) -> dict:
+        return _foreground_snapshot_from_hwnd(_get_foreground_window())
+
+    def get_foreground_snapshot_after(self) -> dict:
+        return self.get_foreground_snapshot()
+
+
 def _set_word_background_mode(app: object) -> None:
     try:
         app.Visible = False
@@ -268,6 +342,141 @@ def _quit_word(app: object) -> None:
         app.Quit()
     except Exception:
         pass
+
+
+def _foreground_snapshot_before(observer: object) -> dict:
+    getter = getattr(observer, "get_foreground_snapshot", None)
+    if callable(getter):
+        try:
+            return _normalize_foreground_snapshot(getter())
+        except Exception:
+            pass
+    return _foreground_snapshot_from_hwnd(_get_foreground_window())
+
+
+def _foreground_snapshot_after(observer: object) -> dict:
+    getter = getattr(observer, "get_foreground_snapshot_after", None)
+    if callable(getter):
+        try:
+            return _normalize_foreground_snapshot(getter())
+        except Exception:
+            pass
+    return _foreground_snapshot_from_hwnd(_get_foreground_window())
+
+
+def _normalize_foreground_snapshot(value: object) -> dict:
+    data = dict(value) if isinstance(value, dict) else {}
+    return {
+        "hwnd": _safe_int(data.get("hwnd")),
+        "pid": _safe_int(data.get("pid")),
+        "process_name": str(data.get("process_name", "") or ""),
+        "window_title": str(data.get("window_title", "") or ""),
+    }
+
+
+def _foreground_snapshot_from_hwnd(hwnd: int) -> dict:
+    handle = int(hwnd or 0)
+    pid = _window_pid(handle)
+    return {
+        "hwnd": handle,
+        "pid": pid,
+        "process_name": _process_name(pid),
+        "window_title": _window_title(handle),
+    }
+
+
+def _classify_foreground_change(before: dict, after: dict) -> str:
+    before_hwnd = _safe_int(before.get("hwnd"))
+    after_hwnd = _safe_int(after.get("hwnd"))
+    if not before_hwnd or not after_hwnd or before_hwnd == after_hwnd:
+        return "stable"
+    if _snapshot_is_word(after):
+        return "changed_to_word_surface"
+    if _foreground_snapshot_has_identity(after):
+        return "changed_to_unrelated_surface"
+    return "changed_unknown"
+
+
+def _foreground_no_steal_verified(classification: str) -> bool:
+    return classification in {"stable", "changed_to_unrelated_surface"}
+
+
+def _snapshot_is_word(snapshot: dict) -> bool:
+    process_name = str(snapshot.get("process_name", "") or "").casefold()
+    window_title = str(snapshot.get("window_title", "") or "").casefold()
+    return (
+        process_name in {"winword.exe", "word.exe"}
+        or "microsoft word" in window_title
+        or window_title.endswith(" - word")
+    )
+
+
+def _foreground_snapshot_has_identity(snapshot: dict) -> bool:
+    return bool(
+        _safe_int(snapshot.get("pid"))
+        or str(snapshot.get("process_name", "") or "").strip()
+        or str(snapshot.get("window_title", "") or "").strip()
+    )
+
+
+def _get_foreground_window() -> int:
+    try:
+        import ctypes
+
+        return int(ctypes.windll.user32.GetForegroundWindow())
+    except Exception:
+        return 0
+
+
+def _window_pid(hwnd: int) -> int:
+    if not hwnd:
+        return 0
+    try:
+        import ctypes
+
+        pid = ctypes.c_ulong(0)
+        ctypes.windll.user32.GetWindowThreadProcessId(
+            int(hwnd),
+            ctypes.byref(pid),
+        )
+        return int(pid.value or 0)
+    except Exception:
+        return 0
+
+
+def _process_name(pid: int) -> str:
+    if int(pid or 0) <= 0:
+        return ""
+    try:
+        import psutil
+
+        return str(psutil.Process(int(pid)).name() or "")
+    except Exception:
+        return ""
+
+
+def _window_title(hwnd: int) -> str:
+    if not hwnd:
+        return ""
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        length = int(user32.GetWindowTextLengthW(int(hwnd)) or 0)
+        if length <= 0:
+            return ""
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(int(hwnd), buffer, length + 1)
+        return str(buffer.value or "")
+    except Exception:
+        return ""
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return 0
     try:
         import pythoncom
 

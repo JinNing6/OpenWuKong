@@ -25,9 +25,12 @@ _IDE_PROCESSES = {
     "antigravity.exe",
     "code - insiders.exe",
     "code.exe",
-    "codex.exe",
     "cursor.exe",
     "windsurf.exe",
+}
+_AGENT_APP_PROCESSES = {
+    "claude.exe",
+    "codex.exe",
 }
 _TERMINAL_PROCESSES = {
     "bash.exe",
@@ -240,6 +243,18 @@ def build_control_route_plan(window) -> ControlRoutePlan:
         )
         decision = "prefer_deterministic_connector"
         fallbacks = _uia_fallbacks(window, family)
+    elif family == "agent-app":
+        primary = _step(
+            "app-native-bridge-required",
+            "missing_connector",
+            "agent-app-native-endpoint-or-desktop-extension",
+            ("app_rpc", "native_bridge_call", "agent_thread_start", "agent_turn_start"),
+            92,
+            "primary",
+            "Agent desktop apps require a verified native endpoint before write/submit operations.",
+        )
+        decision = "block_until_deterministic_route"
+        fallbacks = _uia_fallbacks(window, family)
     elif family in {"im", "electron-cef"} and not _has_semantic_control(window):
         primary = _step(
             "app-native-bridge-required",
@@ -252,7 +267,7 @@ def build_control_route_plan(window) -> ControlRoutePlan:
         )
         decision = "block_until_deterministic_route"
         fallbacks = _uia_fallbacks(window, family)
-    elif family == "overlay" or _element_count(window) == 0:
+    elif family == "overlay":
         primary = _step(
             "no-deterministic-route",
             "blocked",
@@ -264,6 +279,18 @@ def build_control_route_plan(window) -> ControlRoutePlan:
         )
         decision = "block_until_deterministic_route"
         fallbacks = (_vision_fallback(),)
+    elif _element_count(window) == 0:
+        primary = _step(
+            "uia-window-observe",
+            "accessibility",
+            "uia-top-level-window",
+            ("read_window_title", "capture_window_screenshot", "inspect_control_count"),
+            70,
+            "primary",
+            "The top-level window is bound, but no actionable control structure is exposed.",
+        )
+        decision = "observe_window_only"
+        fallbacks = (_msaa_fallback(), _vision_fallback())
     elif _has_semantic_control(window):
         primary = _step(
             "uia-semantic",
@@ -324,6 +351,8 @@ def classify_app_family(window) -> str:
         return "browser"
     if process_name in _IDE_PROCESSES:
         return "ide"
+    if process_name in _AGENT_APP_PROCESSES:
+        return "agent-app"
     if process_name in _TERMINAL_PROCESSES or "terminal" in title:
         return "terminal"
     if process_name in _GIT_PROCESSES:

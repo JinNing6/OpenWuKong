@@ -378,6 +378,7 @@ class WeChatWindowLocatorEvidence:
 @dataclasses.dataclass(frozen=True)
 class WeChatLocatorReport:
     windows: tuple[WeChatWindowLocatorEvidence, ...]
+    computer_use_probe: dict = dataclasses.field(default_factory=dict)
     elapsed_ms: float = 0.0
 
     @property
@@ -409,6 +410,26 @@ class WeChatLocatorReport:
         return len(self.windows)
 
     @property
+    def computer_use_attempts(self) -> int:
+        return _counter(self.computer_use_probe, "computer_use_attempts")
+
+    @property
+    def computer_use_window_input_attempts(self) -> int:
+        return _counter(self.computer_use_probe, "window_input_attempts")
+
+    @property
+    def computer_use_foreground_activation_attempts(self) -> int:
+        return _counter(self.computer_use_probe, "foreground_activation_attempts")
+
+    @property
+    def computer_use_read_only_ready(self) -> bool:
+        return _computer_use_read_only_ready(self.computer_use_probe)
+
+    @property
+    def computer_use_write_control_ready(self) -> bool:
+        return False
+
+    @property
     def read_only_verified(self) -> bool:
         return bool(self.windows)
 
@@ -422,6 +443,18 @@ class WeChatLocatorReport:
             return "unavailable"
         return "read_only_verified_write_blocked"
 
+    def recommended_routes(self) -> tuple[str, ...]:
+        routes = [
+            "wechat-native-bridge-required",
+            "uia-read-only",
+            "win32-child-hwnd-read-only",
+            "msaa-read-only",
+        ]
+        if self.computer_use_probe:
+            routes.append("computer-use-read-only")
+        routes.append("vision-fallback-last")
+        return tuple(dict.fromkeys(routes))
+
     def to_dict(self, *, include_children: bool = True) -> dict:
         return {
             "mode": self.mode,
@@ -430,10 +463,17 @@ class WeChatLocatorReport:
             "control_attempts": self.control_attempts,
             "send_attempts": self.send_attempts,
             "window_input_attempts": self.window_input_attempts,
+            "computer_use_attempts": self.computer_use_attempts,
+            "computer_use_window_input_attempts": self.computer_use_window_input_attempts,
+            "computer_use_foreground_activation_attempts": self.computer_use_foreground_activation_attempts,
+            "computer_use_read_only_ready": self.computer_use_read_only_ready,
+            "computer_use_write_control_ready": self.computer_use_write_control_ready,
+            "computer_use_probe": dict(self.computer_use_probe),
             "window_count": self.window_count,
             "read_only_verified": self.read_only_verified,
             "write_control_ready": self.write_control_ready,
             "control_decision": self.control_decision,
+            "recommended_routes": list(self.recommended_routes()),
             "windows": [
                 window.to_dict(include_children=include_children)
                 for window in self.windows
@@ -447,6 +487,7 @@ def build_wechat_locator_report(
     *,
     win32_observer: Optional[object] = None,
     msaa_observer: Optional[object] = None,
+    computer_use_probe: object | None = None,
 ) -> WeChatLocatorReport:
     started = time.perf_counter()
     hwnd_observer = win32_observer or CtypesWin32WindowObserver()
@@ -483,6 +524,7 @@ def build_wechat_locator_report(
         )
     return WeChatLocatorReport(
         windows=tuple(evidence),
+        computer_use_probe=_dict_from_report(computer_use_probe),
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
 
@@ -577,5 +619,43 @@ def _safe_msaa_int(callback) -> int:
         return 0
     try:
         return int(value or 0)
+    except Exception:
+        return 0
+
+
+def _computer_use_read_only_ready(probe: dict) -> bool:
+    if not probe:
+        return False
+    if not bool(probe.get("ready", False)):
+        return False
+    if not bool(probe.get("native_pipe_ready", False)):
+        return False
+    if _counter(probe, "control_attempts") != 0:
+        return False
+    if _counter(probe, "window_input_attempts") != 0:
+        return False
+    if _counter(probe, "foreground_activation_attempts") != 0:
+        return False
+    return bool(
+        probe.get("window_state_ready", False)
+        or probe.get("background_snapshot_ready", False)
+        or probe.get("accessibility_tree_available", False)
+    )
+
+
+def _dict_from_report(value: object) -> dict:
+    if isinstance(value, dict):
+        return dict(value)
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        data = to_dict()
+        if isinstance(data, dict):
+            return dict(data)
+    return {}
+
+
+def _counter(data: dict, key: str) -> int:
+    try:
+        return int(data.get(key, 0) or 0)
     except Exception:
         return 0

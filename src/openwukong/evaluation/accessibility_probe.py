@@ -36,9 +36,17 @@ _IDE_PROCESSES = {
     "code.exe",
     "code - insiders.exe",
     "cursor.exe",
-    "codex.exe",
     "antigravity.exe",
     "windsurf.exe",
+}
+_AGENT_APP_PROCESSES = {
+    "claude.exe",
+    "codex.exe",
+}
+_IM_PROCESSES = {
+    "weixin.exe",
+    "wechat.exe",
+    "wxwork.exe",
 }
 _OFFICE_PROCESSES = {
     "winword.exe",
@@ -47,6 +55,15 @@ _OFFICE_PROCESSES = {
     "outlook.exe",
     "onenote.exe",
     "msaccess.exe",
+}
+_PROCESS_ONLY_FALLBACK_PROCESSES = {
+    "weixin.exe",
+    "wechat.exe",
+    "wxwork.exe",
+    "cursor.exe",
+    "codex.exe",
+    "claude.exe",
+    "winword.exe",
 }
 
 
@@ -191,12 +208,18 @@ class AccessibilityWindowSnapshot:
             routes.append("browser-devtools-or-extension")
         if pname in _IDE_PROCESSES:
             routes.append("ide-extension-connector")
+        if pname in _AGENT_APP_PROCESSES:
+            routes.append("app-native-bridge-required")
+        if pname in _IM_PROCESSES:
+            routes.append("app-native-bridge-required")
         if pname in _OFFICE_PROCESSES:
             routes.append("office-object-model-or-addin")
         if self.capability_level() in {"semantic", "partial_semantic"}:
             routes.append("uia-semantic")
         elif self.element_count:
             routes.append("uia-structural")
+        else:
+            routes.append("uia-window-observe")
         routes.append("msaa-win32-fallback")
         routes.append("vision-fallback-last")
         return tuple(dict.fromkeys(routes))
@@ -338,7 +361,16 @@ class PywinautoAccessibilityObserver:
                 windows.append(self._snapshot_window(wrapper, pid, process_name, title))
             except Exception:
                 continue
-        return tuple(windows)
+        merged = _merge_win32_fallback_windows(
+            tuple(windows),
+            _capture_win32_top_level_windows(),
+            max_windows=self.max_windows,
+        )
+        return _merge_process_only_fallback_windows(
+            merged,
+            _capture_process_only_fallback_windows(),
+            max_windows=self.max_windows,
+        )
 
     def _snapshot_window(self, wrapper, pid: int, process_name: str, title: str) -> AccessibilityWindowSnapshot:
         class_name = _safe_wrapper_attr(wrapper, "class_name")
@@ -371,6 +403,225 @@ class PywinautoAccessibilityObserver:
             elements=tuple(elements),
             scan_error="",
         )
+
+
+def _merge_win32_fallback_windows(
+    uia_windows: Iterable[AccessibilityWindowSnapshot],
+    win32_windows: Iterable[AccessibilityWindowSnapshot],
+    *,
+    max_windows: int,
+) -> tuple[AccessibilityWindowSnapshot, ...]:
+    merged = list(uia_windows)
+    seen_hwnds = {
+        int(window.hwnd or 0)
+        for window in merged
+        if int(window.hwnd or 0) > 0
+    }
+    seen_pid_titles = {
+        (int(window.pid or 0), _fold(window.window_title))
+        for window in merged
+        if int(window.pid or 0) > 0 and _fold(window.window_title)
+    }
+    for window in win32_windows:
+        if len(merged) >= int(max_windows or 0):
+            break
+        title = str(window.window_title or "").strip()
+        if not title or title == "Program Manager":
+            continue
+        hwnd = int(window.hwnd or 0)
+        pid_title = (int(window.pid or 0), _fold(title))
+        if hwnd > 0 and hwnd in seen_hwnds:
+            continue
+        if pid_title[0] > 0 and pid_title[1] and pid_title in seen_pid_titles:
+            continue
+        merged.append(window)
+        if hwnd > 0:
+            seen_hwnds.add(hwnd)
+        if pid_title[0] > 0 and pid_title[1]:
+            seen_pid_titles.add(pid_title)
+    return tuple(merged)
+
+
+def _capture_win32_top_level_windows() -> tuple[AccessibilityWindowSnapshot, ...]:
+    if not sys.platform.startswith("win"):
+        return ()
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        windows: list[AccessibilityWindowSnapshot] = []
+
+        def _visit(hwnd, _lparam):
+            hwnd_int = int(hwnd)
+            is_visible = getattr(user32, "IsWindowVisible", None)
+            if callable(is_visible) and not bool(is_visible(wintypes.HWND(hwnd_int))):
+                return True
+            title = _win32_window_text(user32, hwnd_int).strip()
+            if not title or title == "Program Manager":
+                return True
+            class_name = _win32_class_name(user32, hwnd_int)
+            process_id = _win32_process_id(user32, hwnd_int)
+            process_name = _win32_process_name(process_id)
+            windows.append(
+                AccessibilityWindowSnapshot(
+                    pid=process_id,
+                    process_name=process_name,
+                    window_title=title,
+                    class_name=class_name,
+                    hwnd=hwnd_int,
+                    elements=(),
+                    scan_error="",
+                )
+            )
+            return True
+
+        callback = enum_proc(_visit)
+        user32.EnumWindows(callback, wintypes.LPARAM(0))
+        return tuple(windows)
+    except Exception:
+        return ()
+
+
+def _capture_process_only_fallback_windows() -> tuple[AccessibilityWindowSnapshot, ...]:
+    try:
+        import psutil
+    except Exception:
+        return ()
+    rows: list[dict] = []
+    try:
+        iterator = psutil.process_iter(["pid", "name", "exe"])
+    except Exception:
+        return ()
+    for process in iterator:
+        try:
+            info = dict(getattr(process, "info", {}) or {})
+            rows.append(
+                {
+                    "pid": info.get("pid", getattr(process, "pid", 0)),
+                    "name": info.get("name", ""),
+                    "executable_path": info.get("exe", ""),
+                }
+            )
+        except Exception:
+            continue
+    return _process_only_fallback_windows_from_rows(rows)
+
+
+def _process_only_fallback_windows_from_rows(rows: Iterable[dict]) -> tuple[AccessibilityWindowSnapshot, ...]:
+    selected: list[AccessibilityWindowSnapshot] = []
+    seen_names: set[str] = set()
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
+        process_name = str(row.get("name", "") or row.get("process_name", "") or "").strip()
+        normalized_name = process_name.casefold()
+        if not normalized_name or normalized_name not in _PROCESS_ONLY_FALLBACK_PROCESSES:
+            continue
+        if normalized_name in seen_names:
+            continue
+        seen_names.add(normalized_name)
+        selected.append(
+            AccessibilityWindowSnapshot(
+                pid=_safe_int(row.get("pid", row.get("process_id", 0))),
+                process_name=process_name,
+                window_title=process_name,
+                class_name="",
+                hwnd=0,
+                elements=(),
+                scan_error="process_only_no_top_level_window",
+            )
+        )
+    return tuple(selected)
+
+
+def _merge_process_only_fallback_windows(
+    observed_windows: Iterable[AccessibilityWindowSnapshot],
+    process_windows: Iterable[AccessibilityWindowSnapshot],
+    *,
+    max_windows: int,
+) -> tuple[AccessibilityWindowSnapshot, ...]:
+    merged = list(observed_windows)
+    seen_process_names = {
+        _fold(window.process_name)
+        for window in merged
+        if _fold(window.process_name)
+    }
+    for window in process_windows or ():
+        if len(merged) >= int(max_windows or 0):
+            break
+        process_name = _fold(window.process_name)
+        if not process_name or process_name in seen_process_names:
+            continue
+        merged.append(window)
+        seen_process_names.add(process_name)
+    return tuple(merged)
+
+
+def _win32_window_text(user32, hwnd: int) -> str:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        buffer = ctypes.create_unicode_buffer(512)
+        copied = user32.GetWindowTextW(wintypes.HWND(hwnd), buffer, len(buffer))
+        if not copied:
+            return ""
+        return buffer.value
+    except Exception:
+        return ""
+
+
+def _win32_class_name(user32, hwnd: int) -> str:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        buffer = ctypes.create_unicode_buffer(256)
+        copied = user32.GetClassNameW(wintypes.HWND(hwnd), buffer, len(buffer))
+        if not copied:
+            return ""
+        return buffer.value
+    except Exception:
+        return ""
+
+
+def _win32_process_id(user32, hwnd: int) -> int:
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        process_id = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(
+            wintypes.HWND(hwnd),
+            ctypes.byref(process_id),
+        )
+        return int(process_id.value or 0)
+    except Exception:
+        return 0
+
+
+def _win32_process_name(process_id: int) -> str:
+    if int(process_id or 0) <= 0:
+        return ""
+    try:
+        import psutil
+
+        return str(psutil.Process(int(process_id)).name() or "")
+    except Exception:
+        return ""
+
+
+def _fold(value: str) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 class WindowsCapabilityProbe:

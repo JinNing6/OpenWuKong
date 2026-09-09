@@ -219,7 +219,7 @@ class AgentAppUiaProbeReport:
 
     @property
     def background_screenshot_focus_stable(self) -> bool:
-        return not any(item.foreground_changed for item in self.background_screenshots)
+        return not any(item.foreground_focus_risk for item in self.background_screenshots)
 
     @property
     def target_matched(self) -> bool:
@@ -764,12 +764,24 @@ def _selected_app_surface(surface: AgentSurfaceBindingReport) -> bool:
 def _agent_process_names(agent_id: str) -> tuple[str, ...]:
     normalized = lower_text(agent_id)
     if normalized == "codex":
-        return ("codex.exe",)
+        return _process_name_aliases("codex.exe")
     if normalized == "claude":
-        return ("claude.exe",)
+        return _process_name_aliases("claude.exe")
     if normalized == "cursor":
-        return ("cursor.exe",)
-    return (normalized,)
+        return _process_name_aliases("cursor.exe")
+    return _process_name_aliases(normalized)
+
+
+def _process_name_aliases(value: str) -> tuple[str, ...]:
+    text = lower_text(value)
+    if not text:
+        return ()
+    aliases = {text}
+    if text.endswith(".exe"):
+        aliases.add(text[:-4])
+    else:
+        aliases.add(f"{text}.exe")
+    return tuple(sorted(alias for alias in aliases if alias))
 
 
 def _process_name_for_agent(agent_id: str) -> str:

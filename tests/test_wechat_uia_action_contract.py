@@ -43,6 +43,8 @@ class WeChatUiaActionContractTests(unittest.TestCase):
             message="OpenWukong dry-run only",
             windows=(_ready_window(),),
             background_screenshot_focus_stable=True,
+            background_screenshot_count=1,
+            background_screenshot_success_count=1,
         )
 
         report = WeChatUiaSemanticActionDryRunAdapter().prepare(request)
@@ -90,6 +92,25 @@ class WeChatUiaActionContractTests(unittest.TestCase):
         self.assertTrue(data["request"]["uia_invoke_pattern_ready"])
         self.assertEqual(data["decision"], "wechat_uia_semantic_action_value_pattern_not_ready")
         self.assertEqual(data["control_attempts"], 0)
+
+    def test_ready_controls_without_background_screenshot_success_stay_gated(self):
+        request = build_wechat_uia_semantic_action_request(
+            target_name="File Transfer Assistant",
+            message="OpenWukong dry-run only",
+            windows=(_ready_window(),),
+            background_screenshot_focus_stable=True,
+        )
+
+        report = WeChatUiaSemanticActionDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(
+            data["decision"],
+            "wechat_uia_semantic_action_background_screenshot_not_verified",
+        )
+        self.assertEqual(data["send_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
 
     def test_missing_target_contact_stays_gated(self):
         window = AccessibilityWindowSnapshot(
@@ -141,6 +162,8 @@ class WeChatUiaActionContractTests(unittest.TestCase):
             message="OPENWUKONG_WECHAT_UIA_ACCEPTANCE: PASS",
             windows=(_ready_window(),),
             background_screenshot_focus_stable=True,
+            background_screenshot_count=1,
+            background_screenshot_success_count=1,
         )
 
         report = WeChatUiaSemanticActionSenderAdapter(
@@ -182,6 +205,8 @@ class WeChatUiaActionContractTests(unittest.TestCase):
             message="OPENWUKONG_WECHAT_UIA_ACCEPTANCE: PASS",
             windows=(_ready_window(),),
             background_screenshot_focus_stable=True,
+            background_screenshot_count=1,
+            background_screenshot_success_count=1,
         )
 
         report = WeChatUiaSemanticActionSenderAdapter(

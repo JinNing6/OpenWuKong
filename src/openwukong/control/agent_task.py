@@ -307,6 +307,22 @@ def build_agent_command_plan(
             command_family="codex exec",
             ready=True,
         )
+    if selected.transport_id == "cursor-agent-cli-managed-terminal":
+        argv = (
+            executable,
+            "-p",
+            "--output-format",
+            "json",
+            task_text,
+        )
+        return AgentCommandPlan(
+            agent_id=binding.agent_id,
+            transport_id=selected.transport_id,
+            argv=argv,
+            cwd=workspace_root,
+            command_family="cursor-agent -p",
+            ready=True,
+        )
     return AgentCommandPlan(
         agent_id=binding.agent_id,
         transport_id=selected.transport_id,

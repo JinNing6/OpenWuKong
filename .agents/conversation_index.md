@@ -1,6 +1,6 @@
 # Conversation Index
 
-Last updated: 2026-05-30
+Last updated: 2026-06-29
 
 ## North Star
 
@@ -7495,3 +7495,9115 @@ When a new conversation starts in this repo:
     - Codex/Claude Desktop default-profile probe infrastructure is now
       correct and audited, but desktop-app precise background send is still
       not achieved without a real connector endpoint
+- 2026-06-01 compared the installed OpenAI bundled `computer-use` plugin with
+  OpenWukong's current control architecture:
+  - local plugin evidence:
+    - installed at:
+      `C:\Users\Zhangjinqian\.codex\plugins\cache\openai-bundled\computer-use\26.527.31326`
+    - manifest describes it as Windows desktop control from Codex with
+      interactive/read/write capability
+    - implementation entrypoint is `scripts/computer-use-client.mjs`, which
+      talks to `codex-computer-use.exe` through a native pipe and exposes the
+      `sky` Window2 API
+    - declared runtime primitives include `list_apps`, `list_windows`,
+      `launch_app`, `get_window_state`, `click`, `press_key`, `type_text`,
+      `scroll`, `set_value`, `drag`, `perform_secondary_action`, and
+      `activate_window`
+    - plugin guidance states Windows automation uses SendInput, UI
+      Automation, and Windows.Graphics.Capture; occluded-window screenshots
+      are supported, but input methods activate the target window
+  - comparison conclusion:
+    - Computer Use is a strong universal Windows UI fallback and app/window
+      discovery layer, especially for occluded screenshots and basic UIA text
+      snapshots
+    - it is not a substitute for OpenWukong's connector-first path because it
+      is still mainly window/input/accessibility driven, while OpenWukong's
+      strongest verified paths use product-native transports such as CDP,
+      Office COM, IDE bridge/DevTools, managed CLI, and owned filesystem
+      contracts
+    - best integration direction is to add Computer Use as a guarded
+      foreground/semiforeground fallback transport below native connectors and
+      UIA semantic providers, with the same no-loss counters, target
+      resolution, readback verification, and confirmation gates already used
+      by OpenWukong
+- 2026-06-01 integrated Computer Use into the agent app transport matrix as a
+  guarded fallback contract:
+  - implementation:
+    - added `openwukong.control.computer_use_transport` with a static
+      read-only probe for the installed bundled Computer Use client; this
+      checks the client entrypoint and native pipe configuration without
+      starting helper processes, sending input, or touching desktop focus
+    - `agent_native_connector_probe` now attaches `computer_use_probe` evidence
+      to app-surface reports
+    - `agent_app_transport_matrix` now emits a `computer-use-window2`
+      candidate whenever Computer Use evidence exists
+    - a ready Computer Use candidate is classified only as
+      `background-read-only` with operation scope `inspect-snapshot-only`;
+      it never sets `can_send_without_focus` or `can_draft_without_focus`
+      because Computer Use input actions activate the target window
+    - native pipe missing or unverified runtime state is explicitly surfaced as
+      `native_pipe_unavailable` / blocked rather than silently falling back to
+      keyboard or mouse input
+  - official-doc basis:
+    - OpenAI Computer Use documentation describes the tool as a UI
+      screenshot/action loop and recommends isolated environments,
+      allowlists/guardrails, and human oversight for risky actions; this
+      supports keeping Computer Use below native connectors and behind
+      confirmation/focus gates
+  - validation:
+    - red tests first proved the matrix lacked `computer-use-window2` and that
+      the report summary did not count Computer Use read-only cases
+    - green targeted tests:
+      `python -m unittest tests.test_computer_use_transport tests.test_agent_app_transport_matrix`
+      passed with `11` tests
+    - native connector regression:
+      `python -m unittest tests.test_agent_native_connector_probe` passed with
+      `20` tests
+    - agent app no-loss regression:
+      `python -m unittest tests.test_agent_app_real_no_loss` passed with `17`
+      tests
+    - current local static probe reports the bundled plugin is installed at
+      `C:\Users\Zhangjinqian\.codex\plugins\cache\openai-bundled\computer-use\26.527.31326`
+      but `SKY_CUA_NATIVE_PIPE_DIRECTORY` is not configured in the Python
+      process, so the fallback is currently `native_pipe_unavailable`
+    - R84 read-only real app probe:
+      `logs/runtime/agent-app-real-no-loss-r84-computer-use-fallback-readonly/report.json`
+      kept `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `background_screenshot_focus_stable=true`,
+      and `goal_complete=false`
+    - R84 Codex app case is still `gated_native_endpoint_missing`; R84 Claude
+      Desktop case is `unavailable` in the current visible surface; both cases
+      carry a blocked `computer-use-window2` candidate with
+      `native_pipe_unavailable` and risk flags
+      `input_actions_activate_window` / `not_background_write_transport`
+  - current conclusion:
+    - the unified architecture is stronger because it now accounts for the
+      installed Computer Use plugin as a first-class fallback surface
+    - the overall product goal is still not complete: Computer Use is not
+      currently connected in this session, and even when connected it should
+      prove read-only background observation first before any foreground-gated
+      input action can be considered
+    - next concrete actions:
+      1. add a real Computer Use runtime probe path that records
+         `sky.list_apps` / `get_window_state` readiness when the native pipe is
+         actually available
+      2. keep Codex/Claude desktop app chat on native/DevTools/extension bridge
+         work; do not treat Computer Use input as background app-chat proof
+      3. add the same fallback accounting to WeChat's app matrix after its
+         native bridge and UIA semantic gaps are reported
+- 2026-06-01 upgraded Computer Use fallback from static install evidence to a
+  runtime-readiness contract:
+  - implementation:
+    - `build_computer_use_runtime_probe` now wraps the static plugin/native
+      pipe check and can consume an injected read-only runtime probe result
+    - runtime readiness requires `list_apps_ready` plus a read-only state
+      signal such as `window_state_ready`, `background_snapshot_ready`, or
+      `accessibility_tree_available`
+    - any `control_attempts`, `window_input_attempts`, or
+      `foreground_activation_attempts` causes
+      `computer_use_runtime_not_read_only`, so Computer Use cannot be promoted
+      to background observation if it activated or typed into a window
+    - `agent_native_connector_probe` now uses the runtime contract by default
+      while still accepting an injected probe runner for tests or a future
+      live bridge implementation
+  - validation:
+    - new red/green tests cover a ready read-only runtime probe and a blocked
+      foreground-activation runtime probe
+    - focused regression:
+      `python -m unittest tests.test_computer_use_transport
+      tests.test_agent_app_transport_matrix tests.test_agent_native_connector_probe
+      tests.test_agent_app_real_no_loss` passed with `50` tests
+    - current local runtime probe still reports:
+      `mode=computer-use-runtime-probe`, `plugin_installed=true`,
+      `native_pipe_configured=false`, `native_pipe_ready=false`,
+      `decision=native_pipe_unavailable`, `control_attempts=0`,
+      `window_input_attempts=0`, and `foreground_activation_attempts=0`
+    - R85 read-only real app probe:
+      `logs/runtime/agent-app-real-no-loss-r85-computer-use-runtime-readonly/report.json`
+      kept `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `background_screenshot_focus_stable=true`,
+      and `goal_complete=false`
+    - R85 app cases carry `computer-use-runtime-probe` evidence:
+      Codex app is still `gated_native_endpoint_missing`, Claude Desktop is
+      `unavailable`, and both Computer Use candidates remain blocked by
+      `native_pipe_unavailable`
+  - current conclusion:
+    - the runtime contract is ready for a future live Computer Use bridge
+      without weakening no-loss semantics
+    - the final product goal remains incomplete: no current evidence proves
+      Codex/Claude desktop app chat or WeChat background send through a
+      deterministic, no-focus transport
+- 2026-06-01 added Computer Use fallback accounting to the WeChat/IM primary
+  no-loss path:
+  - implementation:
+    - `wechat_locator` now accepts a `computer_use_probe` and exports
+      `computer_use_probe`, `computer_use_read_only_ready`,
+      `computer_use_write_control_ready=false`,
+      `computer_use_attempts`, `computer_use_window_input_attempts`, and
+      `computer_use_foreground_activation_attempts`
+    - `primary_real_no_loss` now runs or accepts an injected Computer Use
+      runtime probe for the WeChat case and propagates the evidence into the
+      case details and top-level summary counters
+    - a ready Computer Use fallback is treated only as
+      `computer-use-read-only`; it never promotes WeChat to background send or
+      draft-ready because Computer Use input actions activate the target window
+  - validation:
+    - red tests first proved `build_wechat_locator_report` and
+      `run_primary_real_no_loss` had no Computer Use fallback accounting API
+    - green focused tests:
+      `python -m unittest tests.test_wechat_locator.WeChatLocatorTests.test_attaches_computer_use_fallback_without_promoting_write_control tests.test_primary_real_no_loss.PrimaryRealNoLossTests.test_runner_converts_primary_scenarios_to_real_no_loss_probes`
+      passed
+    - wider regression:
+      `python -m unittest tests.test_computer_use_transport
+      tests.test_wechat_locator tests.test_primary_real_no_loss
+      tests.test_major_real_no_loss tests.test_agent_app_transport_matrix
+      tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss`
+      passed with `97` tests
+    - real no-loss read-only R86:
+      `logs/runtime/primary-real-no-loss-r86-wechat-computer-use-readonly`
+      produced `passed_cases=5/5`, `real_verified_cases=3`,
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `background_screenshot_success_count=1`,
+      and `background_screenshot_focus_stable=true`
+    - R86 WeChat evidence:
+      Weixin window `hwnd=396116` was background-captured through PrintWindow
+      without focus change; UIA remained `structure_only`, semantic composer
+      counts stayed `0`, native bridge URLs were absent, and
+      `background_send_verified=false`
+    - R86 Computer Use evidence:
+      bundled plugin was detected at
+      `C:\Users\Zhangjinqian\.codex\plugins\cache\openai-bundled\computer-use\26.527.31326`,
+      but the Python runtime still had `native_pipe_configured=false`,
+      `native_pipe_ready=false`, `decision=native_pipe_unavailable`,
+      `computer_use_attempts=0`, and `window_input_attempts=0`
+  - current conclusion:
+    - WeChat/IM is now aligned with the unified fallback accounting model:
+      native bridge first, UIA semantic only if proven, Computer Use as
+      read-only fallback, foreground takeover as an explicit separate gate
+    - the final goal is still incomplete because WeChat background send and
+      Codex/Claude desktop-app chat still lack deterministic no-focus write
+      transports
+    - next concrete actions:
+      1. build a generic non-agent app transport matrix so WeChat, Office,
+         Browser, File Search, and agent apps expose the same selected route /
+         fallback / blocker schema
+      2. add a live Computer Use bridge runner that records `sky.list_apps` and
+         `get_window_state` readiness when the native pipe is available, still
+         without input actions
+      3. continue Codex/Claude desktop-app bridge work separately from the
+         already verified CLI routes
+- 2026-06-01 added a unified primary-scenario transport matrix:
+  - implementation:
+    - added `openwukong.evaluation.primary_transport_matrix`
+    - `primary_real_no_loss` now embeds `transport_matrix` in full reports and
+      `transport_matrix_summary` in summaries
+    - primary scenarios now share the same selected transport / fallback /
+      blocker schema across WeChat, Browser, File Search, Word, and Codex
+    - the matrix separates `can_execute_without_focus` from
+      `can_write_without_focus`, so read-only evidence cannot be promoted into
+      background send/task-submit capability
+  - validation:
+    - red tests first proved there was no `primary_transport_matrix` module and
+      no `transport_matrix` field in primary reports
+    - green focused tests:
+      `python -m unittest tests.test_primary_transport_matrix tests.test_primary_real_no_loss.PrimaryRealNoLossTests.test_runner_converts_primary_scenarios_to_real_no_loss_probes`
+      passed with `3` tests
+    - wider regression:
+      `python -m unittest tests.test_primary_transport_matrix
+      tests.test_primary_real_no_loss tests.test_major_real_no_loss
+      tests.test_computer_use_transport tests.test_wechat_locator
+      tests.test_agent_app_transport_matrix tests.test_agent_native_connector_probe
+      tests.test_agent_app_real_no_loss` passed with `99` tests
+    - R87 real no-loss run without owned browser launch:
+      `logs/runtime/primary-real-no-loss-r87-transport-matrix-readonly`
+      kept `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, and background screenshot focus stable; the
+      matrix correctly marked Browser and Codex as blocked in that run
+    - R88 real no-loss run with owned browser helper:
+      `logs/runtime/primary-real-no-loss-r88-transport-matrix-owned-browser`
+      produced `passed_cases=5/5`, `real_verified_cases=4`,
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `owned_app_launch_attempts=1`, and
+      `background_screenshot_focus_stable=true`
+    - R88 matrix summary:
+      `goal_complete=false`, `background_execute_ready_cases=4/5`,
+      `background_write_ready_cases=1`, `background_read_only_cases=1`,
+      `blocked_cases=1`, `write_blocked_cases=2`
+    - R88 selected routes:
+      Browser=`browser-devtools-owned`, File Search=`owned-filesystem-index`,
+      Word=`office-word-com`, WeChat=`wechat-read-only-locator`, and
+      Codex=`none` because the IDE bridge at `127.0.0.1:8787` was unavailable
+    - post-run process scan found no owned browser helper residue beyond the
+      scan process itself
+  - current conclusion:
+    - the architecture is on the right path and now has report-level evidence
+      for current goal distance
+    - the final goal is not yet complete:
+      WeChat still lacks deterministic no-focus background send, Codex desktop
+      task submission still lacks a connected bridge, and Computer Use native
+      pipe is still unavailable in this Python runtime
+    - next concrete actions:
+      1. connect or implement the real Codex/Cursor/Claude desktop bridge path
+         for project/task submission with readback
+      2. implement a deterministic WeChat native bridge or verified semantic
+         UIA send path for File Transfer Assistant only
+      3. add a live Computer Use bridge runner when the native pipe is
+         available, but keep it below native connectors and behind focus/input
+         gates
+- 2026-06-01 added a goal-level objective readiness matrix for the full
+  desktop-control objective:
+  - implementation:
+    - added `openwukong.evaluation.objective_readiness_matrix`
+    - `major_real_no_loss` now embeds `objective_readiness_matrix` at the
+      top level
+    - the matrix combines major requirements with primary transport evidence,
+      agent app transport matrices, and agent CLI evidence
+    - each requirement now reports `selected_transport`,
+      `capability_level`, `can_execute_without_focus`,
+      `can_write_without_focus`, `satisfied`, and `blocking_reason`
+    - this makes the current objective auditable across:
+      WeChat, Word, Browser, File Search, Codex CLI, Claude CLI, Codex App,
+      Claude Desktop, and Cursor
+  - validation:
+    - red tests first proved the module and major report field were missing
+    - green focused tests:
+      `python -m unittest tests.test_objective_readiness_matrix
+      tests.test_major_real_no_loss.MajorRealNoLossTests.test_major_report_exposes_agent_app_transport_matrix_summary`
+      passed with `2` tests
+    - wider regression:
+      `python -m unittest tests.test_objective_readiness_matrix
+      tests.test_primary_transport_matrix tests.test_primary_real_no_loss
+      tests.test_major_real_no_loss tests.test_computer_use_transport
+      tests.test_wechat_locator tests.test_agent_app_transport_matrix
+      tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss`
+      passed with `100` tests
+    - R89 real no-loss run:
+      `logs/runtime/major-real-no-loss-r89-objective-readiness`
+      kept `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `background_screenshot_success_count=5/5`,
+      and `background_screenshot_focus_stable=true`
+    - R90 real no-loss run with safe CLI execution:
+      `logs/runtime/major-real-no-loss-r90-objective-readiness-cli`
+      kept `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, `background_screenshot_success_count=5/5`,
+      `background_screenshot_focus_stable=true`, and no owned helper residue
+      after the run
+    - R90 objective readiness summary:
+      `requirement_count=10`, `safe_run_ok=true`, `goal_complete=false`,
+      `satisfied_count=5`, `background_execute_ready_count=6`,
+      `background_write_ready_count=2`, `gated_count=3`,
+      `auth_required_count=1`, `unavailable_count=1`
+    - R90 satisfied requirements:
+      WeChat background observation, Word background document, Browser
+      background research, File background search, and Codex CLI background
+      task
+    - R90 remaining unmet requirements:
+      `wechat_background_send`, `claude_cli_background_task`,
+      `codex_app_background_chat`, `claude_desktop_background_chat`, and
+      `cursor_background_chat`
+  - current conclusion:
+    - the system is now able to state the exact distance to the objective from
+      current real evidence, instead of relying on manual interpretation
+    - the best next engineering move is no longer another broad scan; it is to
+      implement/attach deterministic write transports for the five remaining
+      unmet requirements:
+      1. WeChat native bridge or verified File Transfer Assistant semantic send
+      2. Claude CLI login/auth handling or auth-state prerequisite reporting
+      3. Codex desktop app bridge
+      4. Claude Desktop bridge
+      5. Cursor default-profile/DevTools app bridge readback path
+- 2026-06-01 tightened Cursor DevTools/app-bridge readiness diagnostics:
+  - root cause found:
+    - R91/R92 showed Cursor DevTools `/json/version` could be ready while
+      `/json/list` had no page target
+    - `_wait_for_agent_app_devtools_endpoint_health` returned immediately on
+      empty targets instead of polling until a page target appeared or timeout
+    - current machine also has an existing default-profile Cursor process
+      without `--remote-debugging-port`, so default-profile launch can expose
+      only browser-level DevTools without a workbench page target
+  - implementation:
+    - endpoint health now keeps polling when targets are temporarily empty and
+      preserves the last diagnostic payload on timeout
+    - added bridge-level auth-gate detection for Cursor/Codex/Claude login
+      text from both send readback and composer-probe readback
+    - `agent_app_real_no_loss` now reports `auth_required` when the bridge
+      returns `app_bridge_auth_required`
+    - `major_real_no_loss` now preserves `auth_required` before native-ready
+      gated classification
+  - validation:
+    - red tests first reproduced:
+      1. empty Cursor target list returning too early
+      2. Cursor login page being classified as `submit_not_verified`
+      3. composer-probe login evidence being lost when send timed out
+      4. app requirement demoting `auth_required` to gated
+    - focused tests passed after fixes
+    - wider regression passed:
+      `python -m unittest tests.test_agent_app_bridge
+      tests.test_agent_app_real_no_loss tests.test_agent_app_transport_matrix
+      tests.test_objective_readiness_matrix tests.test_primary_transport_matrix
+      tests.test_primary_real_no_loss tests.test_major_real_no_loss
+      tests.test_computer_use_transport tests.test_wechat_locator
+      tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss`
+      with `147` tests
+    - R93 default-profile Cursor send:
+      `logs/runtime/major-real-no-loss-r93-cursor-default-profile-send-after-target-wait`
+      kept `control_attempts=0`, `window_input_attempts=0`, focus stable, and
+      helper cleanup ok; after the wait fix it made `97` endpoint attempts but
+      still saw `target_count=0`, confirming the default-profile single-instance
+      limitation rather than an early-return bug
+    - R94/R95/R96/R97 isolated-profile Cursor runs:
+      isolated profile produced a real DevTools page target and composer probe
+      (`target_count=1`) without window input
+    - R97:
+      `logs/runtime/major-real-no-loss-r97-cursor-isolated-profile-probe-auth-fixed`
+      kept `control_attempts=0`, `window_input_attempts=0`, focus stable,
+      helper cleanup ok, no port-19557 helper residue, and classified
+      Cursor as `auth_required (auth_required)`
+    - R97 objective summary:
+      `satisfied_count=4`, `gated_count=1`, `auth_required_count=1`,
+      `unavailable_count=4`, `failed_count=0`
+  - current conclusion:
+    - Cursor background CDP/page-target route is technically reachable in an
+      owned isolated profile, but app chat execution needs a logged-in profile
+      or a native/extension bridge bound to the real logged-in Cursor session
+    - default-profile Cursor cannot be considered stable while a normal Cursor
+      process is already running without remote debugging
+    - next concrete actions:
+      1. implement a real Cursor/Codex/Claude extension or native connector
+         that exposes project/task submission from the logged-in app session
+      2. keep DevTools page-target control as a diagnostic and fallback, not the
+         primary production write path
+      3. continue WeChat background send work via native bridge or verified
+         semantic UIA send with post-send readback
+- 2026-06-01 added a read-only IDE extension bridge readiness probe:
+  - implementation:
+    - added `openwukong.evaluation.ide_extension_readiness`
+    - the probe checks the local VS Code/Cursor bridge scaffold, installed
+      extension roots, `/v1/ide/capabilities`, and the selected chat adapter
+      without launching apps, sending messages, or using window input
+    - reports `status`, `blocking_reason`, `extension_installed`,
+      `bridge_ready`, `selected_chat_adapter`,
+      `can_execute_without_focus`, and `can_write_without_focus`
+    - added a CLI:
+      `python -m openwukong.evaluation.ide_extension_readiness --json`
+  - validation:
+    - red test first proved the module was missing
+    - green tests cover:
+      1. installed extension plus available chat adapter => `ready`
+      2. scaffold present but no installed extension => `extension_not_installed`
+      3. installed extension but no endpoint => `bridge_unavailable`
+      4. bridge reachable but adapter unavailable => `chat_adapter_unavailable`
+    - focused regression:
+      `python -m unittest tests.test_ide_extension_readiness
+      tests.test_ide_extension_scaffold tests.test_ide_extension_connector
+      tests.test_major_real_no_loss tests.test_agent_app_bridge
+      tests.test_agent_app_real_no_loss` passed with `102` tests
+    - updated global skill `debug-connector-helper-readiness` with:
+      empty DevTools target waiting, browser-level vs page-target readiness,
+      and login-gate-first classification
+    - skill validation passed:
+      `quick_validate.py .../debug-connector-helper-readiness`
+  - real no-loss/read-only probe:
+    - command:
+      `python -m openwukong.evaluation.ide_extension_readiness --json
+      --agent-id cursor --project-name openwukong --workspace-path
+      E:\ideaProjects\agent\openwukong --request-timeout 2`
+    - result:
+      `status=extension_not_installed`,
+      `blocking_reason=install_extension_in_logged_in_ide_profile`,
+      `scaffold_present=true`, `package_json_present=true`,
+      `extension_installed=false`, `bridge_ready=false`,
+      `can_execute_without_focus=false`, `can_write_without_focus=false`
+    - local evidence:
+      Cursor extension directory currently contains Claude Code and
+      Cursor Pyright extensions, but no OpenWukong IDE bridge extension
+      install; `127.0.0.1:8787` is not serving `/v1/ide/capabilities`
+  - current conclusion:
+    - the Python connector and extension scaffold exist, but the real logged-in
+      Cursor session is not yet bridge-enabled
+    - next concrete action is to package/install or dev-load
+      `extensions/openwukong-vscode` into the logged-in Cursor profile, then
+      run `IDE CAPABILITIES` and configure a real chat adapter command id
+      before any app-side message send
+- 2026-06-01 bridge-enabled the real logged-in Cursor profile without window
+  input:
+  - implementation:
+    - changed the OpenWukong VS Code-compatible extension manifest so the local
+      bridge auto-starts on activation while keeping the default bind host at
+      `127.0.0.1`
+    - documented the auto-start/local-bind behavior in
+      `extensions/openwukong-vscode/README.md`
+    - fixed `ide_extension_readiness` package parsing to tolerate UTF-8 BOM
+      `package.json` files produced by Windows/PowerShell tooling
+  - real no-loss validation:
+    - packaged the extension with `@vscode/vsce` using `npm_config_ignore_scripts`
+      to avoid the current `vsce-sign` postinstall failure on this machine
+    - installed `logs/runtime/openwukong-vscode-bridge-0.1.0.vsix` into the real
+      Cursor profile with Cursor CLI `--install-extension ... --force`
+    - Cursor CLI now lists:
+      `openwukong-local.openwukong-vscode-bridge@0.1.0`
+    - `python -m openwukong.evaluation.ide_extension_readiness --json ...`
+      now reports `extension_installed=true`, `bridge_ready=true`,
+      `can_execute_without_focus=true`, `control_attempts=0`,
+      `window_input_attempts=0`, and `bridge_send_attempts=0`
+    - readiness status is now `chat_adapter_unavailable`, not
+      `extension_not_installed`
+    - capability capture saved at
+      `logs/runtime/cursor-ide-bridge-r98/capabilities.json`
+      observed `3459` commands from the real Cursor bridge and inferred Cursor
+      candidates including `composer.startComposerPrompt`,
+      `composer.startComposerPrompt2`, `composer.sendToAgent`,
+      `composer.newAgentChat`, `composer.openComposer`, `composer.createNew`,
+      `aichat.newchataction`, and `workbench.action.chat.open`
+    - Codex extension commands are also visible through the same bridge,
+      including `chatgpt.newCodexPanel`
+  - current conclusion:
+    - the logged-in Cursor session is now background-readable through the
+      OpenWukong extension bridge
+    - the system still must not claim Cursor background chat submission is
+      complete until a sacrificial/isolated command-contract probe validates
+      the exact adapter command and argument shape without destructive edits or
+      foreground takeover
+    - next concrete actions:
+      1. build a non-destructive adapter contract validator that records focus
+         stability and workspace diffs while probing candidate commands
+      2. validate Cursor adapter command shape before enabling `/v1/ide/chat`
+         for real project task submission
+      3. repeat the same bridge/capability/contract path for Codex and Claude
+         extension surfaces instead of falling back to UI vision
+- 2026-06-01 added and ran the non-destructive Cursor command-contract probe:
+  - implementation:
+    - `ide_bridge_contract_probe` now records Windows foreground focus before
+      and after each command variant with `GetForegroundWindow` /
+      `GetWindowTextW`
+    - probe results now expose `foreground_changed`, `focus_stable`, and
+      validation-level `foregroundChanged`
+    - recommended chat adapters now require:
+      command accepted, no workspace diff, and no foreground takeover
+    - regression coverage now proves a command that steals focus is not
+      recommended even if it otherwise executes
+  - real no-loss validation:
+    - launched an isolated Cursor profile/workspace at
+      `logs/runtime/cursor-ide-contract-r99` with bridge port `8792`
+    - captured `3203` commands from the isolated Cursor bridge
+    - probed first Cursor chat candidates:
+      `composer.startComposerPrompt`, `composer.startComposerPrompt2`, and
+      `composer.sendToAgent`
+    - result:
+      `control_attempts=9`, `workspace_changed=false`,
+      `foreground_changed=false`, `focus_stable=true`,
+      but all variants returned `command_not_allowlisted`
+    - validated settings therefore kept Cursor `commandId=""` and
+      `available=false`
+    - stopped the isolated Cursor process through the manifest; follow-up
+      process scan found no `cursor-ide-contract-r99` residue except the scan
+      process itself
+  - validation:
+    - focused regression:
+      `python -m unittest tests.test_ide_bridge_contract_probe
+      tests.test_ide_extension_readiness tests.test_ide_extension_scaffold
+      tests.test_ide_bridge_capture` passed with `18` tests
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+  - current conclusion:
+    - the bridge can read Cursor in the background and can run a safe isolated
+      contract probe without focus takeover
+    - Cursor background chat submission is still not complete because the
+      extension intentionally blocks unallowlisted command execution
+    - the next concrete action is to add a controlled allowlist/config path for
+      sacrificial command validation, then validate the exact Cursor chat
+      command and argument shape before enabling real logged-in project task
+      submission
+- 2026-06-01 added controlled Cursor contract validation and proved an
+  isolated background chat endpoint path:
+  - implementation:
+    - added `build_probe_allowlist_settings` to generate temporary VS
+      Code/Cursor `settings.json` for sacrificial profiles only
+    - added CLI flags:
+      `--probe-settings-output` and `--write-probe-settings-only`
+    - documented the isolated contract-probe workflow in
+      `extensions/openwukong-vscode/README.md`
+    - extended `ide_bridge_contract_probe` with `target_foreground` and
+      `background_execution_observed`
+    - recommended adapters now require:
+      accepted `object_message`, no workspace diff, no foreground hwnd change,
+      and target window not already foreground
+    - regression coverage now catches both:
+      foreground-stealing commands and false positives where the target IDE was
+      already the foreground window
+  - real no-loss validation:
+    - R100 wrote isolated profile settings and allowed the first three Cursor
+      candidates:
+      `composer.startComposerPrompt`, `composer.startComposerPrompt2`, and
+      `composer.sendToAgent`
+    - R100 proved those commands are callable through `/v1/ide/command`, but
+      also exposed a verification gap because Cursor was already foreground
+      during the probe
+    - R101 repeated the validation after minimizing the isolated Cursor window
+      and restoring the foreground to Edge
+    - R101 contract probe:
+      `logs/runtime/cursor-ide-contract-r101/contract-probe.json`
+      showed `control_attempts=9`, `workspace_changed=false`,
+      `foreground_changed=false`, `target_foreground=false`,
+      `background_execution_observed=true`, and recommended all three
+      candidate commands
+    - R101 selected validated mapping:
+      Cursor `commandId=composer.startComposerPrompt` with
+      `acceptedVariant=object_message`
+    - R101 `/v1/ide/chat` endpoint probe:
+      `logs/runtime/cursor-ide-contract-r101/chat-endpoint-probe.json`
+      returned `ok=true`, `command_id=composer.startComposerPrompt`,
+      `foreground_changed=false`, `target_foreground=false`, and the isolated
+      workspace still contained only `README.md`
+    - stopped the isolated Cursor process through the manifest; follow-up
+      process scan found no `cursor-ide-contract-r101` residue except the scan
+      process itself
+  - validation:
+    - focused regression:
+      `python -m unittest tests.test_ide_bridge_contract_probe
+      tests.test_ide_extension_readiness tests.test_ide_extension_scaffold
+      tests.test_ide_bridge_capture tests.test_ide_extension_connector
+      tests.test_session_readiness_plan` passed with `64` tests
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+  - current conclusion:
+    - Cursor now has a verified isolated background extension-bridge path for
+      `/v1/ide/chat`, including no foreground takeover and no workspace edits
+    - this is not yet a full real logged-in Cursor project-task completion
+      proof, because the validation used an isolated profile and did not verify
+      model response/readback or task result acceptance in the logged-in user
+      profile
+    - next concrete actions:
+      1. install/write only the validated Cursor mapping into the real logged-in
+         Cursor profile under explicit no-loss gating, then run a harmless
+         project task submission/readback check
+      2. repeat the same extension-bridge validation path for Codex App and
+         Claude Desktop surfaces
+      3. keep WeChat background send as a separate native/semantic bridge track
+- 2026-06-01 validated the real logged-in Cursor profile bridge and tightened
+  project-target readiness reporting:
+  - real no-loss validation:
+    - R102 applied the R101 validated Cursor mapping to the real logged-in
+      Cursor profile settings with a backup under
+      `logs/runtime/cursor-real-profile-r102/settings-backups`
+    - live readiness now reports:
+      `status=ready`, `extension_installed=true`, `bridge_ready=true`,
+      selected adapter `cursor`, and command
+      `composer.startComposerPrompt`
+    - direct real `/v1/ide/chat` probe:
+      `logs/runtime/cursor-real-profile-r102/chat-endpoint-probe.json`
+      returned `ok=true`, `command_id=composer.startComposerPrompt`,
+      `foreground_focus_stable=true`, `target_foreground_before=false`,
+      `target_foreground_after=false`, `workspace_changed=false`, and
+      `git_status_unchanged=true`
+    - the same R102 probe also showed the remaining verification gap:
+      `workspaceFolders=[]`, `workspace_bound_to_requested_path=false`, and
+      `post_send_readback_available=false`
+  - implementation:
+    - explicit IDE bridge probes now preserve
+      `requested_workspace_path`, `requested_workspace_name`, and
+      `workspace_target_source=explicit_probe_request` in endpoint metadata
+    - app bridge target matching now accepts those explicit IDE bridge
+      workspace targets for new background tasks while keeping the readback
+      marker gate
+    - `agent_app_real_no_loss` now preserves the precise app bridge decision
+      such as `app_bridge_message_submitted_acceptance_pending` instead of
+      collapsing it back to `gated_native_endpoint_missing`
+  - real standardized runner:
+    - R105:
+      `logs/runtime/cursor-real-profile-r105-standard-agent-app/agent-app-report.json`
+      reached the standard app bridge path with
+      `app_bridge_dry_run_ready`, `bridge_send_attempts=1`,
+      `control_attempts=0`, and `window_input_attempts=0`
+    - R105 status is intentionally
+      `app_bridge_message_submitted_acceptance_pending` because the current
+      IDE bridge response only reports `ide=Cursor`, `workspaceFolders=0`,
+      and `action=chat_send`; it does not expose the Cursor model reply or the
+      required acceptance marker
+  - validation:
+    - red tests first reproduced:
+      1. explicit IDE bridge workspace targets being dropped from endpoint
+         metadata
+      2. app bridge dry-run rejecting a ready explicit IDE bridge because
+         Cursor self-reported `workspaceFolders=[]`
+      3. pending readback decisions being hidden behind a generic gated status
+    - focused regression passed:
+      `python -m unittest tests.test_agent_native_connector_probe
+      tests.test_agent_app_bridge tests.test_agent_app_real_no_loss
+      tests.test_ide_extension_connector tests.test_ide_bridge_contract_probe
+      tests.test_ide_bridge_settings_apply tests.test_objective_readiness_matrix`
+      with `93` tests
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+  - current conclusion:
+    - Cursor has now proven real logged-in profile background dispatch through
+      the extension bridge without foreground takeover, keyboard, mouse, or
+      clipboard input
+    - Cursor is still not fully complete for the final goal because the bridge
+      cannot yet read back the Cursor model response or verify acceptance
+      markers, and the IDE API still reports no bound workspace folders
+    - next concrete actions:
+      1. add a real Cursor transcript/readback path or native Cursor-side
+         result hook so acceptance markers can be verified
+      2. repeat the same extension/native bridge path for Codex App and Claude
+         Desktop
+      3. continue the WeChat background send track through native bridge or
+         verified semantic UIA send with readback
+- 2026-06-01 added a read-only Cursor transcript/readback verifier and wired it
+  into the app-surface acceptance path:
+  - implementation:
+    - added `openwukong.evaluation.cursor_transcript_readback`
+    - the scanner binds a requested workspace to Cursor
+      `%APPDATA%\Cursor\User\workspaceStorage\*/workspace.json`
+    - it opens Cursor `state.vscdb` files through SQLite `file:` URI
+      `mode=ro`, reads selected composer IDs, and scans `cursorDiskKV`
+      `composerData:*`, `bubbleId:*`, `messageRequestContext:*`,
+      `checkpointId:*`, and matching `agentKv:blob:*` rows
+    - reports include `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, selected composer IDs, scanned keys,
+      required/forbidden marker results, and redacted marker snippets
+    - `agent_app_real_no_loss` can now use the scanner to upgrade Cursor
+      `app_bridge_message_submitted_acceptance_pending` to
+      `app_bridge_send_accepted` when transcript markers prove acceptance
+    - CLI support was added with
+      `--enable-cursor-transcript-readback` and
+      `--cursor-user-data-root`
+  - validation:
+    - red tests first reproduced:
+      1. missing `cursor_transcript_readback` module
+      2. missing `cursor_transcript_readback_runner` integration point
+    - focused green tests:
+      `python -m unittest tests.test_cursor_transcript_readback
+      tests.test_agent_app_real_no_loss.AgentAppRealNoLossTests.test_cursor_pending_app_bridge_is_accepted_by_transcript_readback`
+      passed with `3` tests
+    - wider regression:
+      `python -m unittest tests.test_cursor_transcript_readback
+      tests.test_agent_app_real_no_loss tests.test_agent_app_bridge
+      tests.test_agent_native_connector_probe
+      tests.test_objective_readiness_matrix` passed with `71` tests
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+  - real no-loss/read-only evidence:
+    - artifacts saved under
+      `logs/runtime/cursor-transcript-readback-r106`
+    - R106 R105-marker scan:
+      `r105-pending.json` found the real openwukong Cursor workspace and
+      selected composer `a9a6e98f-5a1e-475d-8051-8c4d7bc7b8fa`, kept all
+      control/window/bridge counters at zero, and correctly reported
+      `cursor_transcript_readback_pending` because
+      `OPENWUKONG_CURSOR_STANDARD_RUN_R105_NO_EDIT` is absent from local
+      transcript storage
+    - R106 historical R75-marker scan:
+      `r75-accepted.json` found `OPENWUKONG_CURSOR_REAL_SEND_R75` through the
+      same read-only path and reported `cursor_transcript_readback_accepted`
+      with all control/window/bridge counters at zero
+  - current conclusion:
+    - Cursor now has a real local transcript evidence path for acceptance
+      verification, not just a bridge-send acknowledgement
+    - the latest R105 send remains pending because its marker never reached
+      Cursor transcript storage, so the next Cursor task is to adjust the
+      command/message submission shape or add a Cursor-side result hook until
+      new background sends produce verifiable transcript markers
+    - next concrete actions:
+      1. run a fresh harmless Cursor background send with transcript readback
+         enabled and use R106 diagnostics to distinguish submit-shape failure
+         from model-response latency
+      2. repeat the same extension/native bridge + transcript/result-hook
+         pattern for Codex App and Claude Desktop
+      3. keep WeChat background send on native/semantic bridge track with
+         post-send readback rather than visual confirmation
+- 2026-06-01 completed the next Cursor real-profile background send probes and
+  narrowed the remaining gap to Cursor-specific task-submission semantics:
+  - real no-loss evidence:
+    - R107 used the real Cursor profile, `/v1/ide/chat`,
+      `composer.startComposerPrompt`, and transcript readback:
+      `logs/runtime/cursor-real-profile-r107-transcript-readback/agent-app-report.json`
+      reported `app_bridge_message_submitted_acceptance_pending`,
+      `bridge_send_attempts=1`, `control_attempts=0`,
+      `window_input_attempts=0`, and
+      `background_screenshot_focus_stable=true`
+    - R108 direct command string probe:
+      `logs/runtime/cursor-real-profile-r108-direct-command-variants/string-message.json`
+      returned `ok=true` but the marker was still absent from transcript
+      storage
+    - R109 updated the real Cursor bridge settings with a backup and tested
+      `composer.sendToAgent`; the runner again stayed
+      `app_bridge_message_submitted_acceptance_pending` with no keyboard,
+      mouse, clipboard, or foreground-control attempts
+    - R110 command matrix covered four direct bridge variants:
+      `composer.startComposerPrompt2` string/object and
+      `composer.sendToAgent` string/object; all four returned `ok=true` with
+      `result=null`, but all four transcript scans stayed
+      `cursor_transcript_readback_pending`
+  - validation:
+    - focused regression for transcript readback and app integration passed
+      with `3` tests
+    - wider regression passed:
+      `python -m unittest tests.test_cursor_transcript_readback
+      tests.test_agent_app_real_no_loss tests.test_agent_app_bridge
+      tests.test_agent_native_connector_probe
+      tests.test_objective_readiness_matrix` with `71` tests
+    - settings replacement regression passed:
+      `python -m unittest tests.test_ide_bridge_settings_apply` with `4`
+      tests
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+  - current conclusion:
+    - the architecture has proven background discovery, routing, bridge
+      command execution, background screenshots, and local transcript readback
+      without relying on vision as the primary control layer
+    - the final goal is not yet fully achieved because the tested Cursor VS
+      Code command IDs acknowledge execution but do not actually persist a new
+      chat/task message in Cursor transcript storage
+    - the next concrete action is to stop guessing command IDs and implement
+      or discover a Cursor-side native/result hook that can write/read the real
+      composer/task state, then reuse that hook pattern for Codex App and
+      Claude Desktop
+- 2026-06-01 advanced Cursor from transcript-only readback to live composer
+  state introspection:
+  - implementation:
+    - added Cursor composer state discovery on top of the read-only transcript
+      scanner; it reports `scanned_composer_ids`, key-family counts, marker
+      locations, and hook candidates across `composerData:*`,
+      `bubbleId:*`, `messageRequestContext:*`, `checkpointId:*`, and matching
+      `agentKv:blob:*`
+    - `cursor_transcript_readback` now accepts extra composer IDs through
+      `extra_composer_ids` / `--composer-id`, so live bridge getter results can
+      be included without losing the workspace-selected composer evidence
+    - `ide_bridge_contract_probe` now ignores its own `logs/runtime` artifacts
+      when checking workspace mutation and supports `--variant` to avoid
+      unnecessary repeated snapshots in real probes
+    - the OpenWukong Cursor extension source now exposes a planned read-only
+      `/v1/ide/cursor/composer-state` endpoint that summarizes Cursor composer
+      handles without returning the huge internal manager object
+  - real no-loss evidence:
+    - R111 saved read-only state-discovery artifacts under
+      `logs/runtime/cursor-composer-state-discovery-r111`
+    - R111 historical R75 marker discovery confirmed real accepted messages
+      live in `bubbleId:<composer>:<bubble>` plus matching `agentKv:blob:*`
+    - R112 getter probe:
+      `logs/runtime/cursor-readonly-command-introspection-r112/readonly-command-probe-noargs.json`
+      ran `composer.getOrderedSelectedComposerIds`,
+      `composer.getBackgroundComposerInfo`, `composer.getComposerHandleById`,
+      and `composer.getCurrentWorkspaceRepoUrl` through the real bridge with
+      `control_attempts=4`, no workspace changes, no foreground change, and
+      WeChat remaining the foreground window
+    - R112 discovered the live selected composer is
+      `5db3f4d0-8745-4fbc-ab00-4c97296d65f7`, while the workspace DB selected
+      composer is still `a9a6e98f-5a1e-475d-8051-8c4d7bc7b8fa`
+    - rescanning R110 with both composer IDs still reported
+      `cursor_transcript_readback_pending`, proving the failed background send
+      did not merely land in the live composer missed by the old scanner
+    - `composer.getComposerHandleById` with the live composer ID returned a
+      real Cursor handle in the background; the summarized state shows an empty
+      draft (`text=""`, `conversationMap={}`, `status="none"`), consistent
+      with the prior screenshot and transcript evidence
+    - packaged and installed
+      `logs/runtime/openwukong-vscode-bridge-0.1.0-r113.vsix`; static install
+      verification found the new composer-state endpoint under
+      `C:\Users\Zhangjinqian\.cursor\extensions\openwukong-local.openwukong-vscode-bridge-0.1.0\src\extension.js`
+    - the running Cursor extension host has not been reloaded, so the live
+      `/v1/ide/cursor/composer-state` endpoint currently returns `404`; it is
+      intentionally not forced because reloading Cursor would interrupt the
+      user's foreground work
+    - R114 rerun:
+      `logs/runtime/cursor-live-composer-state-r114/live-composer-state-rerun.json`
+      confirmed the existing bridge can read the live selected Cursor composer
+      state in the background with `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`, and
+      `readonly_command_attempts=2`; the live composer is agent/edit mode
+      (`status="none"`, `unified_mode="agent"`, `force_mode="edit"`,
+      `is_agentic=true`) with an empty draft
+  - validation:
+    - TDD red tests first reproduced missing discovery, missing extra composer
+      ID scanning, runtime-log false mutation, missing CLI variant filtering,
+      and missing extension endpoint source
+    - focused regression passed:
+      `python -m unittest tests.test_cursor_transcript_readback
+      tests.test_ide_bridge_contract_probe...runtime_log...
+      tests.test_ide_bridge_contract_probe...variant...
+      tests.test_ide_extension_scaffold` with `10` tests
+    - wider regression passed:
+      `python -m unittest tests.test_cursor_transcript_readback
+      tests.test_ide_bridge_contract_probe tests.test_ide_extension_scaffold
+      tests.test_ide_extension_connector tests.test_agent_app_real_no_loss
+      tests.test_agent_app_bridge tests.test_agent_native_connector_probe
+      tests.test_objective_readiness_matrix` with `101` tests
+    - live composer summary regression passed:
+      `python -m unittest tests.test_cursor_live_composer_state` with `4`
+      tests
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+  - current conclusion:
+    - Cursor now has a concrete background read path into live composer state,
+      not only local SQLite transcript readback
+    - Cursor task submission is still not complete: current evidence proves the
+      tested command IDs do not mutate the live composer draft or transcript
+    - next concrete actions:
+      1. when user work can tolerate a Cursor reload, verify the new
+         `/v1/ide/cursor/composer-state` endpoint live
+      2. use the live handle shape to find a safe Cursor-native draft/message
+         mutation method instead of executing generic commands blindly
+      3. apply the same live-state summary endpoint pattern to Codex App and
+         Claude Desktop bridges
+- 2026-06-01 advanced Cursor command-contract discovery toward the real
+  query-draft entry point:
+  - implementation:
+    - added the `query_object` probe argument shape so command-contract probes
+      can validate commands that expect `{ query: message }`
+    - changed Cursor review candidate priority so
+      `workbench.action.chat.open` is discovered before the older
+      `composer.startComposerPrompt*` and `composer.sendToAgent` command ids
+    - changed active capability mapping so newly reviewed candidates are tried
+      before stale configured candidates, without automatically enabling an
+      unvalidated `commandId`
+    - updated the VS Code/Cursor bridge extension so `/v1/ide/chat` maps
+      `workbench.action.chat.open` to `vscode.commands.executeCommand(
+      commandId, { query: message })` while preserving the existing
+      `{ message, target, metadata }` envelope for other adapter commands
+  - validation:
+    - RED first:
+      `python -m unittest tests.test_ide_bridge_contract_probe
+      tests.test_ide_extension_scaffold tests.test_ide_bridge_capture`
+      initially failed because `query_object`, extension argument mapping, and
+      Cursor candidate priority were missing
+    - focused regression passed:
+      `python -m unittest tests.test_ide_bridge_contract_probe
+      tests.test_ide_extension_scaffold tests.test_ide_bridge_capture`
+      with `20` tests, then `tests.test_ide_bridge_capture` with `6` tests
+      after adding the stale-config ordering regression
+    - wider regression passed:
+      `python -m unittest tests.test_cursor_live_composer_state
+      tests.test_cursor_transcript_readback tests.test_ide_bridge_contract_probe
+      tests.test_ide_extension_scaffold tests.test_ide_bridge_capture
+      tests.test_ide_extension_connector tests.test_agent_app_real_no_loss
+      tests.test_agent_app_bridge tests.test_agent_native_connector_probe
+      tests.test_objective_readiness_matrix` with `112` tests
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+    - `node --check extensions\openwukong-vscode\src\extension.js` passed
+    - read-only live capability capture:
+      `logs/runtime/cursor-chat-open-candidate-r116/capabilities.json`
+      reported `ok=true`, `control_attempts=0`, `command_count=3466`,
+      `cursor_review_candidates[0]=workbench.action.chat.open`, and
+      `active_mapping.cursor.commandCandidates[0]=workbench.action.chat.open`
+    - packaged but did not install or reload Cursor:
+      `logs/runtime/openwukong-vscode-bridge-0.1.0-r116.vsix`; static VSIX
+      verification confirmed the packaged extension contains
+      `buildChatCommandArguments`, `workbench.action.chat.open`, and
+      `query: message`
+  - current conclusion:
+    - the next Cursor real-send attempt will no longer keep prioritizing the
+      already-disproven `composer.sendToAgent` / `composer.startComposerPrompt`
+      paths
+    - full Cursor task submission is still not proven because this turn stayed
+      read-only against the live profile and did not reload/install the new
+      extension or execute `workbench.action.chat.open`; that command is known
+      from bundle inspection to call a focus path, so the next real probe must
+      run with foreground-change gating or in an isolated profile
+    - next concrete actions:
+      1. dev-load or install R116 bridge into an isolated Cursor profile first,
+         then validate `workbench.action.chat.open` with `query_object` and
+         foreground/workspace mutation gates
+      2. if isolated validation is background-safe, apply the mapping to the
+         logged-in profile only when a Cursor reload is acceptable
+      3. continue Codex App, Claude Desktop, and WeChat background bridge work
+         after Cursor has a proven write/readback contract
+- 2026-06-01 ran the R117 isolated Cursor query-draft validation and found a
+  critical safety gap:
+  - real isolated setup:
+    - wrote temporary bridge settings under
+      `logs/runtime/cursor-ide-contract-r117/user-data/User/settings.json`
+      allowlisting `workbench.action.chat.open`,
+      `composer.getOrderedSelectedComposerIds`, and
+      `composer.getComposerHandleById`
+    - launched isolated Cursor with
+      `--user-data-dir=logs/runtime/cursor-ide-contract-r117/user-data`,
+      `--extensions-dir=logs/runtime/cursor-ide-contract-r117/extensions`,
+      `--extensionDevelopmentPath=extensions/openwukong-vscode`, workspace
+      `logs/runtime/cursor-ide-contract-r117/workspace`, and bridge port
+      `8793`
+    - launch manifest:
+      `logs/runtime/cursor-ide-contract-r117/manifest.json`
+  - real evidence:
+    - read-only capability capture:
+      `logs/runtime/cursor-ide-contract-r117/capabilities.json`
+      reported `ok=true`, `control_attempts=0`, `command_count=3203`,
+      `active_mapping.cursor.commandId=workbench.action.chat.open`, and
+      `active_mapping.cursor.commandCandidates[0]=workbench.action.chat.open`
+    - command probe:
+      `logs/runtime/cursor-ide-contract-r117/contract-probe-query-object.json`
+      returned `status=callable`, `accepted_variant=query_object`,
+      `recommended_adapter=true`, `workspace_changed=false`,
+      `foreground_changed=false`, `target_foreground=false`, with foreground
+      recorded as `Weixin` before and after the immediate command check
+    - live composer state:
+      `logs/runtime/cursor-ide-contract-r117/live-composer-state-after-query.json`
+      proved the command did write a draft:
+      composer `fd610dd0-eeb9-427e-84f6-b379cbb6519b` had
+      `text=OPENWUKONG_CURSOR_R117_QUERY_DRAFT_NO_EDIT` and matching
+      `rich_text`; readback used only read-only bridge commands and reported
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `readonly_command_attempts=3`
+  - user-visible negative evidence:
+    - while R117 was running, a Windows system picker appeared:
+      `选择应用以打开 "session-start"` with Cursor highlighted
+    - this proves the immediate foreground snapshot was too narrow: the command
+      can write a Cursor draft but can also trigger a delayed/system-level
+      external-protocol dialog, so it is not acceptable as a fully background
+      safe real-profile route yet
+  - cleanup:
+    - stopped the isolated Cursor process through
+      `logs/runtime/cursor-ide-contract-r117/manifest.json`
+    - stop report:
+      `logs/runtime/cursor-ide-contract-r117/stop.json`
+      reported `status=stopped`, `stop_attempts=1`, `control_attempts=0`
+    - follow-up process scan found no `cursor-ide-contract-r117` Cursor
+      processes, only the scan command itself
+  - implementation hardening:
+    - added delayed post-action focus observation to
+      `ide_bridge_contract_probe` via
+      `post_action_observation_delay_sec` /
+      `--post-action-observation-delay-sec`
+    - added `system_dialog_detected` to variant results, command results,
+      report summaries, and validated mapping rejection evidence
+    - commands are no longer recommended when delayed focus reveals a
+      `session-start`, `选择应用以打开`, `choose an app`,
+      `how do you want to open`, or `open with` style system dialog
+  - validation:
+    - RED first:
+      `tests.test_ide_bridge_contract_probe.IDEBridgeContractProbeTests.test_probe_marks_delayed_system_dialog_as_not_recommended`
+      failed because `post_action_observation_delay_sec` did not exist
+    - focused regression passed for that test after implementation
+    - wider regression passed:
+      `python -m unittest tests.test_ide_bridge_contract_probe
+      tests.test_ide_bridge_capture tests.test_ide_extension_scaffold
+      tests.test_cursor_live_composer_state tests.test_cursor_transcript_readback
+      tests.test_agent_app_real_no_loss tests.test_agent_app_bridge
+      tests.test_agent_native_connector_probe tests.test_objective_readiness_matrix`
+      with `100` tests
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+  - current conclusion:
+    - `workbench.action.chat.open` is now proven to be a real Cursor draft
+      write primitive in an isolated profile
+    - it is not proven background-safe because the external `session-start`
+      picker appeared; do not apply it to the logged-in real profile as a
+      production route yet
+    - next concrete actions:
+      1. stop treating generic VS Code command execution as sufficient for
+         Cursor send; find or implement a Cursor-native draft/write hook that
+         does not emit the `session-start` external protocol
+      2. use the delayed-dialog guard on any future real IDE command probes
+      3. keep the R117 positive draft-write evidence, but route final Cursor
+         real send through native state mutation or a dedicated extension-side
+         bridge rather than `workbench.action.chat.open` directly
+- 2026-06-01 immediately hardened the Cursor capability-capture route after the
+  user-visible `session-start` picker:
+  - root-cause evidence:
+    - Cursor bundle inspection shows `workbench.action.chat.open` calls
+      `createComposer({partialState:{text,richText}, openInNewTab:true})`,
+      then `fireShouldForceText`, then `showAndFocus`
+    - this explains why R117 could both write the draft and still trigger a
+      delayed Windows external-protocol picker
+  - implementation:
+    - `ide_bridge_capture` now classifies
+      `workbench.action.chat.open` as a Cursor risky candidate instead of an
+      active/review command candidate
+    - read-only capability reports now expose
+      `cursor_risky_candidates` and `risky_candidate_reasons`
+    - stale adapter mappings that already expose the risky command are
+      neutralized: the command is removed from active `commandCandidates` and
+      tracked under `riskyCommandCandidates`
+    - the delayed system-dialog guard already matches the real Chinese
+      `选择应用以打开` title as well as `session-start`/English markers
+  - validation:
+    - RED first:
+      `tests.test_ide_bridge_capture.IDEBridgeCaptureTests.test_capture_classifies_cursor_chat_open_as_risky_not_active`
+      failed because `cursor_risky_candidates` did not exist and
+      `workbench.action.chat.open` was still first in active candidates
+    - focused regression passed for the risky-candidate downgrade and delayed
+      system-dialog guard
+    - wider regression passed:
+      `python -m unittest tests.test_ide_bridge_capture
+      tests.test_ide_bridge_contract_probe tests.test_ide_extension_scaffold
+      tests.test_cursor_live_composer_state tests.test_cursor_transcript_readback
+      tests.test_agent_app_real_no_loss tests.test_agent_app_bridge
+      tests.test_agent_native_connector_probe tests.test_objective_readiness_matrix`
+      with `100` tests
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+  - current conclusion:
+    - the popup does not invalidate the architecture; it invalidates this
+      specific Cursor command as a production background sender
+    - future Cursor sends must use a dedicated native/extension-side composer
+      mutation hook or another command proven by delayed-dialog gating
+- 2026-06-01 advanced the Cursor path from command guessing to internal hook
+  planning:
+  - implementation:
+    - added `openwukong.evaluation.cursor_bundle_composer_hooks`, a read-only
+      static scanner for Cursor's `workbench.desktop.main.js`
+    - the scanner reports `workbench.action.chat.open` as a
+      `risky_focus_command` and separates it from internal hook candidates
+    - the scanner extracts candidate internal surfaces:
+      `composerService.createComposer.partialState`,
+      `composerDataService.updateComposerData`, and
+      `composerDataService.updateComposerDataSetStore`
+    - added `/v1/ide/cursor/draft-hook` to the VS Code/Cursor bridge
+      extension
+    - the new endpoint is dry-run by default and only calls
+      `handle.setData({ text, richText })` when both `allow_write=true` and
+      `safety_profile=isolated_cursor_draft_probe` are supplied
+    - added `IDEExtensionBridgeClient.cursor_draft_hook` and
+      `openwukong.evaluation.cursor_draft_hook_probe` so the draft hook can be
+      dry-run or isolated-write probed without keyboard, mouse, clipboard, or
+      foreground control
+  - real read-only evidence:
+    - static scan artifact:
+      `logs/runtime/cursor-bundle-composer-hooks-r118/hook-discovery.json`
+    - result:
+      `decision=cursor_native_hook_candidates_found`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`
+    - bundle counts:
+      `chat_open_command_count=1`,
+      `create_composer_partial_state_count=20`,
+      `update_composer_data_count=111`,
+      `update_composer_data_set_store_count=244`,
+      `fire_should_force_text_count=42`,
+      `show_and_focus_count=26`, `submit_chat_count=87`
+  - validation:
+    - RED first:
+      `tests.test_cursor_bundle_composer_hooks` failed because the discovery
+      module did not exist
+    - RED first:
+      `tests.test_ide_extension_scaffold...command_endpoints` failed because
+      `/v1/ide/cursor/draft-hook` and `handleCursorDraftHook` did not exist
+    - RED first:
+      `tests.test_cursor_draft_hook_probe` failed because the Python probe
+      module did not exist
+    - focused tests passed after implementation:
+      `tests.test_cursor_bundle_composer_hooks`,
+      `tests.test_ide_extension_scaffold`, and
+      `tests.test_cursor_draft_hook_probe`
+    - JS syntax passed:
+      `node --check extensions/openwukong-vscode/src/extension.js`
+    - wider regression passed:
+      `python -m unittest tests.test_cursor_bundle_composer_hooks
+      tests.test_cursor_draft_hook_probe tests.test_ide_extension_scaffold
+      tests.test_cursor_live_composer_state tests.test_cursor_transcript_readback
+      tests.test_ide_bridge_capture tests.test_ide_bridge_contract_probe
+      tests.test_ide_extension_connector tests.test_agent_app_real_no_loss
+      tests.test_agent_app_bridge tests.test_agent_native_connector_probe
+      tests.test_objective_readiness_matrix` with `119` tests
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+  - current conclusion:
+    - Cursor now has a concrete draft-only bridge endpoint and a guarded probe
+      path, but it has not yet been installed/reloaded into a live or isolated
+      Cursor extension host
+    - next concrete action is to package/dev-load this updated extension into
+      an isolated Cursor profile, run dry-run first, then run one isolated
+      `allow_write=true` draft probe with delayed foreground/system-dialog
+      gates and live composer readback
+- 2026-06-01 added the Cursor draft-hook validation harness and packaged the
+  updated bridge:
+  - implementation:
+    - added `openwukong.evaluation.cursor_draft_hook_validation`
+    - the validation harness always runs a dry-run draft-hook probe first
+    - isolated writes require `allow_write=true` and
+      `safety_profile=isolated_cursor_draft_probe`
+    - after an isolated write, the harness checks:
+      foreground stability, delayed system-dialog detection, live composer
+      state readback, and required marker presence in `text` or `rich_text`
+    - system dialogs such as `选择应用以打开 "session-start"` now fail the
+      validation even if readback contains the marker
+  - packaging:
+    - created
+      `logs/runtime/openwukong-vscode-bridge-0.1.0-r119.vsix`
+    - static VSIX verification confirmed the packaged extension contains
+      `/v1/ide/cursor/draft-hook`, `handle.setData({`, and
+      `cursor_draft_hook_write_requires_isolated_profile`
+  - validation:
+    - RED first:
+      `tests.test_cursor_draft_hook_validation` failed because the validation
+      module did not exist
+    - green focused test:
+      `python -m unittest tests.test_cursor_draft_hook_validation` passed
+      with `4` tests
+    - JS syntax passed:
+      `node --check extensions/openwukong-vscode/src/extension.js`
+    - wider regression passed:
+      `python -m unittest tests.test_cursor_draft_hook_validation
+      tests.test_cursor_draft_hook_probe tests.test_cursor_bundle_composer_hooks
+      tests.test_cursor_live_composer_state tests.test_cursor_transcript_readback
+      tests.test_ide_bridge_capture tests.test_ide_bridge_contract_probe
+      tests.test_ide_extension_scaffold tests.test_ide_extension_connector
+      tests.test_agent_app_real_no_loss tests.test_agent_app_bridge
+      tests.test_agent_native_connector_probe tests.test_objective_readiness_matrix`
+      with `123` tests
+  - current conclusion:
+    - the next real Cursor step is now executable and properly gated:
+      install/dev-load the R119 VSIX into an isolated Cursor profile, run
+      validation dry-run, then run exactly one isolated write validation with
+      delayed focus/system-dialog gates and live composer readback
+    - this still should not be applied to the logged-in real Cursor profile
+      until the isolated validation proves stable and no-focus
+- 2026-06-01 triaged the user-visible Windows picker screenshot:
+  - observation:
+    - Windows displayed `选择应用以打开 "session-start"` with Cursor highlighted
+      during the Cursor real probe
+    - this confirms the R117 negative evidence: `workbench.action.chat.open`
+      is a real draft-write primitive, but it can escape into the Windows
+      shell/open-with flow and is not a production-safe background sender
+  - validation:
+    - added a regression assertion that the exact Chinese Unicode title
+      `选择应用以打开` is classified as a system dialog
+    - focused regression passed:
+      `python -m unittest tests.test_ide_bridge_contract_probe
+      tests.test_cursor_draft_hook_validation tests.test_ide_bridge_capture`
+      with `24` tests
+  - current conclusion:
+    - users should close the picker rather than selecting an app/default
+    - continue with the R119 `/v1/ide/cursor/draft-hook` route in an isolated
+      Cursor profile; do not use `workbench.action.chat.open` for the real
+      logged-in profile
+- 2026-06-01 corrected the Cursor background-testing policy after user
+  feedback that launching isolated Cursor still steals focus:
+  - real evidence:
+    - R126/R128 isolated Cursor runs used no keyboard, mouse, clipboard, or
+      bridge send attempts, and no `session-start` dialog appeared
+    - however the test still starts a visible Cursor GUI process; the user
+      correctly pointed out that this launch path itself can抢占焦点 and
+      therefore must not be classified as a true background route
+    - R129 verified the new safety default:
+      `logs/runtime/cursor-isolated-draft-hook-r129-block-visible-gui/report.json`
+      returned `decision=cursor_visible_gui_launch_blocked`,
+      `launch_attempts=0`, `draft_write_attempts=0`,
+      `window_input_attempts=0`, and `visible_gui_launch_allowed=false`
+  - implementation:
+    - `cursor_isolated_draft_hook_runner` now blocks visible GUI launch by
+      default
+    - a real isolated Cursor GUI launch now requires explicit
+      `--allow-visible-gui-launch`
+    - the report exposes `visible_gui_launch_allowed` so downstream runners
+      can distinguish attach-only/background-safe probes from foreground-risk
+      validation
+    - the extension-side Cursor draft hook was hardened to infer
+      `composerId` from pre/post `loadedComposers` ids when
+      `composer.createNew` does not return an id
+  - validation:
+    - RED first:
+      `tests.test_cursor_isolated_draft_hook_runner` failed because
+      `allow_visible_gui_launch` did not exist and visible launch was not
+      blocked by default
+    - focused regression passed:
+      `python -m unittest tests.test_cursor_isolated_draft_hook_runner` with
+      `4` tests
+    - Cursor bridge focused regression passed:
+      `python -m unittest tests.test_cursor_isolated_draft_hook_runner
+      tests.test_cursor_draft_hook_validation tests.test_cursor_live_composer_state
+      tests.test_cursor_draft_hook_probe tests.test_ide_extension_scaffold` with
+      `20` tests
+    - wider no-loss regression passed:
+      `python -m unittest tests.test_cursor_isolated_draft_hook_runner
+      tests.test_session_readiness_plan tests.test_cursor_draft_hook_validation
+      tests.test_cursor_draft_hook_probe tests.test_cursor_live_composer_state
+      tests.test_ide_extension_scaffold tests.test_ide_bridge_capture
+      tests.test_ide_bridge_contract_probe tests.test_ide_extension_connector
+      tests.test_agent_app_real_no_loss tests.test_agent_app_bridge
+      tests.test_agent_native_connector_probe tests.test_objective_readiness_matrix
+      tests.test_primary_real_no_loss tests.test_major_real_no_loss` with
+      `198` tests
+    - `node --check extensions/openwukong-vscode/src/extension.js` passed
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+  - current conclusion:
+    - true background Cursor control must attach to an already-running bridge,
+      a packaged extension in the user's running Cursor, or a non-visible
+      native/helper endpoint
+    - starting a visible GUI app is now explicitly a foreground-risk action,
+      not a background validation path
+    - next concrete action:
+      build an attach-only Cursor bridge validation path that never launches
+      Cursor, then test draft/readback only when a bridge is already available
+- 2026-06-01 implemented the attach-only Cursor bridge validation path after
+  confirming that visible GUI launch is itself a focus-stealing risk:
+  - implementation:
+    - added `openwukong.evaluation.cursor_attach_bridge_validation`
+    - the runner never launches Cursor, never stops Cursor, and only probes an
+      already-running bridge URL
+    - write mode is blocked by default with
+      `decision=cursor_attach_bridge_write_blocked`; the current path is
+      dry-run/readiness only until a no-focus draft/readback route is active
+    - `ide_extension_readiness` now treats Cursor as ready for background
+      write only when `/v1/ide/cursor/draft-hook` is available, preventing a
+      stale generic IDE bridge from being reported as production-ready
+  - real attach-only evidence:
+    - `logs/runtime/cursor-attach-bridge-r131/report.json` attached to the
+      existing bridge on `127.0.0.1:8787` and returned
+      `decision=cursor_attach_bridge_draft_hook_unavailable`,
+      `launch_attempts=0`, `control_attempts=0`,
+      `window_input_attempts=0`, `foreground_changed=false`, and
+      `system_dialog_detected=false`
+    - the installed Cursor extension files under
+      `C:\Users\Zhangjinqian\.cursor\extensions\openwukong-local.openwukong-vscode-bridge-0.1.0`
+      were synced from the repo without restarting Cursor; backup saved at
+      `logs/runtime/cursor-installed-openwukong-backup-20260601-181444`
+    - `logs/runtime/cursor-attach-bridge-r132-after-disk-sync/report.json`
+      still returned `cursor_attach_bridge_draft_hook_unavailable`, proving
+      the running extension host is stale in memory; no reload was forced
+      because reload would steal focus from the user's current work
+  - validation:
+    - focused regression passed:
+      `python -m unittest tests.test_cursor_attach_bridge_validation` with
+      `4` tests
+    - readiness regression passed:
+      `python -m unittest tests.test_ide_extension_readiness` with `6` tests
+    - wider no-loss regression passed:
+      `python -m unittest tests.test_cursor_attach_bridge_validation
+      tests.test_ide_extension_readiness
+      tests.test_cursor_isolated_draft_hook_runner
+      tests.test_session_readiness_plan tests.test_cursor_draft_hook_validation
+      tests.test_cursor_draft_hook_probe tests.test_cursor_live_composer_state
+      tests.test_ide_extension_scaffold tests.test_ide_bridge_capture
+      tests.test_ide_bridge_contract_probe tests.test_ide_extension_connector
+      tests.test_agent_app_real_no_loss tests.test_agent_app_bridge
+      tests.test_agent_native_connector_probe tests.test_objective_readiness_matrix
+      tests.test_primary_real_no_loss tests.test_major_real_no_loss` with
+      `208` tests
+    - `node --check extensions\openwukong-vscode\src\extension.js` passed
+    - `git diff --check` passed; only existing LF-to-CRLF warnings were shown
+  - current conclusion:
+    - the architecture direction remains correct, but the standard is stricter:
+      "real background" means no visible GUI startup, no forced app reload, no
+      foreground switch, no keyboard/mouse/clipboard, and no system dialog
+    - Cursor logged-in profile is not yet background-write ready in the active
+      process because its bridge is still the old in-memory extension host
+    - next concrete actions:
+      1. wait for a natural Cursor extension-host reload or user-approved
+         foreground maintenance window, then re-run attach-only R133 against
+         the already-running bridge
+      2. continue background-safe surfaces that do not need GUI focus:
+         browser CDP, hidden Word COM, Codex CLI, Claude CLI/native endpoint,
+         and WeChat only through semantic/native bridge or explicit foreground
+         permission
+      3. keep app launch/open-window requests as foreground-gated actions
+         unless a non-visible/native launch transport exists
+- 2026-06-01 tightened the no-focus acceptance standard after the user
+  clarified that the core failure is focus stealing itself, not only the
+  `session-start` picker:
+  - policy clarification:
+    - a route is not production background-safe if it starts a visible GUI,
+      forces an app reload, switches foreground focus, uses keyboard/mouse or
+      clipboard primitives, or raises a system dialog
+    - the `session-start` picker is treated as one concrete failure signal,
+      but visible GUI launch and foreground takeover are independently enough
+      to fail a background validation
+  - verified current safe evidence:
+    - R140 browser helper:
+      `logs/runtime/primary-real-r140-20260601-184502/owned_browser_primary_smoke/owned_browser_helpers/browser_research_collect_sources/helper.json`
+      used an owned headless Chrome profile over CDP; `Runtime.evaluate`
+      confirmed the exact expected `data:` URL and marker
+      `OPENWUKONG_BROWSER_BACKGROUND_R140`; the helper was stopped and the
+      profile cleanup reported `deleted=true`
+    - R140 Word:
+      `logs/runtime/primary-real-r140-20260601-184502/real_no_loss/word_document_create_background.json`
+      verified hidden Word COM write/readback with `visible_requested=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `office_com_attempts=1`, and foreground HWND stable on Codex before and
+      after the operation
+    - process rescan for the R140 browser helper showed no lingering Chrome
+      helper process for the owned profile or debug port; only the scan
+      PowerShell command matched its own query
+  - regression validation:
+    - passed:
+      `python -m unittest tests.test_office_word_runner
+      tests.test_primary_real_no_loss tests.test_primary_transport_matrix
+      tests.test_agent_surface_report tests.test_agent_cli_real_no_loss
+      tests.test_browser_devtools_health tests.test_browser_devtools_action
+      tests.test_primary_scenario_smoke tests.test_major_real_no_loss
+      tests.test_objective_readiness_matrix
+      tests.test_cursor_attach_bridge_validation
+      tests.test_ide_extension_readiness` with `97` tests
+    - passed:
+      `node --check extensions/openwukong-vscode/src/extension.js`
+    - passed:
+      `git diff --check`; only existing LF-to-CRLF warnings were emitted
+  - current conclusion:
+    - browser and Word have real no-focus background evidence for the owned
+      safe probes
+    - Cursor remains attach-only until the already-running bridge exposes the
+      draft hook without reload or visible launch
+    - app launch/open-window tasks remain foreground-gated unless a native or
+      connector background transport exists
+- 2026-06-02 continued the real no-focus evidence pass without launching
+  visible GUI apps or sending external messages:
+  - R141 primary scenario no-focus screenshot pass:
+    - command:
+      `python -m openwukong.evaluation.primary_real_no_loss
+      tests/fixtures/evaluation/l1_primary_user_scenarios.json
+      --output-root logs/runtime/primary-real-r141-20260602-nofocus-screens
+      --summary-json --allow-owned-browser-helper-launch
+      --owned-browser-debug-port 19479
+      --background-screenshot-dir
+      logs/runtime/primary-real-r141-20260602-nofocus-screens/screenshots`
+    - result:
+      `5/5` passed, `control_attempts=0`,
+      `external_communication_attempts=0`, `window_input_attempts=0`,
+      `owned_app_launch_attempts=1`, and
+      `background_screenshot_focus_stable=true`
+    - WeChat evidence:
+      `logs/runtime/primary-real-r141-20260602-nofocus-screens/real_no_loss/wechat_chat_draft_reply.json`
+      found one personal WeChat window, captured one `PrintWindow`
+      screenshot to
+      `logs/runtime/primary-real-r141-20260602-nofocus-screens/screenshots/wechat_chat_draft_reply/01-Weixin.png`,
+      reported `foreground_changed=false`, and kept all send/window-input
+      counters at zero
+    - Browser evidence:
+      the owned headless Chrome helper used CDP against the expected page,
+      stopped the helper, deleted the owned profile, and a follow-up process
+      scan found no lingering process for port `19479` or the owned profile
+    - Word evidence:
+      hidden Word COM remained verified with `visible_requested=false`,
+      `office_com_attempts=1`, `foreground_change_classification=stable`,
+      and `foreground_no_steal_verified=true`
+    - Codex project app case remained unavailable through the IDE bridge in
+      this primary scenario and was not misreported as writable
+  - R142 agent app-surface read-only pass:
+    - probed `codex app`, `claude desktop`, and `cursor app` with no send,
+      no draft write, no command execution, and
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=0`
+    - Codex Desktop produced one no-focus `PrintWindow` screenshot and
+      read-only diagnostics, but no native endpoint was exposed; therefore
+      app-side background send/draft remained blocked
+    - Claude Desktop resolved as a running desktop process in the separate
+      surface report, but no matching visible app window was available to the
+      app UIA probe, so desktop app-side control remains not verified
+    - `cursor app` is not a registered exact app alias; the correct app alias
+      is `cursor`
+  - R143 Cursor app alias correction:
+    - probing `cursor` resolved the correct Start Menu shortcut at
+      `E:\cursor\cursor\cursor\Cursor.exe`
+    - no Cursor window was running, and the probe correctly refused to launch
+      it because visible GUI launch is foreground-risk
+  - R144 Codex/Claude CLI no-focus pass:
+    - command:
+      `python -m openwukong.evaluation.agent_cli_real_no_loss
+      --agent codex --agent claude
+      --output-root logs/runtime/agent-cli-real-r144-20260602-nofocus
+      --output logs/runtime/agent-cli-real-r144-20260602-nofocus/report.json
+      --json --allow-cli-execution --timeout-sec 45`
+    - result:
+      `2/2` passed at the safety-report level,
+      `verified_cases=1`, `agent_command_attempts=2`,
+      `window_input_attempts=0`,
+      `foreground_focus_stable=true`, and
+      `foreground_no_steal_verified=true`
+    - Codex CLI was truly verified:
+      selected `codex-cli-managed-terminal`, returned required marker
+      `OPENWUKONG_AGENT_CLI_NO_LOSS: PASS`, and kept the owned workspace clean
+    - Claude CLI selected `claude-code-cli-managed-terminal` correctly but
+      still returned `Not logged in - Please run /login`; this remains an auth
+      blocker, not a control-layer or focus-stealing failure
+  - regression validation:
+    - passed:
+      `python -m unittest tests.test_primary_real_no_loss
+      tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe
+      tests.test_agent_cli_real_no_loss tests.test_primary_transport_matrix
+      tests.test_agent_app_transport_matrix
+      tests.test_cursor_attach_bridge_validation
+      tests.test_ide_extension_readiness` with `78` tests
+  - current conclusion:
+    - verified no-focus real capabilities now include:
+      WeChat read-only locator plus background HWND screenshot, Browser owned
+      headless CDP, Word hidden COM, Codex CLI task probe, and Codex Desktop
+      read-only background screenshot
+    - still not complete:
+      WeChat background send needs a native bridge or verified semantic UIA
+      sender; Cursor needs an already-running updated bridge or natural reload;
+      Claude CLI needs login; Claude Desktop needs visible/no-focus target
+      evidence plus a native connector before app-side send can be attempted
+- 2026-06-02 tightened WeChat background-send readiness so no-focus visual
+  evidence is mandatory before any UIA or native-bridge send can be reported
+  ready:
+  - implementation:
+    - `WeChatUiaSemanticActionRequest` now records
+      `background_screenshot_count`, `background_screenshot_success_count`,
+      `background_screenshot_verified`, and screenshot artifacts
+    - UIA semantic send dry-run now returns
+      `wechat_uia_semantic_action_background_screenshot_not_verified` when
+      target/composer/send controls look ready but no successful no-focus
+      screenshot exists
+    - `WeChatNativeBridgeRequest` now uses the same screenshot evidence gate
+      and returns `wechat_native_bridge_background_screenshot_not_verified`
+      when a bridge/target/send action is otherwise ready but no background
+      screenshot has been verified
+    - `primary_real_no_loss` now passes the WeChat `PrintWindow` evidence into
+      both UIA and native-bridge request contracts and has a primary-runner
+      guard so injected/fake native dry-runs cannot bypass the screenshot gate
+  - validation:
+    - passed:
+      `python -m unittest tests.test_wechat_uia_action_contract
+      tests.test_wechat_native_bridge tests.test_primary_real_no_loss
+      tests.test_primary_transport_matrix` with `21` tests
+    - passed:
+      `python -m unittest tests.test_agent_app_real_no_loss
+      tests.test_agent_native_connector_probe tests.test_agent_cli_real_no_loss
+      tests.test_agent_app_transport_matrix
+      tests.test_cursor_attach_bridge_validation
+      tests.test_ide_extension_readiness` with `67` tests
+    - R145 real no-focus primary pass:
+      `logs/runtime/primary-real-r145-20260602-wechat-screenshot-gate`
+      returned `5/5` passed, `control_attempts=0`,
+      `external_communication_attempts=0`, `window_input_attempts=0`,
+      `owned_app_launch_attempts=1`,
+      `background_screenshot_count=1`,
+      `background_screenshot_success_count=1`, and
+      `background_screenshot_focus_stable=true`
+    - R145 WeChat artifact:
+      `logs/runtime/primary-real-r145-20260602-wechat-screenshot-gate/real_no_loss/wechat_chat_draft_reply.json`
+      found one personal `Weixin.exe` window, produced one `PrintWindow`
+      screenshot, kept foreground HWND stable, and kept send/window-input
+      attempts at zero
+    - R145 Browser artifact:
+      the owned Chrome helper launched with `--headless`, used an isolated
+      profile, verified the expected CDP page, stopped, and deleted the owned
+      profile
+  - current conclusion:
+    - WeChat is implemented and real-verified for personal-window resolution,
+      read-only locator diagnostics, no-focus HWND screenshot capture, and
+      safe gating of UIA/native send routes
+    - WeChat is not yet complete for true background send: the current live
+      WeChat surface exposes no verified semantic composer/send control and
+      no native bridge URL, so background send remains correctly blocked
+    - the next concrete WeChat action is to build or attach a real native
+      WeChat bridge endpoint, then run one opt-in file-helper send with the
+      same no-focus screenshot/readback gates
+- 2026-06-02 tightened the unified major-scenario no-focus gate and ran R146:
+  - implementation:
+    - `major_real_no_loss` now exposes `cli_foreground_focus_stable` and
+      `cli_foreground_no_steal_verified`
+    - `automation_focus_safe` now requires both:
+      primary/app background screenshots stayed focus-safe, and CLI foreground
+      changes were classified as no-steal
+    - added a regression so a CLI command that changes foreground into an
+      agent surface fails `safe_run_ok`, even if primary/app screenshots are
+      stable
+  - validation:
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss` with `39` tests
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss
+      tests.test_objective_readiness_matrix tests.test_agent_cli_real_no_loss`
+      with `47` tests
+    - passed:
+      `git diff --check`; only existing LF-to-CRLF warnings were emitted
+  - R146 real unified no-focus run:
+    - command:
+      `python -m openwukong.evaluation.major_real_no_loss
+      --output-root logs/runtime/major-real-r146-20260602-unified-nofocus
+      --output logs/runtime/major-real-r146-20260602-unified-nofocus/report.json
+      --json --allow-owned-browser-helper-launch
+      --owned-browser-debug-port 19481 --allow-agent-cli-execution
+      --agent-cli-timeout-sec 45`
+    - top-level result:
+      `safe_run_ok=true`, `goal_complete=false`, `control_attempts=0`,
+      `external_communication_attempts=0`, `window_input_attempts=0`,
+      `agent_command_attempts=2`, `owned_app_launch_attempts=1`,
+      `background_screenshot_success_count=3/3`,
+      `background_screenshot_focus_stable=true`,
+      `cli_foreground_focus_stable=false`,
+      `cli_foreground_no_steal_verified=true`, and
+      `automation_focus_safe=true`
+    - owned browser helper cleanup:
+      helper status was `started_and_stopped`, owned profile cleanup reported
+      `deleted=true`, and a process command-line scan found no matching
+      Chrome/Edge process for port `19481` or the R146 runtime path
+    - objective readiness:
+      `10` requirements, `5` satisfied, `goal_complete=false`
+      verified:
+      WeChat background observation, Word hidden COM document,
+      browser owned CDP read-page, owned file search, Codex CLI background task
+      unsatisfied:
+      WeChat background send, Claude CLI background task, Codex app background
+      chat, Claude Desktop background chat, Cursor background chat
+    - current blockers:
+      WeChat still lacks a native bridge URL or semantic UIA send target;
+      Claude CLI is installed but not logged in;
+      Codex app and Cursor app lack a ready no-focus native/DevTools bridge;
+      Claude Desktop app surface is unavailable/not visible to the no-focus app
+      probe
+  - current conclusion:
+    - the project now has a single real no-loss acceptance report that can
+      answer whether the whole objective is complete
+    - as of R146 the safe background foundation is real, but the full
+      objective is not yet achieved
+    - next concrete action should target one of the remaining blockers with a
+      connector-first route, preferably Cursor/Codex app bridge attach or a
+      real WeChat native bridge, because UIA/vision cannot honestly satisfy
+      no-focus background send for those surfaces today
+- 2026-06-02 integrated attach-only IDE extension bridge readiness into the
+  unified major no-loss acceptance report:
+  - implementation:
+    - `major_real_no_loss` now has a read-only
+      `--probe-existing-ide-extension-bridge` option
+    - the probe calls an already-running IDE extension bridge only; it does
+      not launch Cursor, reload an extension host, type, click, use clipboard,
+      or send a chat message
+    - the resulting `ide_extension_readiness` report is written both at the
+      top level and inside `subreports`
+    - readiness counters are included in top-level safety accounting, so any
+      accidental control/window-input/bridge-send attempt would fail the
+      unified report instead of being hidden
+    - the existing bridge URL is forwarded to agent-app probes only when the
+      attach-only readiness probe reports `bridge_ready=true`; unavailable
+      bridges are recorded as evidence but not promoted to control endpoints
+  - validation:
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss` with `42` tests
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss
+      tests.test_ide_extension_readiness tests.test_cursor_attach_bridge_validation
+      tests.test_agent_app_real_no_loss` with `72` tests
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss
+      tests.test_objective_readiness_matrix tests.test_agent_cli_real_no_loss
+      tests.test_ide_extension_readiness tests.test_cursor_attach_bridge_validation
+      tests.test_agent_app_real_no_loss` with `80` tests
+    - passed:
+      `git diff --check`; only existing LF-to-CRLF warnings were emitted
+  - R148 real unified no-focus run:
+    - command:
+      `python -m openwukong.evaluation.major_real_no_loss
+      --output-root logs/runtime/major-real-r148-20260602-ide-readiness
+      --output logs/runtime/major-real-r148-20260602-ide-readiness/report.json
+      --json --allow-owned-browser-helper-launch
+      --owned-browser-debug-port 19482 --allow-agent-cli-execution
+      --agent-cli-timeout-sec 45 --probe-existing-ide-extension-bridge
+      --ide-extension-bridge-url http://127.0.0.1:8787
+      --ide-extension-agent-id cursor --ide-extension-request-timeout-sec 0.5`
+    - top-level result:
+      `safe_run_ok=true`, `goal_complete=false`, `control_attempts=0`,
+      `external_communication_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=2`,
+      `owned_app_launch_attempts=1`, `background_screenshot_success=3/3`,
+      `background_screenshot_focus_stable=true`,
+      `cli_foreground_no_steal_verified=true`, and
+      `automation_focus_safe=true`
+    - IDE extension readiness:
+      `status=bridge_unavailable`,
+      `blocking_reason=bridge_endpoint_unavailable`,
+      `bridge_ready=false`, and `can_write_without_focus=false`
+      for `http://127.0.0.1:8787`
+    - owned browser helper cleanup:
+      a follow-up process scan found no process matching port `19482` or the
+      R148 runtime profile path
+    - objective readiness remains:
+      `10` requirements, `5` satisfied, `goal_complete=false`
+      verified:
+      WeChat background observation, Word hidden COM document,
+      browser owned CDP read-page, owned file search, Codex CLI background task
+      unsatisfied:
+      WeChat background send, Claude CLI background task, Codex app background
+      chat, Claude Desktop background chat, Cursor background chat
+  - current conclusion:
+    - the unified acceptance report can now answer not only whether app chat
+      endpoints are usable, but also whether an already-running IDE bridge is
+      present and eligible to be forwarded
+    - current Cursor bridge state is not ready in the active environment, and
+      the report correctly keeps it as a blocker rather than attempting a
+      foreground reload or visible launch
+    - next concrete actions:
+      1. continue connector-first work on one remaining write blocker:
+         WeChat native bridge, Codex/Cursor app native/IDE bridge, or Claude
+         login/native bridge
+      2. keep visible app launch/reload as foreground-gated maintenance only
+      3. preserve R148 as the authoritative no-focus completion gate until all
+         five remaining unsatisfied requirements become verified
+- 2026-06-02 added an explicit app endpoint readiness layer to the unified
+  no-focus acceptance report:
+  - implementation:
+    - `major_real_no_loss` now exposes `agent_app_endpoint_readiness`
+    - this is a read-only derived report built from existing app probe and
+      endpoint-acceptance evidence; it does not run probes, launch apps, send
+      messages, type, click, or touch clipboard
+    - the report lists each agent app's observed endpoint count, ready endpoint
+      count, ready endpoint type/URL/source, endpoint errors, whether the app
+      can enter a background-send contract validation, helper template, owned
+      DevTools launch template, and supplemental IDE extension readiness
+    - a stale/unavailable IDE bridge can now refine the app blocker, for
+      example Cursor moves from generic `gated_native_endpoint_missing` to the
+      more actionable `bridge_endpoint_unavailable`
+  - validation:
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss` with `43` tests
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss
+      tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe
+      tests.test_agent_app_bridge tests.test_agent_app_transport_matrix
+      tests.test_ide_extension_readiness tests.test_cursor_attach_bridge_validation
+      tests.test_objective_readiness_matrix` with `131` tests
+    - passed:
+      `git diff --check`; only existing LF-to-CRLF warnings were emitted
+  - R149 real unified no-focus run:
+    - command:
+      `python -m openwukong.evaluation.major_real_no_loss
+      --output-root logs/runtime/major-real-r149-20260602-endpoint-readiness
+      --output logs/runtime/major-real-r149-20260602-endpoint-readiness/report.json
+      --json --allow-owned-browser-helper-launch
+      --owned-browser-debug-port 19483 --allow-agent-cli-execution
+      --agent-cli-timeout-sec 45 --probe-existing-ide-extension-bridge
+      --ide-extension-bridge-url http://127.0.0.1:8787
+      --ide-extension-agent-id cursor --ide-extension-request-timeout-sec 0.5`
+    - top-level result:
+      `safe_run_ok=true`, `goal_complete=false`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `background_screenshot_success=3/3`, and
+      `automation_focus_safe=true`
+    - endpoint readiness:
+      `total_cases=3`, `observed_endpoint_cases=0`,
+      `ready_endpoint_cases=0`,
+      `background_send_contract_candidate_cases=0`, `blocked_cases=3`
+    - endpoint blockers:
+      Codex app=`gated_native_endpoint_missing`,
+      Claude Desktop=`unavailable`,
+      Cursor=`bridge_endpoint_unavailable`
+    - owned browser helper cleanup:
+      a follow-up process scan found no process matching port `19483` or the
+      R149 runtime profile path
+  - current conclusion:
+    - the app-write blockers are now separated by phase:
+      no endpoint observed, endpoint observed but unhealthy, endpoint ready but
+      send not verified, or send verified
+    - current real environment is still in the first phase for all app chat
+      surfaces: no Codex/Cursor/Claude app endpoint is currently observed and
+      ready for background-send contract validation
+    - next concrete actions:
+      1. build or attach one real no-focus app write transport, preferably an
+         agent native bridge for Codex/Cursor app or a WeChat native bridge for
+         File Transfer Assistant
+      2. only after `ready_endpoint_cases > 0`, run the dry-run bridge contract
+         and then opt-in send/readback acceptance
+      3. keep R149 as the current endpoint-readiness baseline for app-surface
+         work
+- 2026-06-02 integrated the owned app bridge fixture smoke into the unified
+  no-focus acceptance report:
+  - implementation:
+    - `major_real_no_loss` now has an optional
+      `--run-agent-app-bridge-fixture-smoke` gate
+    - the smoke reuses the existing local owned DevTools fixture and validates
+      the app bridge sender contract through local HTTP/WebSocket CDP without
+      launching WeChat, Cursor, Claude, or Codex desktop windows
+    - the report now exposes
+      `agent_app_bridge_fixture_smoke_enabled`,
+      `agent_app_bridge_fixture_smoke_ok`,
+      `agent_app_bridge_fixture_control_attempts`, and
+      `agent_app_bridge_fixture_native_call_attempts`
+    - fixture failure now contributes to `failed_runner_count`, so a broken
+      bridge substrate cannot be hidden behind a green unified report
+    - this is bridge substrate evidence only; it does not promote any real app
+      endpoint to ready and does not satisfy Codex/Cursor/Claude app chat
+      requirements
+  - validation:
+    - passed:
+      `python -m unittest tests.test_agent_app_bridge_fixture_smoke
+      tests.test_agent_native_cdp_bridge` with `8` tests
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss` with `46` tests
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss
+      tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe
+      tests.test_agent_app_bridge tests.test_agent_app_transport_matrix
+      tests.test_ide_extension_readiness tests.test_cursor_attach_bridge_validation
+      tests.test_objective_readiness_matrix
+      tests.test_agent_app_bridge_fixture_smoke tests.test_agent_native_cdp_bridge`
+      with `142` tests
+    - passed:
+      `git diff --check`; only existing LF-to-CRLF warnings were emitted
+  - R150 real unified no-focus run:
+    - command:
+      `python -m openwukong.evaluation.major_real_no_loss
+      --output-root logs/runtime/major-real-r150-20260602-bridge-fixture
+      --output logs/runtime/major-real-r150-20260602-bridge-fixture/report.json
+      --allow-owned-browser-helper-launch --owned-browser-debug-port 19484
+      --allow-agent-cli-execution --agent-cli-timeout-sec 45
+      --probe-existing-ide-extension-bridge
+      --ide-extension-bridge-url http://127.0.0.1:8787
+      --ide-extension-agent-id cursor --ide-extension-request-timeout-sec 0.5
+      --run-agent-app-bridge-fixture-smoke
+      --agent-app-bridge-fixture-message OPENWUKONG_APP_BRIDGE_FIXTURE_R150
+      --agent-app-bridge-fixture-acceptance-marker
+      "OPENWUKONG_ACCEPTANCE: PASS"`
+    - top-level result:
+      `safe_run_ok=true`, `goal_complete=false`, `control_attempts=0`,
+      `window_input_attempts=0`, `agent_command_attempts=2`,
+      `background_screenshot_success=3/3`, `background_screenshot_focus_stable=true`,
+      `agent_app_bridge_fixture_smoke_enabled=true`,
+      `agent_app_bridge_fixture_smoke_ok=true`, and
+      `agent_app_bridge_fixture_native_call_attempts=1`
+    - fixture evidence:
+      `decision=agent_app_bridge_fixture_smoke_verified`,
+      `desktop_control_attempts=0`, `window_input_attempts=0`,
+      `cdp_request_count=2`, and native call attempts were recorded through
+      the bridge send report
+    - endpoint readiness remains:
+      `total_cases=3`, `observed_endpoint_cases=0`,
+      `ready_endpoint_cases=0`,
+      `background_send_contract_candidate_cases=0`, `blocked_cases=3`
+    - endpoint blockers:
+      Codex app=`gated_native_endpoint_missing`,
+      Claude Desktop=`unavailable`,
+      Cursor=`bridge_endpoint_unavailable`
+    - cleanup:
+      a follow-up process scan found no Chrome/Edge/crashpad process matching
+      port `19484` or the R150 runtime browser profile path
+  - current conclusion:
+    - the bridge sender substrate is now verified inside the same unified
+      no-focus report used for the main objective
+    - the remaining real blocker is not the bridge contract itself; it is
+      discovering or installing one real no-focus app endpoint for WeChat,
+      Codex app, Cursor, or Claude Desktop, then running dry-run contract and
+      opt-in send/readback against that endpoint
+    - next concrete actions:
+      1. implement or attach a real no-focus app endpoint, with WeChat native
+         bridge or Cursor/Codex native/IDE bridge as the highest-leverage path
+      2. require `ready_endpoint_cases > 0` before attempting any real app-side
+         send
+      3. preserve R150 as the bridge-substrate baseline and R149/R150 endpoint
+         readiness as the app-surface blocker baseline
+- 2026-06-02 integrated a real Codex Desktop app-server WebSocket readiness
+  route into the unified no-focus acceptance path:
+  - implementation:
+    - added `openwukong.evaluation.codex_app_server_probe`, a stdlib
+      read-only WebSocket JSON-RPC probe for local
+      `codex.exe app-server --listen ws://127.0.0.1:<port>`
+    - the probe calls only `initialize` and `thread/list`, records
+      `request_attempts=2`, `control_attempts=0`, and
+      `window_input_attempts=0`, and does not send turns or chat messages
+    - `agent_native_connector_probe` now accepts
+      `--codex-app-server-ws-url` and exposes ready endpoints as
+      `endpoint_type=codex_app_server_ws`
+    - `agent_app_real_no_loss` and `major_real_no_loss` now forward explicit
+      Codex app-server WebSocket URLs into the same unified no-loss report
+    - `agent_app_transport_matrix` treats `codex_app_server_ws` as
+      `background-native` thread readiness only: it is ready evidence, but
+      `can_send_without_focus=false` until a turn-send/readback contract is
+      implemented
+    - fixed major requirement attribution so a real ready endpoint reports
+      `native_connector_ready_but_send_not_verified` instead of stale
+      `gated_native_endpoint_missing`
+  - validation:
+    - passed:
+      `python -m unittest tests.test_codex_app_server_probe
+      tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss
+      tests.test_agent_app_transport_matrix tests.test_major_real_no_loss`
+      with `104` tests
+    - passed:
+      `git diff --check`; only existing LF-to-CRLF warnings were emitted
+    - R151 first real run exposed a useful startup-resolution bug:
+      `Get-Command codex.exe` resolved to the MSIX Desktop resource path and
+      `Start-Process` returned `Access is denied`; the no-focus runner was
+      corrected to use the real CLI bin under
+      `%LOCALAPPDATA%\OpenAI\Codex\bin\...\codex.exe`
+    - R152 real unified no-focus run:
+      `logs/runtime/major-real-r152-20260602-codex-app-server-ws-requirement`
+      started a hidden managed Codex app-server helper on
+      `ws://127.0.0.1:19733`, passed that endpoint to the unified major
+      report, then stopped the helper by PID
+    - R152 top-level result:
+      `safe_run_ok=true`, `goal_complete=false`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `agent_command_attempts=2`, `background_screenshot_success=3/3`,
+      and `background_screenshot_focus_stable=true`
+    - R152 Codex app evidence:
+      `codex_app_background_chat=gated(native_connector_ready_but_send_not_verified)`,
+      `ready_endpoint_count=1`,
+      `ready_endpoint_type=codex_app_server_ws`, and
+      endpoint readiness blocker
+      `native_connector_ready_but_send_not_verified`
+    - cleanup:
+      final process scan found no non-shell process matching port `19733`,
+      owned browser port `19486`, or the R152 runtime profile path
+  - current conclusion:
+    - Codex Desktop now has a real no-focus native endpoint readiness route in
+      the unified acceptance report
+    - this is not yet Codex app background chat completion: the remaining
+      Codex app work is to implement a safe turn-start/send contract and
+      readback marker verification over the app-server API
+    - WeChat remains real-verified for observation/background screenshot and
+      has prior opt-in File Transfer Assistant send evidence, but the unified
+      product-grade no-focus send requirement still needs a reusable native
+      bridge or verified semantic sender/readback route
+    - remaining unsatisfied requirements after R152:
+      WeChat background send, Claude CLI auth, Claude Desktop app chat, Cursor
+      app chat, and Codex app send/readback
+- 2026-06-02 integrated Codex app-server turn dry-run contract into the
+  unified no-focus acceptance path and added precision guards:
+  - implementation:
+    - added `openwukong.control.codex_app_server_bridge`, a dry-run only
+      contract builder for Codex app-server `turn/start`
+    - the contract records schema version, endpoint evidence, selected
+      `threadId`, `cwd`, required/forbidden result markers, read-only sandbox
+      policy, and zero send/native/window-input attempts
+    - `agent_app_real_no_loss` now emits
+      `codex_app_server_turn_dry_run` and
+      `codex_app_server_turn_contract_ready` for ready
+      `codex_app_server_ws` endpoints
+    - `major_real_no_loss` now surfaces that contract in
+      `agent_app_endpoint_readiness`
+    - added workspace/thread ownership validation: a Codex app-server thread
+      selected from a different `cwd` now reports
+      `codex_app_server_workspace_mismatch` instead of being promoted to a
+      ready send contract
+    - hardened agent app DevTools launch planning so
+      `C:\Program Files\WindowsApps\...` MSIX/Electron shell paths are not
+      marked as background-launchable helper executables; they now carry
+      `launch_blocking_reason=msix_windowsapps_not_background_launchable`
+  - validation:
+    - passed:
+      `python -m unittest tests.test_codex_app_server_bridge
+      tests.test_codex_app_server_probe tests.test_agent_native_connector_probe
+      tests.test_agent_app_real_no_loss tests.test_agent_app_transport_matrix
+      tests.test_major_real_no_loss tests.test_objective_readiness_matrix`
+      with `109` tests
+    - passed:
+      `git diff --check`; only existing LF-to-CRLF warnings were emitted
+    - R153 real unified no-focus run:
+      `logs/runtime/major-real-r153-20260602-codex-turn-dry-run`
+      started hidden Codex app-server on `ws://127.0.0.1:19734` and proved
+      a dry-run `turn/start` payload could be generated without any real
+      app-server `turn/start`, bridge send, keyboard, mouse, clipboard, or
+      window input attempts
+    - R153 also exposed a critical precision issue: the live app-server
+      selected thread belonged to
+      `E:\ideaProjects\agent\CyberHuaTuo`, not the current `openwukong`
+      workspace, so endpoint readiness alone is not enough for precise
+      control
+    - R154 real unified no-focus run:
+      `logs/runtime/major-real-r154-20260602-codex-thread-workspace-guard`
+      passed an explicit `--workspace-path E:\ideaProjects\agent\openwukong`;
+      the report correctly blocked the Codex turn dry-run with
+      `decision=codex_app_server_workspace_mismatch`,
+      `validation_errors=['workspace_mismatch']`, and
+      `workspace_match=false`
+    - R154 kept `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, and left no non-shell helper process matching
+      the app-server/browser ports or runtime path
+    - during the same real-testing window a WindowsApps/MSIX Codex launch
+      popup appeared (`Unable to find Electron app at
+      C:\Program Files\WindowsApps\OpenAI.Codex_...?...`), confirming that
+      MSIX shell paths must not be used as background Electron helper paths;
+      that risk is now covered by regression tests and launch-plan blocking
+  - current conclusion:
+    - Codex app-server now has a real no-focus endpoint readiness route and a
+      safe dry-run send contract, but precise project routing is still not
+      complete until the app-server can select or create the correct
+      `openwukong` thread before real send/readback
+    - this is a useful quality bar for every future app connector: endpoint
+      readiness, payload schema, no-focus safety, session ownership, and
+      readback markers must all pass before any real action is accepted
+    - remaining unsatisfied requirements remain:
+      WeChat product-grade background send, Claude CLI auth, Claude Desktop app
+      chat, Cursor app chat, and Codex app correct-thread send/readback
+- 2026-06-02 upgraded the Codex app-server contract from single-step
+  `turn/start` dry-run to a two-stage session-safe contract:
+  - implementation:
+    - `CodexAppServerTurnRequest` now inspects `observed_threads` from the
+      app-server probe instead of trusting only `selected_thread_id`
+    - if an observed thread matches the requested workspace, the contract uses
+      that thread for `turn/start` even when the app-server's selected thread
+      points at another project
+    - if no matching thread exists but an explicit workspace is supplied, the
+      contract now produces a safe `thread/start` dry-run with:
+      `cwd=<requested workspace>`, `approvalPolicy=never`,
+      `sandbox=read-only`, and `threadSource=user`
+    - in the missing-thread case, `turn_start_ready=false` and the generated
+      `turn_start_params.threadId` stays empty, so the system cannot
+      accidentally send to the wrong project
+    - `agent_app_real_no_loss` and `major_real_no_loss` now expose:
+      `codex_app_server_thread_start_required`,
+      `codex_app_server_thread_start_ready`, and
+      `codex_app_server_turn_start_ready`
+  - validation:
+    - passed:
+      `python -m unittest tests.test_codex_app_server_bridge
+      tests.test_codex_app_server_probe tests.test_agent_native_connector_probe
+      tests.test_agent_app_real_no_loss tests.test_agent_app_transport_matrix
+      tests.test_major_real_no_loss tests.test_objective_readiness_matrix`
+      with `112` tests
+    - passed:
+      `git diff --check`; only existing LF-to-CRLF warnings were emitted
+    - R155 real unified no-focus run:
+      `logs/runtime/major-real-r155-20260602-codex-thread-start-dry-run`
+      started hidden Codex app-server on `ws://127.0.0.1:19736`, passed
+      `--workspace-path E:\ideaProjects\agent\openwukong`, then stopped the
+      helper by PID
+    - R155 top-level result:
+      `safe_run_ok=true`, `goal_complete=false`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `background_screenshot_success=4/4`, and no non-shell helper process
+      remained for the app-server/browser ports or runtime path
+    - R155 Codex contract evidence:
+      `turn_contract_ready=true`,
+      `thread_start_required=true`,
+      `thread_start_ready=true`,
+      `turn_start_ready=false`,
+      `decision=codex_app_server_thread_start_dry_run_ready`,
+      `thread_start_params.cwd=E:\ideaProjects\agent\openwukong`,
+      while the observed selected thread still belonged to
+      `E:\ideaProjects\agent\CyberHuaTuo-Plugin`
+  - current conclusion:
+    - Codex app control has moved from "endpoint ready but wrong-thread risk"
+      to a precise staged contract:
+      1. attach app-server,
+      2. choose an already matching workspace thread when present,
+      3. otherwise create the correct workspace thread,
+      4. only then run `turn/start` and readback-marker acceptance
+    - this still does not satisfy the Codex app background chat requirement,
+      because no real `thread/start`, real `turn/start`, or readback marker
+      verification has been executed yet
+    - next concrete action:
+      implement an opt-in Codex app-server `thread/start` executor with
+      foreground/focus checks and read-only params, verify it creates or
+      returns an `openwukong` thread without window input, then run the
+      already-prepared `turn/start` dry-run against that newly owned thread
+- 2026-06-02 confirmed the visible `Error launching app` dialog reported by
+  the user is the same blocked MSIX/Electron launch-entry failure:
+  - symptom:
+    `Unable to find Electron app at
+    C:\Program Files\WindowsApps\OpenAI.Codex_26.527...\?type=click&tag=...`
+  - interpretation:
+    this is not a Codex app-server protocol failure and not a WeChat/browser
+    control failure; it is a bad foreground-prone launch path caused by
+    treating a WindowsApps/MSIX Codex package path plus query parameters as a
+    normal Electron executable/app directory
+  - current guard:
+    `major_real_no_loss` now treats `C:\Program Files\WindowsApps\...` app
+    shell paths as installation/foreground-shell evidence only, sets
+    `launch_blocking_reason=msix_windowsapps_not_background_launchable`, and
+    keeps launch attempts at zero for owned DevTools-style background helper
+    startup
+  - validation:
+    passed targeted regression:
+    `python -m unittest tests.test_major_real_no_loss
+    tests.test_codex_app_server_bridge tests.test_agent_app_real_no_loss`
+    with `75` tests
+    passed `git diff --check`; only existing LF-to-CRLF warnings were emitted
+  - next concrete action remains unchanged:
+    use the hidden app-server path only, implement the opt-in `thread/start`
+    executor, verify correct `openwukong` thread ownership without focus
+    change, then move to `turn/start` dry-run/readback acceptance
+- 2026-06-02 implemented and verified opt-in Codex app-server `thread/start`
+  execution for correct-workspace session ownership:
+  - implementation:
+    - added `CodexAppServerThreadStartAdapter` and
+      `CodexAppServerThreadStartExecutionReport`
+    - added a WebSocket JSON-RPC client path:
+      `initialize -> thread/start -> thread/list`
+    - exposed `--allow-codex-app-server-thread-start` and
+      `--codex-app-server-thread-start-timeout` in the agent-app and major
+      no-loss runners
+    - default remains dry-run only; real thread creation occurs only behind
+      the explicit opt-in flag
+    - real `turn/start` is still not executed; after a verified `thread/start`,
+      the runner only rebuilds the `turn/start` dry-run contract against the
+      newly owned thread
+    - focus is checked through foreground HWND before/after; the executor
+      records native call attempts separately from window input attempts
+  - bug found during real validation:
+    - first real R156 created the correct `openwukong` thread, but immediate
+      `thread/list useStateDbOnly=true` still returned stale previous threads,
+      so the first implementation reported
+      `codex_app_server_thread_start_list_verification_failed`
+    - root cause was an overly strict readback strategy against an eventually
+      consistent state-db list
+    - fix:
+      accept thread creation only when the `thread/start` response and a
+      same-connection `thread/started` notification both identify a thread
+      whose `cwd` exactly matches the requested workspace; stale thread-list
+      output is preserved as diagnostic evidence and still fails if response
+      or notification is missing/mismatched
+    - the reusable pattern was added to the global
+      `desktop-background-control-testing` skill
+  - validation:
+    - passed:
+      `python -m unittest tests.test_codex_app_server_bridge
+      tests.test_codex_app_server_probe tests.test_agent_native_connector_probe
+      tests.test_agent_app_real_no_loss tests.test_agent_app_transport_matrix
+      tests.test_major_real_no_loss tests.test_objective_readiness_matrix`
+      with `117` tests
+    - passed:
+      `git diff --check`; only existing LF-to-CRLF warnings were emitted
+    - R157 real no-focus run:
+      `logs/runtime/agent-app-r157-20260602-codex-thread-start-real/report.json`
+      started hidden Codex app-server on `ws://127.0.0.1:19738`, created a
+      Codex thread for `E:\ideaProjects\agent\openwukong`, then stopped the
+      helper by PID
+    - R157 evidence:
+      `failed_cases=0`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `thread_start_verified=true`, `thread_start_attempts=1`,
+      `native_call_attempts=1`,
+      `thread_start_decision=codex_app_server_thread_start_verified`,
+      `verified_by_notification=true`, `foreground_focus_stable=true`,
+      `after_turn_decision=codex_app_server_turn_dry_run_ready`,
+      `after_turn_ready=true`,
+      `after_cwd=E:\ideaProjects\agent\openwukong`, and
+      `remaining_owned_helpers=0`
+  - current conclusion:
+    - Codex App is now background-controllable through app-server for the
+      session/thread ownership layer: the system can create and verify the
+      correct project thread without GUI focus, keyboard, mouse, clipboard, or
+      WindowsApps launch
+    - the Codex App background chat requirement is still not complete because
+      no real `turn/start` has been executed and no assistant readback marker
+      has been accepted yet
+    - next concrete action:
+      add an opt-in `turn/start` executor that consumes only a verified
+      thread-owned dry-run contract, records native app-server attempts, uses
+      read-only sandbox/approval settings, waits for completion/readback
+      events, and accepts success only when required/forbidden markers pass
+- 2026-06-02 tightened handling for the second user-reported Codex
+  MSIX/Electron protocol error dialog:
+  - symptom:
+    foreground popup titled `Error` with body similar to
+    `Error launching app`, `Unable to find Electron app at
+    C:\Program Files\WindowsApps\OpenAI.Codex_26.527...\?type=click&tag=...`,
+    and `Cannot find module`
+  - root cause classification:
+    same failure family as the earlier `选择应用以打开 "session-start"` picker;
+    a foreground-prone protocol/deep-link path is being routed through a
+    WindowsApps Codex shell instead of the hidden app-server connector
+  - implementation:
+    - upgraded IDE bridge foreground snapshots to preserve window class,
+      process identity, executable path, and child-window/body text where
+      available
+    - upgraded system-dialog detection to classify `session-start`,
+      Windows open-with, and Codex MSIX/Electron launch errors as hard
+      foreground blockers
+    - added regression coverage for both the generic dialog detector and
+      Cursor draft-hook validation so readback success cannot mask this
+      focus-stealing failure
+  - validation:
+    - passed:
+      `python -m unittest tests.test_ide_bridge_contract_probe
+      tests.test_cursor_draft_hook_validation` with `22` tests
+    - passed broader regression:
+      `python -m unittest tests.test_ide_bridge_contract_probe
+      tests.test_cursor_draft_hook_validation tests.test_major_real_no_loss
+      tests.test_agent_app_real_no_loss tests.test_codex_app_server_bridge
+      tests.test_codex_app_server_probe` with `105` tests
+    - passed:
+      `git diff --check`; only existing LF-to-CRLF warnings were emitted
+  - current conclusion:
+    - WeChat/browser/Word no-loss paths are not implicated by this popup.
+    - Codex app control must continue through hidden `codex.exe app-server`
+      and never through `C:\Program Files\WindowsApps\OpenAI.Codex...\...`
+      foreground launch/deep-link handling.
+    - next concrete action remains:
+      implement the opt-in real `turn/start` executor on the already verified
+      app-server thread and accept it only through assistant readback markers.
+- 2026-06-02 implemented the opt-in Codex app-server `turn/start` executor
+  and tightened the third user-reported Codex WindowsApps/Electron popup:
+  - implementation:
+    - added `CodexAppServerTurnStartAdapter` and
+      `CodexAppServerTurnStartExecutionReport`
+    - added app-server WebSocket flow:
+      `initialize -> turn/start -> collect notifications until turn/completed`
+    - exposed `--allow-codex-app-server-turn-start` and
+      `--codex-app-server-turn-start-timeout` in the agent-app and major
+      no-loss runners
+    - turn execution remains opt-in and consumes only a verified
+      workspace-owned dry-run contract
+    - success requires assistant readback markers and forbidden-marker checks;
+      user prompt text alone is not counted as assistant readback
+    - the report now separates `thread/start` native calls from `turn/start`
+      native calls and still keeps keyboard, mouse, clipboard, bridge-send,
+      and window-input attempts at zero
+  - real validation:
+    - R158:
+      `logs/runtime/agent-app-r158-20260602-codex-turn-start-real/report.json`
+      started a hidden Codex app-server on `ws://127.0.0.1:19739`, created
+      or selected the correct `openwukong` thread, then issued an opt-in
+      `turn/start`
+    - R158 evidence:
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=0`,
+      `thread_start_verified=true`, `thread_start_attempts=1`,
+      `turn_start_attempts=1`, and `native_call_attempts=2`
+    - R158 did not complete Codex background chat:
+      `codex_app_server_turn_start_verified_cases=0`,
+      `turn_completed=false`, missing marker
+      `OPENWUKONG_ACCEPTANCE: PASS`, and the app-server stderr included
+      Windows sandbox `spawn setup refresh` errors
+    - therefore this proves native app-server command submission, not
+      accepted assistant completion/readback yet
+  - new popup:
+    - symptom:
+      foreground `Error` dialog containing
+      `A JavaScript error occurred in the main process`,
+      `Uncaught Exception`, and `Error: AttachConsole failed`, with stack
+      paths under
+      `C:\Program Files\WindowsApps\OpenAI.Codex_26.527...\app\...`
+    - classification:
+      same blocked WindowsApps/MSIX Codex Electron-shell failure family as
+      the earlier `session-start` picker and
+      `Unable to find Electron app` / `Cannot find module` dialog
+    - implementation:
+      `ide_bridge_contract_probe` system-dialog detection now treats
+      `AttachConsole failed`, Electron main-process JavaScript errors, and
+      `Uncaught Exception` as hard foreground blockers when tied to Codex,
+      WindowsApps, or Electron evidence
+    - Cursor draft-hook validation also rejects this popup even when composer
+      readback text appears to contain the expected marker
+    - reusable rule added to global skill:
+      `desktop-background-control-testing`
+  - validation:
+    - passed:
+      `python -m unittest tests.test_ide_bridge_contract_probe
+      tests.test_cursor_draft_hook_validation` with `24` tests
+    - passed broader regression:
+      `python -m unittest tests.test_ide_bridge_contract_probe
+      tests.test_cursor_draft_hook_validation tests.test_major_real_no_loss
+      tests.test_agent_app_real_no_loss tests.test_codex_app_server_bridge
+      tests.test_codex_app_server_probe` with `113` tests
+  - current conclusion:
+    - WeChat File Transfer Assistant send was previously real-verified, but
+      that specific milestone used an explicitly approved foreground
+      keyboard/clipboard transport, not a product-grade background-native
+      WeChat bridge
+    - browser and Word no-loss paths remain unaffected
+    - Codex app-server can now create a correct project thread and issue
+      opt-in `turn/start` without GUI input, but Codex background chat is not
+      accepted until a real assistant completion/readback marker passes
+    - next concrete actions:
+      1. inspect app-server `TurnStartParams` and execution options to avoid
+         sandbox/setup-refresh failure for no-loss readback tests
+      2. add system-dialog polling to the Codex app-server turn executor so a
+         WindowsApps/Electron popup immediately fails the run with a precise
+         blocker reason
+      3. rerun Codex `turn/start` against an owned no-loss workspace and then
+         the target `openwukong` workspace only after the sandbox/tool
+         behavior is understood
+- 2026-06-02 hardened Codex app-server real-turn no-focus validation after
+  the user reported another Codex foreground JavaScript error popup:
+  - implementation:
+    - `CodexAppServerTurnStartAdapter` now checks
+      `windowsSandbox/readiness` before issuing `turn/start`
+    - `turn/start` execution now polls for Windows system dialogs while the
+      native WebSocket call is in flight
+    - foreground verification was upgraded from raw HWND equality to
+      foreground snapshots and classification:
+      `stable`, `changed_to_unrelated_surface`,
+      `changed_to_agent_surface`, `changed_to_system_dialog`, and
+      `changed_unknown`
+    - a user switching to an unrelated identifiable app no longer causes a
+      false no-loss failure; a switch to Codex, a Codex/MSIX/Electron error
+      dialog, or an unknown foreground surface still fails
+    - agent-app case status now surfaces failed `turn/start` decisions, so a
+      failed real turn is no longer masked as only
+      `codex_app_server_thread_start_verified`
+  - validation:
+    - passed:
+      `python -m unittest tests.test_codex_app_server_bridge`
+      with `20` tests
+    - passed:
+      `python -m unittest tests.test_codex_app_server_bridge
+      tests.test_agent_app_real_no_loss`
+      with `45` tests
+    - passed broader regression:
+      `python -m unittest tests.test_agent_app_real_no_loss
+      tests.test_major_real_no_loss tests.test_codex_app_server_bridge
+      tests.test_codex_app_server_probe tests.test_agent_native_connector_probe
+      tests.test_agent_app_transport_matrix
+      tests.test_objective_readiness_matrix`
+      with `132` tests
+    - R160 real no-loss run:
+      `logs/runtime/agent-app-r160-20260602-codex-turn-focus-classification/report.json`
+      started hidden Codex app-server on `ws://127.0.0.1:19741`, created a
+      correct `openwukong` thread, then issued opt-in `turn/start`
+    - R160 evidence:
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `thread_start_verified=true`,
+      `thread_fg_class=stable`, `turn_attempts=1`,
+      `windows_sandbox_readiness_status=ready`, but
+      `turn_decision=codex_app_server_turn_start_foreground_changed` because
+      foreground changed from `explorer.exe` to `Codex.exe`
+      (`changed_to_agent_surface`)
+  - current conclusion:
+    - Codex app-server `thread/start` is background/session safe.
+    - Codex app-server `turn/start` is not yet no-focus/action safe on this
+      desktop app path, because it activates the Codex WindowsApps desktop
+      shell.
+    - the app-server v2 `TurnStartParams` schema currently exposes model,
+      effort, cwd, approval, sandbox, personality, service tier, and
+      output schema controls, but no observed background/headless/no-activate
+      flag
+    - for product-grade Codex task submission, either find an app-server
+      option or alternate Codex connector that does not activate the desktop
+      shell, or route background Codex execution through the CLI/extension
+      transport while keeping the desktop shell as read-only/session evidence
+  - next concrete actions:
+    1. search for a non-activating Codex background action route:
+       CLI `exec`, IDE extension, or another app-server method
+    2. keep `turn/start` gated as foreground-risk until a no-focus real run
+       proves otherwise
+    3. apply the same foreground-classified action-safety standard to Claude
+       Desktop and other agent apps
+- 2026-06-02 hardened the Codex non-activating background route:
+  - implementation:
+    - added a default local Codex CLI discovery path for
+      `%LOCALAPPDATA%\OpenAI\Codex\bin\...\codex.exe`
+    - the resolver now exposes this as `local-agent-cli` so Codex background
+      task submission can bind to the standalone CLI even when no CLI process
+      is already running
+    - `C:\Program Files\WindowsApps\OpenAI.Codex...\app\resources\codex.exe`
+      is no longer classified as a CLI surface; it remains helper/worker
+      evidence only
+    - agent CLI reports now lift `selected_transport` to the case top level,
+      so readiness matrices can show the actual transport even when the run is
+      not marker-verified
+    - Codex/agent CLI usage-limit failures are now classified as
+      `cli_usage_limit` instead of generic `cli_execution_failed`
+  - validation:
+    - passed:
+      `python -m unittest tests.test_app_resolution
+      tests.test_agent_surface_report tests.test_agent_task_runner
+      tests.test_agent_cli_real_no_loss`
+      with `43` tests
+    - passed:
+      `python -m unittest tests.test_agent_cli_real_no_loss
+      tests.test_objective_readiness_matrix tests.test_app_resolution
+      tests.test_agent_surface_report tests.test_agent_task_runner`
+      with `45` tests
+    - current resolver check:
+      `WindowsAppResolver().resolve('codex cli')` resolves only to
+      `C:\Users\Zhangjinqian\AppData\Local\OpenAI\Codex\bin\716dda49c14d31a0\codex.exe`
+      and not to a WindowsApps resource path
+    - R161 real no-loss run:
+      `logs/runtime/agent-cli-real-r161-20260602-local-cli-provider/report.json`
+      ran Codex CLI from LocalAppData with read-only sandbox, approval never,
+      an owned temporary workspace, and zero window input attempts
+    - R161 focus evidence:
+      foreground changed from VMware to Cursor, classified as
+      `changed_to_unrelated_surface`, so no Codex focus steal was detected
+    - R161 execution result:
+      the CLI returned a usage-limit error:
+      `You've hit your usage limit... try again at 7:43 PM`, so the required
+      marker was not produced and Codex CLI task completion remains unverified
+      for the current account/time window
+  - current conclusion:
+    - Codex has a correct background execution substrate via standalone CLI,
+      and it avoids the WindowsApps/MSIX foreground-shell failure family
+    - the current blocker for Codex CLI marker verification is service quota,
+      not local control precision or focus safety
+    - Codex Desktop App still needs a non-activating native route before it
+      can be counted as background app-chat verified
+  - next concrete actions:
+    1. keep Codex desktop `turn/start` blocked for no-focus action tests
+    2. use Codex CLI as the background task route once quota is available
+    3. continue the same route hardening for Claude Desktop/Claude CLI and
+       Cursor app bridge
+- 2026-06-02 fixed the repeated Codex WindowsApps/Electron foreground error
+  route after the user reported another `Error launching app` dialog with
+  `?type=click&tag=...`:
+  - root cause:
+    - generic `codex` resolution could still select a running
+      `C:\Program Files\WindowsApps\OpenAI.Codex...\app\Codex.exe` desktop
+      shell when that shell was already running
+    - Codex app-server `turn/start` dry-run could still be considered ready
+      for a Windows desktop app-server endpoint; runtime focus checks caught
+      the failure after the fact, but the action could still trigger the
+      desktop shell and its MSIX/Electron notification/deep-link failure
+      family
+  - implementation:
+    - generic `codex` now prefers CLI/connector surfaces for background task
+      execution; only explicit `codex app` or `codex desktop` selects the
+      desktop shell
+    - `codex_candidate_surface_kind` now treats WindowsApps
+      `app\resources\codex.exe` and Cursor extension workers as helper
+      evidence, not CLI
+    - Codex app-server `turn/start` now requires endpoint metadata
+      `turn_start_foreground_safe=true`; otherwise a matched-thread turn
+      dry-run fails before any native call with
+      `codex_app_server_turn_start_foreground_risk`
+    - Windows/Codex Desktop app-server evidence gets the explicit block reason
+      `windows_desktop_app_server_turn_start_foreground_risk`
+  - validation:
+    - passed:
+      `python -m unittest tests.test_agent_app_real_no_loss
+      tests.test_codex_app_server_bridge` with `46` tests
+    - passed broader regression:
+      `python -m unittest tests.test_app_resolution
+      tests.test_agent_surface_report tests.test_agent_task_runner
+      tests.test_agent_cli_real_no_loss tests.test_agent_app_real_no_loss
+      tests.test_major_real_no_loss tests.test_codex_app_server_bridge
+      tests.test_codex_app_server_probe tests.test_agent_native_connector_probe
+      tests.test_agent_app_transport_matrix
+      tests.test_objective_readiness_matrix` with `178` tests
+    - current resolver check:
+      `WindowsAppResolver().resolve('codex')` and `resolve('codex cli')`
+      select
+      `C:\Users\Zhangjinqian\AppData\Local\OpenAI\Codex\bin\716dda49c14d31a0\codex.exe`;
+      `resolve('codex app')` separately selects the WindowsApps desktop shell
+    - replayed R160 Windows Desktop app-server evidence after forcing the
+      thread to match `openwukong`: dry-run now returns
+      `codex_app_server_turn_start_foreground_risk`, `turn_start_ready=false`,
+      and `app_server_turn_start_attempts=0`
+    - `git diff --check` passed with only existing LF-to-CRLF warnings
+  - current conclusion:
+    - this foreground popup family should no longer be triggered by our
+      no-focus Codex app-server path
+    - Codex Desktop app-server remains useful for session/thread evidence and
+      `thread/start`, but not for background `turn/start` on this Windows
+      desktop route
+    - Codex background task execution should continue through the standalone
+      CLI or a future extension/native connector with explicit foreground-safe
+      metadata
+- 2026-06-02 advanced Claude/Cursor no-focus route hardening:
+  - real read-only app-surface validation:
+    - R162:
+      `logs/runtime/agent-app-r162-20260602-claude-cursor-readonly/report.json`
+      probed `claude desktop` and `cursor` with no send, no UIA write, no
+      keyboard, no mouse, and no clipboard
+    - R162 evidence:
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=0`, and
+      `background_screenshot_focus_stable=true`
+    - Claude Desktop process existed, but no target app window was visible to
+      the read-only UIA probe
+    - Cursor was background screenshot-capable, but the matched window was a
+      different project (`trustusb-2`), so `openwukong` was not safe to target
+  - implementation:
+    - app no-loss case status now distinguishes `app_window_not_found`,
+      `target_project_not_visible`, and `target_task_not_visible` from the
+      generic `gated_native_endpoint_missing`/`unavailable` states
+    - R163:
+      `logs/runtime/agent-app-r163-20260602-claude-cursor-status-precision/report.json`
+      verified the refined statuses:
+      `claude desktop -> app_window_not_found` and
+      `cursor -> target_project_not_visible`
+    - added Cursor Agent CLI as a first-class background task transport:
+      generic `cursor` prefers `cursor-agent` when installed, while explicit
+      `cursor app`/`cursor desktop` still resolves only to the desktop shell
+    - added `cursor-agent-cli-managed-terminal` and command planning for
+      `cursor-agent -p --output-format json <task>`
+    - major no-loss defaults now include `cursor` in CLI agents and add a
+      separate `cursor_cli_background_task` requirement
+    - CLI no-loss probes now resolve explicit CLI aliases
+      (`codex cli`, `claude cli`, `cursor agent`) so a missing CLI cannot
+      silently fall back to a desktop app shell
+  - validation:
+    - passed targeted TDD checks for Cursor CLI resolution, surface binding,
+      command planning, CLI no-loss success/fallback behavior, and major
+      requirement aggregation
+    - passed broader regression:
+      `python -m unittest tests.test_app_resolution
+      tests.test_agent_surface_report tests.test_agent_task_runner
+      tests.test_agent_cli_real_no_loss tests.test_agent_app_real_no_loss
+      tests.test_agent_app_transport_matrix tests.test_agent_app_bridge
+      tests.test_agent_app_uia_action_contract
+      tests.test_agent_native_connector_probe tests.test_major_real_no_loss
+      tests.test_objective_readiness_matrix` with `195` tests
+    - R165:
+      `logs/runtime/agent-cli-r165-20260602-cursor-cli-no-desktop-fallback/report.json`
+      verified this machine has no `cursor-agent`; result was
+      `background_cli_unavailable`, `selected_transport=""`,
+      `agent_command_attempts=0`, `window_input_attempts=0`, and stable
+      foreground
+    - resolver check:
+      `cursor` currently resolves to the running desktop shell because
+      `cursor-agent` is absent; `cursor agent` returns `app_not_found`;
+      `cursor app` resolves to the desktop shell
+    - `git diff --check` passed with only existing LF-to-CRLF warnings
+  - current conclusion:
+    - Claude CLI/background route is structurally present; Claude Desktop app
+      route is not currently background app-chat ready because no target app
+      window was visible in the read-only probe
+    - Cursor desktop can be inspected and background-captured, but the
+      currently visible Cursor project is not `openwukong`, so app-chat send
+      remains unsafe until the correct project/session is visible or an IDE
+      bridge/native connector reports the correct workspace
+    - Cursor Agent CLI is now supported as the best background task route when
+      installed; this machine currently lacks `cursor-agent`
+  - next concrete actions:
+    1. install or locate official `cursor-agent`, then rerun Cursor CLI
+       no-loss marker verification
+    2. use a no-focus attach/bridge route to verify Cursor `openwukong`
+       workspace identity before any app chat send
+    3. continue Claude app-side validation only after a visible/attachable
+       target Claude window or native bridge is present
+- 2026-06-02 Codex MSIX/Electron `?type=click&tag=...` popup hardening:
+  - trigger:
+    - real desktop produced repeated Codex error dialogs:
+      `Error launching app`, `Unable to find Electron app at
+      C:\Program Files\WindowsApps\OpenAI.Codex_26.52...\type=click&tag=...`,
+      and `Cannot find module`
+    - this is the same foreground-blocking family as prior
+      `session-start` open-with pickers and `AttachConsole failed` Codex
+      Electron dialogs
+  - root cause:
+    - the underlying route can still activate the WindowsApps/Codex Desktop
+      Electron shell or protocol/deep-link handler instead of using a proven
+      hidden app-server/CLI/native connector action path
+    - the previous implementation detected delayed dialogs after a call, but
+      did not treat an already-open system dialog as a hard preflight blocker
+      before `thread/start` or `turn/start`
+    - `thread/start` lacked the same system-dialog observer and evidence
+      fields that `turn/start` already had
+  - implementation:
+    - `CodexAppServerThreadStartAdapter` now accepts
+      `system_dialog_observer`, samples before/during/after the native call,
+      exposes `system_dialog_detected` and `system_dialog_snapshots`, and
+      returns `codex_app_server_thread_start_system_dialog_detected` with
+      zero request/native attempts if a dialog is already open
+    - `CodexAppServerTurnStartAdapter` now samples existing dialogs before
+      the native call and returns
+      `codex_app_server_turn_start_system_dialog_detected` with
+      `request_attempts=0`, `app_server_turn_start_attempts=0`, and
+      `native_call_attempts=0`
+    - `agent_app_real_no_loss` now passes the dialog observer into the
+      Codex app-server path and surfaces system-dialog decisions as failed
+      case statuses even when attempts are zero
+    - updated global skill
+      `desktop-background-control-testing` so this is a reusable preflight
+      gate, not just post-action evidence
+  - validation:
+    - added TDD tests for pre-existing Codex Electron error dialogs and
+      `session-start` open-with dialogs before app-server calls
+    - passed:
+      `python -m unittest tests.test_codex_app_server_bridge` with `23` tests
+    - passed related regression:
+      `python -m unittest tests.test_codex_app_server_bridge
+      tests.test_agent_app_real_no_loss tests.test_major_real_no_loss
+      tests.test_ide_bridge_contract_probe tests.test_cursor_draft_hook_validation`
+      with `122` tests
+    - passed wider agent/no-loss regression:
+      `python -m unittest tests.test_app_resolution
+      tests.test_agent_surface_report tests.test_agent_task_runner
+      tests.test_agent_cli_real_no_loss tests.test_agent_app_real_no_loss
+      tests.test_agent_app_transport_matrix tests.test_agent_app_bridge
+      tests.test_agent_app_uia_action_contract
+      tests.test_agent_native_connector_probe tests.test_major_real_no_loss
+      tests.test_objective_readiness_matrix tests.test_codex_app_server_bridge`
+      with `219` tests
+  - current conclusion:
+    - the current Codex Desktop app-server `turn/start` route remains
+      action-unsafe unless endpoint metadata proves foreground safety; when
+      this popup family appears, the runner now stops immediately instead of
+      continuing with more native actions
+    - this is not a failure of the overall architecture; it reinforces the
+      chosen layering: CLI/native/extension connector first, desktop shell
+      protocol activation only behind explicit foreground gates
+  - next concrete actions:
+    1. keep Codex Desktop app-server `turn/start` disabled for real background
+       execution unless a route proves `turn_start_foreground_safe=true`
+    2. route Codex background tasks through the standalone Codex CLI or a
+       native/extension connector, not the WindowsApps desktop shell
+    3. continue validating agent app surfaces with system-dialog preflight
+       gates before any native/action call
+- 2026-06-02 top-level system-dialog preflight for major no-loss runs:
+  - decision:
+    - moved the Codex popup hardening from app-server-local protection toward
+      the full major no-loss orchestration layer
+    - `major_real_no_loss` now performs a read-only desktop system-dialog
+      preflight before primary scenarios, agent app probes, agent CLI probes,
+      owned helper launches, or fixture smoke runs
+  - implementation:
+    - added `openwukong.control.desktop_system_dialog` with
+      `run_desktop_system_dialog_preflight`
+    - the preflight enumerates visible top-level Windows dialogs read-only and
+      detects the foreground-blocking family:
+      `session-start`, Windows open-with, Codex/Electron
+      `Error launching app`, `Unable to find Electron app`,
+      `Cannot find module`, `AttachConsole failed`, and
+      `?type=click&tag=...`
+    - `MajorScenarioRealNoLossReport` now exposes
+      `system_dialog_preflight`, `system_dialog_preflight_failed`, and a
+      `subreports.system_dialog_preflight` artifact section
+    - if the preflight fails, the major runner short-circuits before invoking
+      any child runner; primary/app/CLI/helper attempts remain zero
+  - validation:
+    - added tests for the standalone preflight detector and the top-level
+      major-runner short-circuit contract
+    - passed:
+      `python -m unittest tests.test_desktop_system_dialog_preflight
+      tests.test_major_real_no_loss` with `50` tests
+    - passed wider regression:
+      `python -m unittest tests.test_desktop_system_dialog_preflight
+      tests.test_app_resolution tests.test_agent_surface_report
+      tests.test_agent_task_runner tests.test_agent_cli_real_no_loss
+      tests.test_agent_app_real_no_loss tests.test_agent_app_transport_matrix
+      tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract
+      tests.test_agent_native_connector_probe tests.test_major_real_no_loss
+      tests.test_objective_readiness_matrix tests.test_codex_app_server_bridge
+      tests.test_primary_real_no_loss` with `230` tests
+    - real read-only preflight on the current desktop returned
+      `system_dialog_clear`, `system_dialog_count=0`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `native_call_attempts=0`
+    - R166:
+      `logs/runtime/major-r166-20260602-system-dialog-preflight/report.json`
+      ran a default major no-loss probe with no send/launch permissions:
+      `safe_run_ok=true`, `system_dialog_preflight=system_dialog_clear`,
+      `background_screenshot_success_count=3/3`,
+      `background_screenshot_focus_stable=true`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `bridge_send_attempts=0`, `agent_command_attempts=0`
+  - current conclusion:
+    - the harness now protects the whole major validation path from existing
+      Windows/Codex protocol error dialogs before any desktop automation
+      sub-runner starts
+    - the overall goal is still incomplete: R166 still reports unmet
+      requirements for WeChat background send, browser background research,
+      Codex/Claude/Cursor CLI background tasks, and Codex/Claude/Cursor app
+      background chat
+  - next concrete actions:
+    1. wire the same preflight report into `primary_real_no_loss` if it is
+       run standalone outside `major_real_no_loss`
+    2. continue closing the largest remaining verified gap: background agent
+       task execution through Codex CLI / Claude CLI / Cursor Agent CLI or
+       native/extension connectors
+    3. keep real sends behind explicit opt-in and require preflight clear,
+       target identity, semantic/native endpoint, and readback markers
+- 2026-06-02 standalone primary system-dialog preflight and tighter dialog
+  scanning:
+  - trigger:
+    - another user-visible Codex WindowsApps/Electron dialog appeared:
+      `Error launching app`, `Unable to find Electron app at
+      C:\Program Files\WindowsApps\OpenAI.Codex_26.527...\type=click&tag=...`,
+      and `Cannot find module`
+    - a direct real preflight scan later returned `system_dialog_clear`
+      because the dialog was no longer visible/enumerable at scan time; a
+      narrow read-only top-level scan for `Error` / `#32770` also found no
+      active dialog
+  - root cause update:
+    - the previously added hard gate protected `major_real_no_loss`, but
+      standalone `primary_real_no_loss` could still be run without the same
+      preflight
+    - the dialog scanner also needed a privacy/safety tightening: child text
+      should only be read for likely system-dialog candidates, not for every
+      visible top-level user window
+  - implementation:
+    - `primary_real_no_loss` now runs
+      `run_desktop_system_dialog_preflight` before L1 replay, owned browser
+      helper checks, WeChat probes, Word COM probes, IDE bridge probes, or
+      Computer Use probes
+    - on preflight failure it returns immediately with zero control/window/
+      external/owned-launch attempts and exposes
+      `system_dialog_preflight_failed` plus the preflight report in both full
+      and summary outputs
+    - `major_real_no_loss` now passes its already-recorded preflight report
+      into the primary runner, so the combined report remains deterministic
+      while standalone primary still has its own default real preflight
+    - `desktop_system_dialog` now avoids broad child-text reads; it probes
+      child text only for likely dialog candidates such as `Error`, `#32770`,
+      `session-start`, open-with titles, or explicit Codex/Electron protocol
+      evidence
+    - generic `title=Error` WindowsApps windows without Codex/OpenAI/Electron
+      evidence are no longer treated as this specific Codex popup family
+    - updated the global `desktop-background-control-testing` skill with the
+      reusable rule: if a user reports a visible dialog but preflight returns
+      clear, first verify same desktop/session with a narrow top-level scan
+      and avoid broad user-window child text dumps
+  - official-doc basis:
+    - Microsoft `EnumWindows` documentation confirms it enumerates top-level
+      windows and is more reliable than looping with `GetWindow`
+    - Microsoft `GetWindowTextW` documentation notes cross-process control
+      text limitations, which explains why child dialog text should be
+      handled separately and only for candidates
+    - Microsoft `SendMessageTimeoutW` / `WM_GETTEXT` documentation supports a
+      bounded fallback for already-identified candidate dialog child text
+  - validation:
+    - new RED/GREEN coverage:
+      - standalone primary stops before any scenario work when system-dialog
+        preflight fails
+      - major passes its existing preflight report into primary instead of
+        letting primary touch the real desktop again
+      - ordinary WindowsApps/Notepad `Error` does not get classified as a
+        Codex dialog
+      - child text probing is limited to likely system-dialog candidates
+    - passed targeted suites:
+      `python -m unittest tests.test_desktop_system_dialog_preflight
+      tests.test_primary_real_no_loss tests.test_major_real_no_loss` with
+      `62` tests
+    - passed Codex/app regression:
+      `python -m unittest tests.test_codex_app_server_bridge
+      tests.test_agent_app_real_no_loss` with `51` tests
+    - passed wide regression:
+      `python -m unittest tests.test_desktop_system_dialog_preflight
+      tests.test_app_resolution tests.test_agent_surface_report
+      tests.test_agent_task_runner tests.test_agent_cli_real_no_loss
+      tests.test_agent_app_real_no_loss tests.test_agent_app_transport_matrix
+      tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract
+      tests.test_agent_native_connector_probe tests.test_major_real_no_loss
+      tests.test_objective_readiness_matrix tests.test_codex_app_server_bridge
+      tests.test_primary_real_no_loss` with `234` tests
+    - real read-only preflight currently returns `system_dialog_clear`,
+      `system_dialog_count=0`, `control_attempts=0`,
+      `window_input_attempts=0`, and `native_call_attempts=0`
+    - R168:
+      `logs/runtime/primary-r168-20260602-system-dialog-preflight-tightened`
+      ran standalone primary no-loss with no send/keyboard/mouse/clipboard:
+      `system_dialog_preflight_failed=false`, `passed_cases=5/5`,
+      `failed_cases=0`, `real_verified_cases=3`,
+      `control_attempts=0`, `external_communication_attempts=0`,
+      `window_input_attempts=0`, and `owned_app_launch_attempts=0`
+  - current conclusion:
+    - the reported popup is still the known blocked Codex WindowsApps/MSIX
+      Electron-shell route, not a failure of the connector-first architecture
+    - both major and standalone primary no-loss entries now have a preflight
+      hard gate before any desktop automation subrunner starts
+    - the overall objective remains incomplete: browser/Codex in the R168
+      standalone run were not verified because owned browser helper and IDE/
+      native bridge were not enabled, and agent app/CLI background task gaps
+      still need deterministic connector/CLI routes
+  - next concrete actions:
+    1. identify the exact route that is still activating the Codex
+       WindowsApps desktop shell and route it permanently to standalone Codex
+       CLI or a proven native/extension connector
+    2. continue background-safe agent task execution validation for Codex CLI,
+       Claude CLI, and Cursor Agent CLI/native bridges
+    3. keep all real sends/actions behind explicit opt-in plus preflight
+       clear, target identity, native/semantic endpoint, no-focus evidence,
+       and readback markers
+- 2026-06-02 Codex CLI real background probe and CLI system-dialog guard:
+  - trigger:
+    - another user-visible Codex WindowsApps/Electron popup appeared with
+      `Error launching app`, `Unable to find Electron app at
+      C:\Program Files\WindowsApps\OpenAI.Codex_26.527...\type=click&tag=...`,
+      and `Cannot find module`
+    - immediate read-only preflight and narrow Codex/Error process scan did
+      not find an active top-level dialog, so the popup was either already
+      closed, transient, or outside the current enumerable top-level window
+      set
+  - root cause update:
+    - the latest real Codex CLI no-loss probe selected the standalone CLI at
+      `C:\Users\Zhangjinqian\AppData\Local\OpenAI\Codex\bin\...\codex.exe`,
+      not the WindowsApps desktop shell
+    - the standalone `agent_cli_real_no_loss` runner still lacked its own
+      system-dialog preflight/postflight gate, so a delayed or pre-existing
+      Codex/Electron dialog could have been missed even when the CLI returned
+      the acceptance marker
+  - implementation:
+    - `agent_cli_real_no_loss` now samples
+      `run_desktop_system_dialog_preflight` before and after each CLI case
+    - pre-existing system dialogs produce
+      `system_dialog_detected_preflight`, skip the agent command, and keep
+      `agent_command_attempts=0`
+    - post-command system dialogs produce
+      `system_dialog_detected_postflight`, overriding any successful CLI
+      acceptance marker
+    - CLI case/report JSON now exposes
+      `system_dialog_detected`, `system_dialog_preflight_failed`,
+      `system_dialog_postflight_failed`, `system_dialog_preflight`, and
+      `system_dialog_postflight`
+  - validation:
+    - added RED/GREEN coverage for:
+      - pre-existing Codex MSIX/Electron `?type=click&tag=...` dialogs
+        blocking CLI execution before any command attempt
+      - delayed JavaScript/`AttachConsole failed` dialogs overriding a
+        successful CLI marker after command execution
+    - passed:
+      `python -m unittest tests.test_agent_cli_real_no_loss` with `12` tests
+    - passed related regression:
+      `python -m unittest tests.test_agent_cli_real_no_loss
+      tests.test_major_real_no_loss tests.test_objective_readiness_matrix
+      tests.test_agent_task_runner tests.test_agent_surface_report` with
+      `80` tests
+    - passed system-dialog/major regression:
+      `python -m unittest tests.test_desktop_system_dialog_preflight
+      tests.test_agent_cli_real_no_loss tests.test_major_real_no_loss` with
+      `65` tests
+    - `git diff --check` passed with only existing LF-to-CRLF warnings
+    - R171:
+      `logs/runtime/agent-cli-r171-20260602-codex-cli-system-dialog-guard`
+      ran a real Codex CLI background no-loss probe:
+      `status=verified`, `verified_cases=1/1`,
+      `selected_transport=codex-cli-managed-terminal`,
+      `window_input_attempts=0`, `workspace_clean=true`,
+      `system_dialog_preflight_failed=false`, and
+      `system_dialog_postflight_failed=false`
+  - current conclusion:
+    - Codex CLI is now a real verified background task route for the no-loss
+      marker probe on this machine
+    - the reported popup was not reproduced by the R171 Codex CLI route; if
+      it appears again, the standalone CLI runner will now fail the run
+      instead of silently accepting the marker
+    - the remaining Codex risk is the WindowsApps desktop shell/protocol
+      activation family, which must stay out of background task execution
+      unless a native/extension connector proves foreground safety
+  - next concrete actions:
+    1. fold the verified Codex CLI route into the major readiness matrix with
+       `--allow-agent-cli-execution`
+    2. continue Claude CLI/app and Cursor Agent/native bridge validation under
+       the same no-focus and system-dialog gates
+    3. fix the separate Codex CLI skill-loading warnings for malformed global
+       skill frontmatter so live CLI probes start cleaner
+- 2026-06-02 R172 major matrix with owned browser helper and agent CLI:
+  - validation:
+    - ran:
+      `python -m openwukong.evaluation.major_real_no_loss
+      --output-root logs\runtime\major-r172-20260602-cli-owned-browser-guard
+      --allow-agent-cli-execution --agent-cli-timeout-sec 120
+      --allow-owned-browser-helper-launch --owned-browser-debug-port 9491 --json`
+    - result:
+      `safe_run_ok=true`, `goal_complete=false`, `control_attempts=0`,
+      `window_input_attempts=0`, `external_communication_attempts=0`,
+      `owned_app_launch_attempts=1`, and `agent_command_attempts=2`
+    - verified ready requirements:
+      `wechat_background_observation`, `word_background_document`,
+      `browser_background_research`, `file_background_search`,
+      and `codex_cli_background_task`
+    - remaining unsatisfied requirements:
+      `wechat_background_send`, `claude_cli_background_task`,
+      `cursor_cli_background_task`, `codex_app_background_chat`,
+      `claude_desktop_background_chat`, and `cursor_background_chat`
+    - no owned browser helper residue remained after cleanup
+  - conclusion:
+    - the background-safe architecture is working for connector/native paths
+      and Codex CLI, but app chat surfaces still need native/extension
+      session identity plus no-focus send/readback before being called
+      complete
+- 2026-06-02 hard block for Codex/Claude WindowsApps MSIX agent app launch:
+  - trigger:
+    - another real Codex popup appeared:
+      `Error launching app`, `Unable to find Electron app at
+      C:\Program Files\WindowsApps\OpenAI.Codex_26.527...\type=click&tag=...`,
+      and `Cannot find module`
+  - root cause:
+    - `session_readiness_plan` still allowed the
+      `agent-app-devtools-owned` route to append DevTools/Electron flags to
+      any `agent_app_executable`
+    - when the executable came from
+      `C:\Program Files\WindowsApps\OpenAI.Codex...\app\Codex.exe`, that
+      MSIX desktop shell could be launched like a normal Electron helper and
+      produce visible foreground error dialogs
+    - Microsoft docs support treating Store/MSIX apps as AUMID/AppID/URI
+      activated surfaces rather than ordinary background helper executables
+  - implementation:
+    - `SessionReadinessAction` now carries `blocked_reason`
+    - `execute_session_readiness_plan` rejects any action with
+      `blocked_reason` before preparing profiles or calling the launcher
+    - `agent-app-devtools-owned` now returns
+      `block_agent_app_devtools_owned_msix` with
+      `windowsapps_msix_executable_not_background_launchable` when the target
+      executable is under `Program Files\WindowsApps`
+    - the blocked action has empty `argv`, empty `command`,
+      `launch_attempts=0`, and `foreground_required=true`
+  - validation:
+    - RED/GREEN test added:
+      `test_agent_app_devtools_owned_plan_blocks_windowsapps_msix_executable`
+    - passed:
+      `python -m unittest tests.test_session_readiness_plan` with `31` tests
+    - passed related regression:
+      `python -m unittest tests.test_session_readiness_plan
+      tests.test_major_real_no_loss tests.test_desktop_system_dialog_preflight
+      tests.test_codex_app_server_bridge tests.test_agent_app_real_no_loss`
+      with `135` tests
+    - real no-loss verification with the actual current Codex WindowsApps
+      path returned `launch_attempts=0`, `status=rejected`, `argv=[]`, and
+      `error=windowsapps_msix_executable_not_background_launchable`
+    - real read-only desktop system-dialog preflight returned
+      `system_dialog_clear`, `system_dialog_count=0`,
+      `control_attempts=0`, `window_input_attempts=0`, and
+      `native_call_attempts=0`
+    - `git diff --check` passed with only existing LF-to-CRLF warnings
+  - current conclusion:
+    - this popup family now has defense in depth:
+      system-dialog preflight/postflight catches visible dialogs, and the
+      lowest launch-planning layer refuses to launch MSIX agent app shells as
+      background DevTools helpers
+    - Codex background execution should continue through the standalone
+      Codex CLI or a proven native/extension connector; the WindowsApps
+      desktop shell remains evidence/foreground-only unless it exposes a
+      verified safe native endpoint
+  - next concrete actions:
+    1. continue closing app-surface gaps through native/extension bridge
+       readiness instead of owned MSIX app launches
+    2. fix Claude Desktop UIA process-name normalization so visible
+       `claude` windows are not misreported as absent
+    3. keep all agent app `turn/start` execution behind explicit
+       no-focus/readback gates
+- 2026-06-03 Claude Desktop app window detection hardening:
+  - trigger:
+    - R172/R174-style Claude app probes reported
+      `agent_app_window_not_found` even though real `Get-Process` showed a
+      visible Claude main window
+    - real evidence on this machine:
+      PID `42028`, `ProcessName=claude`, `MainWindowTitle=Claude`,
+      `MainWindowHandle=855894`
+  - root cause:
+    - `agent_app_uia_probe` matched agent windows only against process names
+      such as `claude.exe`
+    - Windows/.NET/PowerShell process views can expose `ProcessName=claude`
+      without the `.exe` suffix
+    - the live UIA top-level scan could also omit the Claude window entirely
+      even when Win32 top-level enumeration saw the HWND
+  - implementation:
+    - `agent_app_uia_probe` now normalizes process-name aliases so
+      `codex/codex.exe`, `claude/claude.exe`, and `cursor/cursor.exe`
+      all match the same agent surface
+    - `accessibility_probe` now merges a read-only Win32 top-level-window
+      fallback into the UIA window list
+    - the Win32 fallback records only top-level HWND, title, class name, PID,
+      and process name; it does not enumerate child controls, click, type, or
+      invoke anything
+    - duplicate suppression uses HWND first, then PID+title
+  - validation:
+    - added RED/GREEN coverage:
+      - `test_claude_desktop_process_name_without_exe_matches_window`
+      - `test_win32_fallback_adds_top_level_window_missing_from_uia`
+    - passed:
+      `python -m unittest tests.test_accessibility_probe
+      tests.test_agent_app_uia_probe` with `18` tests
+    - passed related regression:
+      `python -m unittest tests.test_accessibility_probe
+      tests.test_agent_app_uia_probe tests.test_agent_app_real_no_loss
+      tests.test_major_real_no_loss` with `95` tests
+    - real R175:
+      `logs/runtime/claude-uia-r175-20260603-win32-fallback-process-name-normalized.json`
+      changed Claude Desktop from `agent_app_window_not_found` to
+      `agent_app_uia_target_visible_input_not_found`,
+      `matched_window_count=1`, `matched pid=42028`,
+      `matched hwnd=855894`, and `control_attempts=0`
+    - real R176:
+      `logs/runtime/claude-uia-r176-20260603-win32-fallback-background-capture.json`
+      kept foreground stable while attempting HWND capture, but
+      `PrintWindow` returned `print_window_failed`;
+      this is provider negative evidence, not permission to use focus or
+      vision as the primary control channel
+    - real system-dialog preflight before the probe was
+      `system_dialog_clear`, with zero control/window/native attempts
+    - `git diff --check` passed with only existing LF-to-CRLF warnings
+  - current conclusion:
+    - Claude Desktop is now correctly classified as a visible app surface
+      rather than absent
+    - Claude Desktop remains not background-send-ready: no native bridge,
+      no semantic composer, and current `PrintWindow` capture failed while
+      preserving focus
+  - next concrete actions:
+    1. add a stronger no-focus background capture fallback for Electron/MSIX
+       app windows where `PrintWindow` fails
+    2. continue app-surface readiness through native/extension bridges rather
+       than UIA writes
+    3. rerun the major readiness matrix so
+       `claude_desktop_background_chat` moves from `unavailable` to
+       visible/gated with explicit blocking evidence
+- 2026-06-03 R177 major readiness rerun after Claude visibility hardening:
+  - validation:
+    - ran:
+      `python -m openwukong.evaluation.major_real_no_loss
+      --output-root logs\runtime\major-r177-20260603-claude-visible-gated
+      --allow-agent-cli-execution --agent-cli-timeout-sec 120
+      --allow-owned-browser-helper-launch --owned-browser-debug-port 9492 --json`
+    - result:
+      `safe_run_ok=true`, `goal_complete=false`, `control_attempts=0`,
+      `window_input_attempts=0`, `external_communication_attempts=0`,
+      `owned_app_launch_attempts=1`, `agent_command_attempts=2`,
+      `background_screenshot_count=5`,
+      `background_screenshot_success_count=4`,
+      `background_screenshot_focus_stable=true`, and
+      `system_dialog_preflight_failed=false`
+    - objective readiness summary:
+      `requirement_count=11`, `satisfied_count=4`, `gated_count=1`,
+      `auth_required_count=1`, `unavailable_count=5`, `failed_count=0`,
+      `background_execute_ready_count=4`,
+      `background_write_ready_count=2`
+    - verified requirements in this environment:
+      `browser_background_research`, `word_background_document`,
+      `file_background_search`, and `codex_cli_background_task`
+    - current unsatisfied requirements:
+      `wechat_background_observation`, `wechat_background_send`,
+      `claude_cli_background_task`, `cursor_cli_background_task`,
+      `codex_app_background_chat`, `claude_desktop_background_chat`,
+      and `cursor_background_chat`
+    - Claude Desktop matrix status:
+      `claude_desktop_background_chat` remains unsatisfied, but the
+      blocking reason is now `target_project_not_visible`; the independent
+      R175/R176 probes proved the Claude window itself is visible
+    - current desktop caveat:
+      WeChat was not visible/enumerable in this R177 run, so
+      `wechat_background_observation` was `unavailable`; this is environment
+      presence, not a regression of the previously verified WeChat route
+  - current conclusion:
+    - the main architecture remains correct: connector/native routes are
+      stable, CLI routes can run in the background, and app surfaces are now
+      being classified more precisely instead of guessed through vision
+    - the full goal is still not complete because app chat surfaces need
+      native/extension bridge readiness and Claude/Cursor CLI or app-side
+      execution still lacks verified no-focus send/readback
+  - next concrete actions:
+    1. implement a no-focus background capture fallback for Electron/MSIX
+       windows where `PrintWindow` fails
+    2. rerun WeChat read-only/send validation only when the personal WeChat
+       window is present and target identity can be proven
+    3. continue agent app background task submission through native/extension
+       connectors, not foreground UIA typing
+- 2026-06-03 Codex MSIX/Electron `type=click&tag` action-layer hardening:
+  - trigger:
+    - another user-visible Codex popup appeared:
+      `Error launching app`, `Unable to find Electron app at
+      C:\Program Files\WindowsApps\OpenAI.Codex_26.527...\type=click&tag=...`,
+      and `Cannot find module`
+    - immediate read-only system-dialog preflight was clear, so the dialog
+      was already closed/transient or outside the current enumerable dialog
+      set
+  - why earlier rounds did not fully solve it:
+    - launch-layer hardening correctly blocked
+      `agent-app-devtools-owned` from treating WindowsApps/MSIX Codex as a
+      background-launchable Electron helper
+    - CLI-layer hardening correctly guarded standalone Codex CLI probes with
+      preflight/postflight dialog checks
+    - the remaining gap was action/protocol-layer: a Codex Desktop app-server
+      endpoint could still self-report `turn_start_foreground_safe=true`,
+      allowing `turn/start` to be treated as background-safe even when the
+      endpoint identity was `surface_kind=desktop_app`
+    - that gap matches the observed `type=click&tag` family, which is a
+      desktop/protocol activation risk rather than a normal hidden CLI route
+  - official-doc basis:
+    - Microsoft packaged/MSIX apps can receive protocol/URI activation through
+      their package manifest, and URI/query parameters are passed to the app
+      activation handler
+    - this supports treating WindowsApps/MSIX protocol/deep-link activation
+      as a foreground-prone app surface, not a normal background helper path
+  - implementation:
+    - `CodexAppServerTurnRequest.turn_start_foreground_safe` now treats
+      `surface_kind=desktop_app` or `Codex Desktop` user-agent evidence as a
+      forced block
+    - forced desktop-shell evidence overrides any
+      `turn_start_foreground_safe=true` metadata
+    - endpoint summaries and payload diagnostics now preserve
+      `windows_desktop_app_server_turn_start_foreground_risk` for this case
+  - validation:
+    - added RED/GREEN coverage:
+      `test_turn_dry_run_blocks_windows_desktop_endpoint_even_when_marked_safe`
+    - passed:
+      `python -m unittest tests.test_codex_app_server_bridge` with `24`
+      tests
+    - passed related regression:
+      `python -m unittest tests.test_agent_app_real_no_loss
+      tests.test_major_real_no_loss` with `77` tests
+    - real read-only system-dialog preflight returned `system_dialog_clear`,
+      `system_dialog_count=0`, `control_attempts=0`,
+      `window_input_attempts=0`, and `native_call_attempts=0`
+    - real R178:
+      `logs/runtime/agent-app-r178-20260603-codex-msix-popup-guard`
+      ran Codex app no-loss with `--allow-codex-app-server-turn-start` but
+      no safe endpoint contract:
+      `passed_cases=1/1`, `control_attempts=0`,
+      `window_input_attempts=0`, `bridge_send_attempts=0`,
+      `agent_command_attempts=0`,
+      `codex_app_server_turn_start_attempts=0`, and
+      `codex_app_server_native_call_attempts=0`
+  - current conclusion:
+    - the repeated popup family is now guarded at three layers:
+      system-dialog pre/postflight, launch-plan MSIX blocking, and
+      Codex app-server `turn/start` action-layer blocking
+    - Codex Desktop remains foreground/native-bridge-required for app chat;
+      background task execution should use standalone Codex CLI or a proven
+      native/extension connector, not WindowsApps desktop-shell `turn/start`
+  - next concrete actions:
+    1. keep Codex Desktop app-server `thread/start` and `turn/start` as
+       separate layers; only thread/session creation can be considered after
+       no-focus evidence
+    2. implement the no-focus background capture fallback for Electron/MSIX
+       windows where `PrintWindow` fails
+    3. continue agent app background task submission through native/extension
+       connectors with readback markers
+- 2026-06-03 R179 Codex Windows app-server safe-flag bypass hardening:
+  - trigger:
+    - another visible Codex/Electron dialog was reported:
+      `Error launching app`, `Unable to find Electron app at
+      C:\Program Files\WindowsApps\OpenAI.Codex_26.527...\type=click&tag=...`,
+      and `Cannot find module`
+    - read-only `desktop_system_dialog` preflight immediately after the
+      report was `system_dialog_clear`, so the dialog was transient/closed,
+      but the screenshot is still treated as real blocking evidence
+  - root cause found:
+    - the prior hardening forced `turn/start` blocked for
+      `surface_kind=desktop_app` and `Codex Desktop` user-agent evidence
+    - a remaining bypass existed when a Codex app-server endpoint reported
+      `platform_os=windows` and `turn_start_foreground_safe=true` while its
+      `surface_kind` looked headless
+    - in that case the dry-run incorrectly became
+      `codex_app_server_turn_dry_run_ready`, which could allow a real
+      `turn/start` action to enter the same WindowsApps/MSIX protocol
+      activation family
+  - official-doc basis:
+    - Microsoft URI/protocol activation docs confirm packaged apps receive
+      URI activation through the package manifest and can handle query
+      parameters
+    - Microsoft packaged-app activation docs confirm packaged desktop apps
+      can retrieve protocol/click activation information
+    - this supports treating Windows Codex app-server `turn/start` self
+      reports as insufficient safety evidence
+  - implementation:
+    - `CodexAppServerTurnRequest.turn_start_foreground_safe` now force-blocks
+      `platform_os=windows` for Codex app-server `turn/start`
+    - endpoint summaries now report the effective safe flag, not only the raw
+      metadata value
+    - metadata path/URI fields containing `WindowsApps`, `OpenAI.Codex`, or
+      `type=click&tag` are treated as forced foreground-risk evidence
+    - `PrintWindowBackgroundCaptureProvider` has a no-focus
+      `screen-bounds-bitblt-fallback` path for Electron/MSIX windows where
+      `PrintWindow` fails; the fallback is explicitly labeled and is not
+      treated as occlusion-proof
+  - validation:
+    - added RED/GREEN coverage:
+      `test_turn_dry_run_blocks_windows_endpoint_even_when_marked_safe`
+    - passed:
+      `python -m unittest tests.test_codex_app_server_bridge` with `25`
+      tests
+    - passed:
+      `python -m unittest tests.test_window_capture
+      tests.test_agent_app_real_no_loss tests.test_major_real_no_loss
+      tests.test_codex_app_server_bridge` with `103` tests
+    - real read-only system-dialog preflight after the fix returned
+      `system_dialog_clear`, `system_dialog_count=0`,
+      `control_attempts=0`, `window_input_attempts=0`, and
+      `native_call_attempts=0`
+  - current conclusion:
+    - Codex app-server `turn/start` on Windows must remain blocked for
+      background/no-focus execution even if the endpoint self-reports
+      foreground safety
+    - Codex background project task execution should continue through
+      standalone Codex CLI or a future native/extension connector with
+      independent no-focus readback evidence
+  - next concrete actions:
+    1. keep all real Codex app `turn/start` execution disabled on Windows
+       app-server endpoints until an independent native/extension connector
+       proves no foreground activation
+    2. use the new BitBlt fallback only as visual verification evidence, not
+       as a control primitive
+    3. continue no-loss validation for WeChat, Browser, Word, file search,
+       Codex CLI, and Claude/Cursor app surfaces with explicit background
+       gates
+- 2026-06-03 R181 WeChat native bridge registry discovery:
+  - trigger:
+    - R180 real no-loss matrix showed WeChat observation is now verified, but
+      `wechat_background_send` remains gated by
+      `wechat_native_bridge_url_missing`
+    - this means the missing piece is not window recognition; it is automatic
+      local native bridge endpoint discovery
+  - implementation:
+    - added `openwukong.control.wechat_native_bridge_registry`
+    - supported explicit URLs, `OPENWUKONG_WECHAT_NATIVE_BRIDGE_URLS`,
+      `OPENWUKONG_WECHAT_NATIVE_BRIDGE_REGISTRY_PATHS`, and default local
+      registry paths:
+      `%LOCALAPPDATA%\OpenWukong\wechat-native-bridges.json` and
+      `%PROGRAMDATA%\OpenWukong\wechat-native-bridges.json`
+    - registry discovery accepts only loopback/local URLs, filters disabled
+      entries and non-WeChat bridge types, and never launches GUI apps
+    - `primary_real_no_loss` now resolves effective WeChat native bridge URLs
+      before building dry-run requests
+    - `major_real_no_loss` now forwards WeChat native bridge registry paths
+      to primary and exposes CLI `--wechat-native-bridge-registry`
+    - updated global skill `desktop-background-control-testing` with the
+      reusable rule: bridge URL missing should first check read-only
+      local registry/env discovery before the route is classified absent
+  - official-doc basis:
+    - Python `os.environ` docs confirm environment variables are represented
+      as a mapping and can be queried safely from process state
+    - Python `json` and `pathlib` docs were checked for standard-library
+      JSON registry loading and path handling
+  - validation:
+    - added tests:
+      `tests.test_wechat_native_bridge_registry`,
+      `test_runner_discovers_wechat_native_bridge_url_from_registry_file`,
+      and
+      `test_runner_passes_wechat_native_bridge_registry_paths_to_primary_runner`
+    - passed targeted tests: `4` tests OK
+    - passed related regression:
+      `python -m unittest tests.test_wechat_native_bridge
+      tests.test_wechat_native_bridge_registry tests.test_primary_real_no_loss
+      tests.test_major_real_no_loss` with `66` tests OK
+    - real R181:
+      `logs/runtime/major-r181-20260603-wechat-bridge-registry`
+      returned `safe_run_ok=true`, `goal_complete=false`,
+      `control_attempts=0`, `window_input_attempts=0`,
+      `agent_command_attempts=2`, `background_screenshot_count=6`,
+      `background_screenshot_success_count=6`, and
+      `background_screenshot_focus_stable=true`
+    - R181 verified:
+      `wechat_background_observation`, `word_background_document`,
+      `browser_background_research`, `file_background_search`, and
+      `codex_cli_background_task`
+    - R181 remaining unsatisfied:
+      `wechat_background_send`, `claude_cli_background_task`,
+      `cursor_cli_background_task`, `codex_app_background_chat`,
+      `claude_desktop_background_chat`, and `cursor_background_chat`
+    - R181 WeChat send is still gated on this machine because no WeChat
+      native bridge registry file or URL is currently installed
+  - current conclusion:
+    - current machine can precisely observe WeChat in the background and can
+      use a WeChat native bridge automatically once it is installed and
+      registered
+    - the product has moved closer to a unified solution because native
+      bridge discovery is no longer hand-wired per run
+    - full goal remains incomplete: app-side chat for WeChat/Codex/Claude/
+      Cursor still requires installed native/extension bridges or auth
+  - next concrete actions:
+    1. add an owned/local WeChat bridge fixture smoke so the registry route
+       can be exercised end-to-end without touching personal chats
+    2. continue Claude/Cursor app-surface readiness through native/extension
+       bridges, not foreground UIA typing
+    3. keep real WeChat sends behind explicit native bridge readiness and
+       target/readback markers
+- 2026-06-03 R182 Codex WindowsApps `thread/start` foreground-risk block:
+  - trigger:
+    - user reported another visible Codex/Electron popup:
+      `Error launching app`, `Unable to find Electron app at
+      C:\Program Files\WindowsApps\OpenAI.Codex_26.527...\type=click&tag=...`,
+      and `Cannot find module`
+    - immediate read-only system-dialog scan was clear, so the dialog had
+      already been dismissed or was transient, but the screenshot is treated
+      as real foreground-blocking evidence
+  - why earlier rounds did not fully solve it:
+    - previous fixes blocked Codex Windows app-server `turn/start` when the
+      endpoint reported Windows/Desktop/MSIX/protocol activation risk
+    - the remaining gap was the staged `thread/start` path: it was considered
+      session-safe and could still make a real app-server client request when
+      the endpoint identity looked like `headless_app_server`
+    - on this machine, Codex exposes both standalone app-server processes and
+      WindowsApps/MSIX Codex app-server evidence; the WindowsApps endpoint
+      family can still route into the desktop shell/protocol activation path
+  - official-doc basis:
+    - Microsoft Windows packaged/MSIX apps support manifest/protocol URI
+      activation and receive activation/query parameters through the app
+      activation handler
+    - therefore `type=click&tag` evidence must be treated as desktop
+      activation risk, not a normal background helper argument
+  - implementation:
+    - `CodexAppServerThreadStartExecutionReport` now exposes
+      `thread_start_block_reason`
+    - endpoint summaries now include a separate
+      `thread_start_block_reason`
+    - real `CodexAppServerThreadStartAdapter.start()` short-circuits before
+      any client request when endpoint metadata contains WindowsApps/MSIX
+      Codex desktop package evidence, `Codex Desktop` user-agent evidence, or
+      protocol activation markers such as `type=click&tag`
+    - updated global skill `desktop-background-control-testing` with this
+      reusable rule
+  - validation:
+    - added RED/GREEN regression:
+      `test_thread_start_executor_blocks_windowsapps_codex_activation_risk`
+    - passed:
+      `python -m unittest tests.test_codex_app_server_bridge` with `26`
+      tests OK
+    - passed:
+      `python -m unittest tests.test_agent_app_real_no_loss
+      tests.test_major_real_no_loss` with `78` tests OK
+    - read-only postflight system-dialog scan returned
+      `system_dialog_clear`, `system_dialog_count=0`,
+      `control_attempts=0`, `window_input_attempts=0`, and
+      `native_call_attempts=0`
+    - `git diff --check` returned exit code `0`; only existing LF/CRLF
+      warnings were printed
+  - current conclusion:
+    - Codex WindowsApps/MSIX desktop package endpoints are now blocked for
+      both real `thread/start` and real `turn/start`
+    - background Codex task execution should use standalone Codex CLI,
+      non-MSIX helper app-server, or a proven native connector with
+      no-focus readback; WindowsApps/MSIX Codex desktop shell remains a
+      foreground-risk surface
+  - next concrete actions:
+    1. continue the owned/local WeChat native bridge fixture smoke
+    2. keep Codex app-side real chat behind non-MSIX/native connector
+       readiness, not WindowsApps desktop-shell activation
+    3. continue Claude/Cursor app-surface readiness through native/extension
+       bridges with the same foreground-risk gate
+- 2026-06-03 R183 WeChat native bridge fixture smoke integrated into major
+  no-loss:
+  - trigger:
+    - R181 proved WeChat background observation and registry discovery, but
+      the main major runner still could not exercise the full registry ->
+      native bridge -> send/readback path without touching personal chats
+  - implementation:
+    - `major_real_no_loss` now imports the owned local WeChat native bridge
+      fixture smoke runner
+    - `MajorScenarioRealNoLossReport` now includes
+      `wechat_native_bridge_fixture_smoke_report`,
+      `wechat_native_bridge_fixture_smoke_enabled`,
+      `wechat_native_bridge_fixture_smoke_ok`,
+      `wechat_native_bridge_fixture_control_attempts`, and
+      `wechat_native_bridge_fixture_native_call_attempts`
+    - the major safe gate now fails if an enabled WeChat fixture smoke fails
+    - the report and subreports now preserve
+      `wechat_native_bridge_fixture_smoke`
+    - CLI now exposes:
+      `--run-wechat-native-bridge-fixture-smoke`,
+      `--wechat-native-bridge-fixture-message`,
+      `--wechat-native-bridge-fixture-acceptance-marker`, and
+      `--wechat-native-bridge-fixture-forbid-marker`
+  - official-doc basis:
+    - Python `http.server.ThreadingHTTPServer` docs confirm the local owned
+      fixture can use threaded request handling for loopback bridge requests
+    - Python `argparse` docs confirm repeated marker flags can use
+      `action="append"`
+    - Python `dataclasses` docs were checked for the report field extension
+      pattern
+  - validation:
+    - added RED/GREEN major runner tests:
+      `test_runner_can_verify_wechat_native_bridge_fixture_smoke_without_window_input`,
+      `test_wechat_native_bridge_fixture_smoke_failure_fails_safe_gate`, and
+      `test_cli_forwards_wechat_native_bridge_fixture_smoke_options`
+    - passed targeted tests:
+      the three new tests OK
+    - passed independent fixture tests:
+      `python -m unittest tests.test_wechat_native_bridge_fixture_smoke`
+      with `2` tests OK
+    - passed related regression:
+      `python -m unittest tests.test_wechat_native_bridge
+      tests.test_wechat_native_bridge_registry tests.test_primary_real_no_loss
+      tests.test_major_real_no_loss` with `69` tests OK
+    - real R183:
+      `logs/runtime/major-r183-20260603-wechat-fixture-smoke`
+      returned `safe_run_ok=true`, `goal_complete=false`,
+      `failed_runner_count=0`, `control_attempts=0`,
+      `window_input_attempts=0`, `agent_command_attempts=2`,
+      `background_screenshot_count=6`,
+      `background_screenshot_success_count=6`,
+      `background_screenshot_focus_stable=true`,
+      `wechat_native_bridge_fixture_smoke_enabled=true`,
+      `wechat_native_bridge_fixture_smoke_ok=true`, and
+      `wechat_native_bridge_fixture_native_call_attempts=1`
+    - R183 WeChat fixture evidence:
+      local registry discovered `http://127.0.0.1:<port>`,
+      fixture saw one capability request and one send request,
+      send report was `wechat_native_bridge_send_accepted`, and
+      missing/forbidden readback marker lists were empty
+    - postflight system-dialog scan returned `system_dialog_clear`,
+      `system_dialog_count=0`, `control_attempts=0`,
+      `window_input_attempts=0`, and `native_call_attempts=0`
+    - final `git diff --check` returned exit code `0`; only existing LF/CRLF
+      warnings were printed
+  - current conclusion:
+    - the major runner now proves the generic WeChat native bridge route
+      end-to-end without affecting real WeChat chats
+    - this does not mark real personal WeChat send complete; real send still
+      requires an installed trusted native bridge registry/URL and explicit
+      target/readback markers
+  - next concrete actions:
+    1. install or implement the real WeChat native bridge adapter behind the
+       same registry contract, then rerun a file-helper-only send with
+       explicit markers
+    2. continue Claude/Cursor app-surface readiness through native/extension
+       bridges with no-focus screenshots and readback markers
+    3. keep Codex app-side real chat behind non-MSIX/native connector
+       readiness; standalone Codex CLI remains the verified background route
+- 2026-06-03 R184 Codex CLI delayed WindowsApps/Electron popup hardening:
+  - trigger:
+    - user reported another visible Codex/Electron dialog:
+      `Error launching app`, `Unable to find Electron app at
+      C:\Program Files\WindowsApps\OpenAI.Codex_26.527...\?type=click&tag=...`,
+      and `Cannot find module`
+    - current read-only desktop scan was clear, so the specific dialog had
+      already been dismissed or was transient; the screenshot is still
+      treated as real foreground-blocking evidence
+  - root cause evidence:
+    - R183 did use the standalone Codex CLI path:
+      `C:\Users\Zhangjinqian\AppData\Local\OpenAI\Codex\bin\716dda49c14d31a0\codex.exe`
+      and not a WindowsApps executable for the top-level command
+    - however that Codex CLI run internally attempted PowerShell tool calls
+      and stderr contained `windows sandbox: spawn setup refresh`
+    - the previous CLI acceptance logic trusted the required PASS marker too
+      much and only ran an immediate postflight system-dialog scan, so it
+      could miss delayed MSIX/Electron popups and still mark the CLI route as
+      verified
+  - official-doc basis:
+    - Microsoft packaged/MSIX apps support URI/protocol activation and can
+      receive query parameters through activation handling, so
+      `type=click&tag` remains desktop activation risk evidence
+    - Python `time` docs were checked for using monotonic elapsed-time
+      polling and short sleeps in the delayed postflight scan
+  - implementation:
+    - `agent_cli_real_no_loss` now accepts
+      `system_dialog_postflight_poll_sec`
+    - real command runs default to a short delayed postflight system-dialog
+      polling window; fake/unit command executors keep zero delay by default
+    - CLI stdout/stderr/error evidence now hard-fails the case as
+      `cli_runtime_foreground_risk` when it contains:
+      `windows sandbox: spawn setup refresh`, `Error launching app`,
+      `Unable to find Electron app`, `AttachConsole failed`,
+      `?type=click`, `type=click&tag`, or WindowsApps OpenAI Codex paths
+    - the no-loss CLI prompt now explicitly forbids file inspection and shell
+      command/tool execution, but this is treated as secondary guidance; the
+      hard gate is still evidence-based
+    - updated global skill `desktop-background-control-testing` with the
+      reusable pattern: PASS markers cannot mask delayed Codex/MSIX dialogs
+      or CLI stderr/stdout foreground-risk evidence
+  - validation:
+    - added RED/GREEN regressions:
+      `test_delayed_post_cli_system_dialog_overrides_success_marker` and
+      `test_codex_cli_sandbox_spawn_setup_refresh_is_not_verified`
+    - passed `python -m unittest tests.test_agent_cli_real_no_loss` with
+      `14` tests OK
+    - passed `python -m unittest tests.test_major_real_no_loss` with
+      `53` tests OK
+    - passed `python -m unittest tests.test_codex_app_server_bridge` with
+      `26` tests OK
+    - passed `python -m unittest tests.test_desktop_system_dialog_preflight`
+      with `4` tests OK
+    - passed `python -m unittest tests.test_agent_app_real_no_loss` with
+      `28` tests OK
+    - current read-only system-dialog preflight returned
+      `system_dialog_clear`, `system_dialog_count=0`, `control_attempts=0`,
+      `window_input_attempts=0`, and `native_call_attempts=0`
+    - `git diff --check` returned exit code `0`; only existing LF/CRLF
+      warnings were printed
+  - current conclusion:
+    - the Codex desktop/MSIX surface remains blocked for background app-side
+      chat
+    - standalone Codex CLI is still a possible background transport, but it
+      can no longer be considered verified when its internal runtime emits
+      sandbox/MSIX/Electron foreground-risk evidence
+    - full goal remains incomplete until Codex app-side execution uses a
+      proven non-MSIX/native connector or a CLI mode that can avoid internal
+      desktop/sandbox foreground activation
+  - next concrete actions:
+    1. rerun the major no-loss matrix without real Codex CLI execution, or
+       with the new CLI runtime-risk gate if the user explicitly allows it
+    2. continue WeChat real file-helper send only through native bridge/UIA
+       semantic gates with explicit target/readback markers
+    3. prioritize non-MSIX/native connectors for Codex/Claude/Cursor app chat
+       before any further foreground-risk real sends
+- 2026-06-03 R189 Codex WindowsApps app-server probe owner guard:
+  - trigger:
+    - user reported another visible Codex/Electron dialog:
+      `Error launching app`, `Unable to find Electron app at
+      C:\Program Files\WindowsApps\OpenAI.Codex_26.527...\type=click&tag=...`,
+      and `Cannot find module`
+    - current read-only system-dialog scan was clear, so the dialog had
+      already been dismissed or was transient, but the screenshot is still
+      treated as real foreground-blocking evidence
+  - investigation:
+    - R188 Cursor real UIA draft verification did not contain Codex,
+      WindowsApps, `session-start`, or `type=click` evidence; it failed only
+      as `uia_semantic_action_draft_value_not_verified`, with
+      `control_attempts=0`, `window_input_attempts=0`, and focus stable
+    - process scan showed both Codex Desktop/MSIX processes under
+      `C:\Program Files\WindowsApps\OpenAI.Codex...` and standalone
+      AppDataLocal/Cursor-extension `codex.exe app-server` processes
+    - the current WindowsApps Codex app-server child had no TCP listening
+      port, so this specific popup is most likely from Codex Desktop or its
+      plugin/protocol activation path, not from the latest Cursor UIA draft
+      test
+  - official-doc basis:
+    - Microsoft packaged/MSIX apps support URI/protocol activation through
+      the package manifest and activation handler, so `type=click&tag`
+      evidence is desktop activation risk
+    - Electron command-line/application-path handling was checked; passing
+      path/query-like activation evidence to the packaged shell can be
+      interpreted as an app path and produce `Unable to find Electron app`
+  - implementation:
+    - `agent_native_connector_probe` now reports top-level
+      `window_input_attempts=0`
+    - explicit Codex app-server WebSocket probes now check the owning
+      listening process before any `initialize`/`thread/list` RPC
+    - if the port owner is WindowsApps/OpenAI.Codex or contains
+      `type=click&tag`/`?type=click` activation evidence, the endpoint is
+      recorded as `codex_app_server_windowsapps_probe_blocked`, with
+      `probe_block_reason=windowsapps_codex_app_server_foreground_risk`,
+      `commands=[]`, and no RPC call
+    - updated global skill `desktop-background-control-testing` with this
+      reusable owner-check rule
+  - validation:
+    - added RED/GREEN regression:
+      `test_blocks_windowsapps_codex_app_server_ws_probe_before_rpc`
+    - passed:
+      `python -m unittest tests.test_agent_native_connector_probe` with
+      `24` tests OK
+    - passed:
+      `python -m unittest tests.test_agent_app_real_no_loss` with `28`
+      tests OK
+    - passed:
+      `python -m unittest tests.test_codex_app_server_bridge
+      tests.test_codex_app_server_probe` with `32` tests OK
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss` with `53` tests OK
+    - current read-only system-dialog preflight returned
+      `system_dialog_clear`, `system_dialog_count=0`,
+      `control_attempts=0`, `window_input_attempts=0`, and
+      `native_call_attempts=0`
+    - `git diff --check` returned exit code `0`; only existing LF/CRLF
+      warnings were printed
+  - current conclusion:
+    - Codex Desktop/MSIX remains an unsafe foreground-risk surface for
+      background app-side actions
+    - the safe Codex route should be a non-MSIX standalone CLI/helper,
+      Cursor/IDE extension app-server, or a proven native connector with
+      no-focus readback
+    - Cursor UIA draft is not sufficient for precise background message
+      entry because ValuePattern write was not verified; Cursor should move
+      to extension/native bridge
+  - next concrete actions:
+    1. stop treating Codex Desktop/MSIX app-server as a background connector
+    2. continue Cursor/Codex/Claude through native/extension bridge contracts
+       rather than UIA or Codex Desktop protocol activation
+    3. keep real sends behind explicit target, transport, and readback gates
+- 2026-06-04 R190 native/app bridge acceptance-readback gate:
+  - trigger:
+    - user asked to start filling the remaining gaps after confirming many
+      routes had already been verified
+    - current gap is not endpoint discovery alone; app/agent bridge routes
+      must prove that a post-send transcript/readback path exists before a
+      required acceptance marker can be trusted
+  - official-doc basis:
+    - Python `unittest` docs were checked for targeted command-line test
+      execution and assertions
+    - Python `dataclasses` docs were checked for the existing immutable report
+      object/update style
+  - implementation:
+    - `agent_native_bridge` now requires explicit readback capability for
+      dry-run readiness, via keys such as `readback_action_ready` or
+      capabilities such as `agent_app_conversation.read_transcript`
+    - missing native readback capability now returns
+      `agent_native_bridge_readback_not_ready`, keeps `/v1/agent/chat`
+      attempts at zero, and reports `readback_not_ready`
+    - `agent_app_bridge` now adds `acceptance_readback_ready`; when
+      `required_markers` are present, an endpoint must be CDP-readable or
+      declare readback capability before the dry-run can be ready
+    - app bridge dry-runs without marker readback now return
+      `app_bridge_readback_not_ready` and report
+      `acceptance_readback_not_ready`
+    - `agent_app_real_no_loss` artifact writing now falls back to a unique
+      sibling/temp artifact directory when the default artifact directory is
+      not writable, preventing historical ACL/permission pollution from
+      aborting the evaluation runner
+  - validation:
+    - added RED/GREEN regressions:
+      `test_sender_refuses_bridge_without_readback_capability_for_marker_verification`,
+      `test_agent_native_bridge_without_readback_metadata_is_not_dry_run_ready_for_markers`,
+      and `test_falls_back_when_artifact_subdir_is_not_writable`
+    - passed targeted tests:
+      `python -m unittest tests.test_agent_native_bridge` with `7` tests OK
+    - passed:
+      `python -m unittest tests.test_agent_app_bridge` with `28` tests OK
+    - passed:
+      `python -m unittest tests.test_agent_native_connector_probe` with `24`
+      tests OK
+    - passed:
+      `python -m unittest tests.test_agent_app_real_no_loss` with `29` tests OK
+    - passed combined regression:
+      `python -m unittest tests.test_agent_native_bridge tests.test_agent_app_bridge
+      tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss
+      tests.test_major_real_no_loss` with `141` tests OK
+  - current conclusion:
+    - connector/native bridge readiness is now closer to the final product
+      acceptance bar: endpoint ready + target ready is insufficient unless
+      the route can also read back markers without foreground input
+    - this directly supports the target direction for WeChat/Cursor/Codex/
+      Claude app-surface control: no send can be called complete without
+      explicit no-focus readback
+    - this does not by itself install real WeChat/Cursor/Codex/Claude bridges;
+      it hardens the shared contract those bridges must satisfy
+  - next concrete actions:
+    1. implement or install the real WeChat native bridge adapter using this
+       readback contract, then rerun file-helper-only real send/readback
+    2. run Cursor/Codex/Claude native or extension bridge probes and require
+       `acceptance_readback_ready=true` before any real send
+    3. keep Codex Desktop/MSIX routes blocked unless a non-MSIX/native
+       connector passes the same readback gate
+- 2026-06-04 R191 agent native bridge fixture enters major no-loss gate:
+  - trigger:
+    - user asked to continue filling the remaining gaps toward unified,
+      precise, no-focus computer operation
+    - the standalone agent native bridge fixture smoke existed, but the
+      unified `major_real_no_loss` runner did not yet execute or gate it
+  - official-doc basis:
+    - Python `http.server` docs were checked for the loopback
+      `ThreadingHTTPServer` fixture shape
+    - Python `argparse` docs were checked for repeatable CLI marker options
+    - Python `dataclasses` docs were checked for safe default report fields
+  - implementation:
+    - added `agent_native_bridge_fixture_smoke_report` to
+      `MajorScenarioRealNoLossReport`
+    - major reports now expose:
+      `agent_native_bridge_fixture_smoke_enabled`,
+      `agent_native_bridge_fixture_smoke_ok`,
+      `agent_native_bridge_fixture_control_attempts`, and
+      `agent_native_bridge_fixture_native_call_attempts`
+    - native fixture smoke failures now count toward `failed_runner_count`
+      and force `safe_run_ok=false`
+    - `window_input_attempts` and `control_attempts` include the native
+      fixture counters, preserving the no-focus invariant
+    - `major_real_no_loss` can now run the owned local HTTP native fixture
+      through `run_agent_native_bridge_fixture_smoke`
+    - CLI gained:
+      `--run-agent-native-bridge-fixture-smoke`,
+      `--agent-native-bridge-fixture-message`,
+      `--agent-native-bridge-fixture-acceptance-marker`, and
+      `--agent-native-bridge-fixture-forbid-marker`
+  - validation:
+    - RED tests failed for missing runner kwargs, missing report field, and
+      missing CLI arguments before implementation
+    - passed targeted GREEN tests:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_can_verify_agent_native_bridge_fixture_smoke_without_window_input tests.test_major_real_no_loss.MajorRealNoLossTests.test_agent_native_bridge_fixture_smoke_failure_fails_safe_gate tests.test_major_real_no_loss.MajorRealNoLossTests.test_cli_forwards_agent_native_bridge_fixture_smoke_options`
+      with `3` tests OK
+    - passed standalone fixture tests:
+      `python -m unittest tests.test_agent_native_bridge_fixture_smoke` with
+      `3` tests OK
+    - passed major runner suite:
+      `python -m unittest tests.test_major_real_no_loss` with `56` tests OK
+    - passed combined regression:
+      `python -m unittest tests.test_agent_native_bridge_fixture_smoke tests.test_major_real_no_loss tests.test_agent_native_bridge tests.test_agent_app_bridge tests.test_agent_app_real_no_loss`
+      with `123` tests OK
+    - ran real CLI path with the owned loopback native fixture; the fixture
+      itself reported `agent_native_bridge_fixture_smoke_ok=true`,
+      `native_call_attempts=1`, and `window_input_attempts=0`
+    - the same CLI command returned nonzero because the default full major
+      scenario still includes currently unavailable WeChat/Word/agent app
+      requirements, not because the native fixture failed
+    - `git diff --check` returned exit code `0`; only existing LF/CRLF
+      warnings were printed
+  - current conclusion:
+    - the generic agent native bridge route is now a first-class major
+      no-loss gate, not just a standalone smoke
+    - this strengthens the target architecture: every app-specific native
+      connector can be proven through the same zero window-input, native
+      call, readback-marker contract before real app sends are trusted
+    - this still does not mean every desktop app is universally controllable;
+      apps without a native/extension/object-model connector remain gated
+      behind bridge-required or foreground-required states
+  - next concrete actions:
+    1. install or implement the real WeChat native bridge adapter against
+       this same fixture-proven contract
+    2. add Cursor/Codex/Claude app-side native/extension bridge probes to the
+       major gate with explicit readback markers
+    3. add a fixture-only/full-goal CLI mode or fixture profile so owned
+       connector gates can return success without also requiring unavailable
+       real app scenarios
+- 2026-06-04 R192 fixture-only major scenario scope:
+  - trigger:
+    - user asked to start after confirming that several main scenarios are
+      still incomplete
+    - R191 proved the agent native bridge fixture route, but a real CLI run
+      still returned nonzero when unrelated default WeChat/Word/agent-app
+      scenarios were unavailable in the current environment
+  - official-doc basis:
+    - Python `argparse` docs were checked for new boolean CLI flags
+    - Python `dataclasses` docs were checked for report default fields
+    - Python `unittest` docs were checked for targeted regression execution
+  - implementation:
+    - `major_real_no_loss` now accepts:
+      `run_primary_scenarios`, `run_agent_app_scenarios`, and
+      `run_agent_cli_scenarios`
+    - CLI gained:
+      `--skip-primary-scenarios`, `--skip-agent-app-scenarios`, and
+      `--skip-agent-cli-scenarios`
+    - skipped runner groups now emit explicit disabled reports with
+      zero `control_attempts`, zero `window_input_attempts`, zero failed
+      cases, and a visible `decision`
+    - requirements are now built only for enabled scenario groups, so a
+      fixture-only connector gate can finish without being marked incomplete
+      by unrelated unavailable apps
+    - top-level reports now expose `scenario_scope` and formatted output
+      shows which scenario groups were enabled
+  - validation:
+    - added RED/GREEN regressions:
+      `test_runner_can_run_agent_native_fixture_scope_without_real_scenario_runners`
+      and `test_cli_forwards_real_scenario_skip_options`
+    - initial RED run failed with:
+      `unexpected keyword argument 'run_primary_scenarios'` and
+      CLI `unrecognized arguments`
+    - passed targeted GREEN tests:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_can_run_agent_native_fixture_scope_without_real_scenario_runners tests.test_major_real_no_loss.MajorRealNoLossTests.test_cli_forwards_real_scenario_skip_options`
+      with `2` tests OK
+    - ran real fixture-only CLI path:
+      `python -m openwukong.evaluation.major_real_no_loss --skip-primary-scenarios --skip-agent-app-scenarios --skip-agent-cli-scenarios --run-agent-native-bridge-fixture-smoke ... --json`
+      and it returned exit code `0` with `safe_run_ok=true`,
+      `goal_complete=true`, `agent_native_bridge_fixture_smoke_ok=true`,
+      `native_call_attempts=1`, `control_attempts=0`, and
+      `window_input_attempts=0`
+    - ran the same scoped path for the WeChat native bridge fixture:
+      `--run-wechat-native-bridge-fixture-smoke`, returning exit code `0`
+      with `safe_run_ok=true`, `wechat_native_bridge_fixture_smoke_ok=true`,
+      `native_call_attempts=1`, `control_attempts=0`, and
+      `window_input_attempts=0`
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss` with `58` tests OK
+    - passed related regression:
+      `python -m unittest tests.test_agent_native_bridge_fixture_smoke tests.test_agent_app_real_no_loss tests.test_agent_native_bridge tests.test_agent_app_bridge`
+      with `67` tests OK
+    - passed combined regression:
+      `python -m unittest tests.test_major_real_no_loss tests.test_agent_native_bridge_fixture_smoke tests.test_agent_app_real_no_loss tests.test_agent_native_bridge tests.test_agent_app_bridge`
+      with `125` tests OK
+  - current conclusion:
+    - owned connector gates can now be verified as independent, successful
+      acceptance runs without touching or requiring unrelated real software
+    - this directly unblocks rapid iteration on real WeChat/Cursor/Codex/
+      Claude bridge adapters: each adapter can first pass a fixture-only or
+      scoped major gate, then graduate to the full major goal
+    - the full product goal remains incomplete until real app-side bridges
+      are installed/implemented and pass readback-gated sends
+  - next concrete actions:
+    1. run the same scoped major gate for the WeChat native bridge fixture
+       and then replace the fixture with a real installed bridge endpoint
+    2. add Cursor/Codex/Claude native/extension bridge probes as scoped major
+       gates before enabling any real app-side send
+    3. once scoped gates pass, rerun full major without skips to measure the
+       remaining real-world gaps
+- 2026-06-05 R193 no-loss runner progress/timeout and Cursor non-interference:
+  - trigger:
+    - user asked whether the main scenarios were complete and then reported
+      that normal Cursor use was interrupted by an OpenWukong IDE Bridge
+      notification:
+      `OpenWukong bridge failed to start: listen EADDRINUSE ... 127.0.0.1:8787`
+    - a full `major_real_no_loss` status run had previously timed out without
+      giving enough evidence about the stuck stage
+  - official-doc basis:
+    - Python `threading.Thread.join(timeout)` / daemon-thread behavior,
+      `queue`, `argparse`, and `dataclasses` docs were checked for the stage
+      timeout/report implementation
+    - Node.js `net.Server.listen` docs were checked for `EADDRINUSE` handling
+      and port fallback behavior
+    - VS Code notification UX/API docs were checked; auto-start bridge
+      failures should not interrupt normal IDE work
+  - implementation:
+    - `major_real_no_loss` now accepts `runner_timeout_sec` and CLI
+      `--runner-timeout-sec`
+    - each major sub-stage records progress to
+      `major-real-no-loss-progress.json`, including started/completed/
+      timed_out state and elapsed time
+    - timed-out stages return a failed timeout subreport with
+      `attempt_counters_reliable=false`, `unknown_post_timeout_runner_state=true`,
+      and keep the final report from falsely claiming completion
+    - CLI now has `_force_exit_process`; when a runner timeout is reported and
+      `--runner-timeout-sec` is enabled, the process writes output, flushes, and
+      force-exits so non-daemon child threads cannot keep the CLI alive
+    - the VS Code/Cursor bridge extension no longer auto-starts by default
+    - auto-start failures are silent by default and no longer show the previous
+      disruptive warning
+    - manual bridge start still works, and if a preferred port such as `8787`
+      is occupied the extension can silently try nearby ports through
+      `openwukong.bridge.autoPortOnConflict`
+  - validation:
+    - passed targeted tests:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_times_out_hung_primary_runner_and_writes_progress tests.test_major_real_no_loss.MajorRealNoLossTests.test_cli_forwards_runner_timeout_option`
+      with `2` tests OK
+    - passed `python -m unittest tests.test_major_real_no_loss` with `60`
+      tests OK
+    - passed related regression:
+      `python -m unittest tests.test_major_real_no_loss tests.test_agent_native_bridge_fixture_smoke tests.test_agent_app_real_no_loss tests.test_agent_native_bridge tests.test_agent_app_bridge tests.test_wechat_native_bridge_fixture_smoke`
+      with `129` tests OK
+    - ran a real no-send/no-GUI-launch status snapshot with
+      `--runner-timeout-sec 20`; it wrote
+      `logs/runtime/major-current-status-20260605-r193/report.json` and
+      showed:
+      - `safe_run_ok=false`, `goal_complete=false`
+      - `runner_timed_out=true`, `runner_stage_failed=true`
+      - `control_attempts=0`, `window_input_attempts=0`,
+        `agent_command_attempts=0`, `automation_focus_safe=true`
+      - satisfied requirements: `3/11`
+      - unmet requirements:
+        `wechat_background_send`, `browser_background_research`,
+        `codex_cli_background_task`, `claude_cli_background_task`,
+        `cursor_cli_background_task`, `codex_app_background_chat`,
+        `claude_desktop_background_chat`, `cursor_background_chat`
+      - stage evidence:
+        `system_dialog_preflight` completed, `primary` completed,
+        `ide_extension_readiness` completed, `agent_app` timed out,
+        `agent_cli` timed out
+    - after the Cursor interruption report, only static checks were possible:
+      process creation/PowerShell/cmd repeatedly timed out, so extension tests
+      for the new non-interference behavior were not executed in this turn
+  - current conclusion:
+    - the main goal is still not complete; current evidence proves only part
+      of the main scenario matrix
+    - the runner is now much more observable: even when full status commands
+      hang, stage progress and final reports can identify the stuck layer
+    - thread-level timeout is insufficient for some real agent runners because
+      non-daemon threads or subprocesses can still keep the CLI process alive;
+      the CLI force-exit path is needed for timeout-gated real status snapshots
+    - Cursor must be treated as a user work surface; normal profiles should not
+      auto-start the bridge or receive bridge error notifications
+  - next concrete actions:
+    1. stop probing user Cursor by default; use only isolated profiles or an
+       explicit bridge URL supplied by the user
+    2. run extension scaffold tests once process spawning recovers
+    3. split agent app/CLI status into narrower no-focus probes so Codex,
+       Claude, and Cursor can be diagnosed independently without blocking the
+       full major snapshot
+- 2026-06-05 R194 default major snapshots stop probing user Cursor:
+  - trigger:
+    - user explicitly said they also need to use Cursor and OpenWukong must not
+      affect normal work
+    - R193 disabled bridge auto-start, but default `major_real_no_loss` still
+      selected Cursor in both app and CLI agent defaults
+  - official-doc basis:
+    - Python `unittest` docs were checked for the assertion methods used in
+      the regression tests
+    - Python `argparse` docs were checked for default and explicit option
+      forwarding behavior
+  - implementation:
+    - `DEFAULT_AGENT_APPS` changed from
+      `("codex app", "claude desktop", "cursor")` to
+      `("codex app", "claude desktop")`
+    - `DEFAULT_CLI_AGENTS` changed from
+      `("codex", "claude", "cursor")` to `("codex", "claude")`
+    - added tests requiring default CLI behavior to exclude Cursor app and
+      Cursor CLI surfaces unless explicitly requested
+    - existing explicit Cursor paths remain intact, including tests that pass
+      `--agent-app cursor` and direct runner calls with `agent_apps=("cursor",)`
+    - updated global `desktop-background-control-testing` skill with the
+      reusable rule: active Cursor/VS Code work surfaces are protected; IDE
+      bridges must not auto-start, fixed-port probe, or notify on conflicts in
+      normal user profiles
+  - validation:
+    - RED for `test_cli_default_agent_apps_do_not_probe_user_cursor` was run
+      before the implementation and failed as expected because default
+      `agent_apps` contained `cursor`
+    - after implementation, process creation became unstable again:
+      `cmd.exe /c echo ok`, PowerShell reads, and `tasklist` repeatedly timed
+      out, so GREEN/unit regression could not be executed in this turn
+    - static file checks confirmed:
+      - `DEFAULT_AGENT_APPS = ("codex app", "claude desktop")`
+      - `DEFAULT_CLI_AGENTS = ("codex", "claude")`
+      - new default-exclusion tests are present
+      - explicit Cursor app tests/runner paths are still present
+      - Cursor requirements remain in the objective matrix
+  - current conclusion:
+    - default real no-loss snapshots now avoid touching user Cursor by
+      construction
+    - Cursor is still part of the final goal, but must enter verification only
+      through an isolated profile or explicit target/bridge URL
+    - process spawning instability remains a local verification blocker for
+      fresh GREEN tests, not a reason to probe user Cursor
+  - next concrete actions:
+    1. once process spawning recovers, run the two new default Cursor exclusion
+       tests and the extension scaffold tests
+    2. run a no-Cursor default `major_real_no_loss` snapshot with
+       `--runner-timeout-sec` to remeasure Codex/Claude/primary gaps
+    3. add per-agent app/CLI sub-stage isolation so Codex and Claude can be
+       diagnosed without Cursor or each other blocking the full report
+- 2026-06-05 R195 per-agent major runner isolation:
+  - trigger:
+    - R193 real status snapshot showed whole `agent_app` and `agent_cli`
+      stages timing out, which hid whether Codex and Claude failed for the
+      same reason or independently
+    - R194 removed Cursor from default probes to protect the user's active
+      Cursor session, but Codex/Claude still needed narrower no-focus
+      diagnostics
+  - official-doc basis:
+    - Python `unittest` docs were checked for the new regression assertions
+    - Python `argparse` docs were checked for explicit boolean CLI flags
+    - Python `dataclasses` docs were rechecked for default-field behavior used
+      by the surrounding report model
+  - implementation:
+    - `run_major_scenario_real_no_loss` gained:
+      `isolate_agent_app_scenarios` and `isolate_agent_cli_scenarios`
+    - CLI gained:
+      `--isolate-agent-app-scenarios` and
+      `--isolate-agent-cli-scenarios`
+    - when enabled, agent app probes run one agent at a time with stage names
+      such as `agent_app:codex app` and `agent_app:claude desktop`
+    - when enabled, agent CLI probes run one agent at a time with stage names
+      such as `agent_cli:codex` and `agent_cli:claude`
+    - per-agent subreports are merged into a normal app/CLI report while
+      preserving summed counters, cases, focus-stability booleans, and the
+      raw isolated subreports
+    - added regression coverage for:
+      - direct runner per-agent app/CLI isolation
+      - CLI forwarding of the two isolation flags
+  - validation:
+    - static implementation checks confirmed:
+      - new function params are present
+      - new CLI args are present and forwarded
+      - isolated app/CLI stage names are present
+      - `_merge_agent_runner_reports` and `_safe_stage_id` are present
+      - new tests are present
+      - Cursor remains excluded from default app/CLI agents
+    - fresh GREEN tests were not run in this turn because even
+      `cmd.exe /c echo ok` timed out repeatedly, indicating local process
+      creation/exit instability
+  - current conclusion:
+    - the major runner can now represent the intended next diagnostic shape:
+      Codex and Claude can be measured separately, and a stuck route does not
+      need to hide the other route's evidence
+    - this remains unverified by fresh test execution until process spawning
+      recovers
+    - no Cursor app, bridge, or CLI probe was run in this turn
+  - next concrete actions:
+    1. once process spawning recovers, run the new isolation tests plus the
+       default Cursor-exclusion tests
+    2. run a default no-Cursor snapshot with
+       `--runner-timeout-sec 20 --isolate-agent-app-scenarios --isolate-agent-cli-scenarios`
+    3. use the isolated report to decide whether Codex/Claude need app-server,
+       native bridge, or CLI-specific fixes next
+- 2026-06-05 R196 adaptive IDE bridge port and registry discovery:
+  - trigger:
+    - user pointed out the IDE bridge should adaptively find an unused port
+      instead of colliding with the active Cursor session on `127.0.0.1:8787`
+    - user explicitly needs to keep using Cursor while OpenWukong tests run
+  - official-doc basis:
+    - Node.js `net.Server.listen` documentation was checked: binding port `0`
+      lets the operating system assign an unused port, which is then available
+      from `server.address().port` after `listening`
+  - implementation:
+    - VS Code/Cursor bridge extension now supports `openwukong.bridge.port = 0`
+      to request an OS-assigned unused loopback port
+    - if the preferred port and configured consecutive fallback ports are
+      unavailable, `openwukong.bridge.dynamicPortOnConflict=true` falls back to
+      port `0` instead of interrupting the IDE session
+    - the extension records the actual started `bridge_url` in a local
+      OpenWukong IDE bridge registry under `%LOCALAPPDATA%/OpenWukong/ide-bridges`
+    - registry writes are best-effort: a local file write failure logs a
+      warning but does not fail bridge startup
+    - bridge metadata now exposes `bridge_url` and `bridge_state_file`
+    - added `openwukong.control.ide_bridge_registry`:
+      - reads explicit URLs, `OPENWUKONG_IDE_BRIDGE_URLS`, and registry paths
+      - accepts only loopback/local URLs
+      - filters disabled entries and mismatched IDE products
+      - supports default `%LOCALAPPDATA%/OpenWukong/ide-bridges` discovery
+    - `SessionDiscoveryOptions.ide_bridge_urls` now defaults to empty, not a
+      fixed `8787-8790` scan
+    - `run_primary_real_no_loss` and its CLI now default to no IDE bridge URL;
+      they only probe an explicit URL or a registry-discovered URL
+    - docs and scaffold tests were updated to document dynamic ports and the
+      protected daily-work Cursor profile rule
+  - validation:
+    - process creation remained unstable: `cmd.exe /c echo ok` timed out, so
+      fresh Python unit tests could not be executed in this turn
+    - Node REPL static checks confirmed:
+      - package JSON parses
+      - `openwukong.bridge.port` allows `0`
+      - `dynamicPortOnConflict` defaults to `true`
+      - `autoStart` remains default `false`
+      - extension code uses `listenOnPort(candidate, host, 0)` and
+        `candidate.address()`
+      - extension writes an `openwukong-ide-bridge-registry-v1` file under
+        `ide-bridges`
+      - session discovery no longer has default fixed IDE bridge URLs
+      - primary no-loss runner no longer defaults to `http://127.0.0.1:8787`
+      - tests cover default no-probe behavior and dynamic registry discovery
+  - current conclusion:
+    - the design is now the right shape for user-safe Cursor coexistence:
+      bridges do not auto-start, do not force a shared port, and do not require
+      fixed-port probing for discovery
+    - this does not yet prove full precise control of every app; it removes a
+      real safety/UX blocker in the IDE bridge route
+    - fresh GREEN tests remain pending until local process creation recovers
+  - next concrete actions:
+    1. once process spawning recovers, run:
+       `python -m unittest tests.test_ide_extension_scaffold tests.test_ide_bridge_registry tests.test_session_discovery tests.test_primary_real_no_loss`
+    2. run a no-Cursor/no-fixed-IDE-probe major snapshot with isolated
+       Codex/Claude stages
+    3. only test Cursor bridge/chat through an isolated Cursor profile or a
+       user-supplied explicit bridge URL
+- 2026-06-05 R197 dynamic IDE bridge validation and registry instance hardening:
+  - trigger:
+    - continue the active goal while protecting the user's current Cursor work
+      surface
+    - validate the R196 dynamic-port/no-fixed-probe implementation without
+      starting real Cursor or touching the user's IDE
+  - implementation:
+    - hardened the IDE bridge registry writer so registry filenames are
+      instance-scoped by including the bridge process id in the hash seed
+    - this prevents two windows in the same profile/workspace family from
+      overwriting each other's bridge registry entry or deleting a shared entry
+      on shutdown
+    - updated extension scaffold tests to require the process id in the
+      registry instance key
+    - updated the global `desktop-background-control-testing` skill with the
+      reusable rule for per-instance, best-effort local bridge registries
+  - validation:
+    - direct shell remained unstable:
+      `cmd.exe /c echo ok` timed out
+    - direct Python through Node child_process printed `ok` but did not return
+      a reliable exit/close event in one probe, so process-handle instability
+      remains a local verification caveat
+    - non-GUI unittest groups were run through the existing Node REPL without
+      touching Cursor or real apps:
+      - `tests.test_ide_bridge_registry`,
+        `tests.test_session_discovery`,
+        `tests.test_ide_extension_scaffold` output
+        `Ran 14 tests ... OK`
+      - `tests.test_primary_real_no_loss` output
+        `Ran 11 tests ... OK`
+      - major default Cursor-exclusion/isolation tests run individually:
+        three exited with code `0`, and the fourth output
+        `Ran 1 test ... OK` before the external process event timed out
+    - final static checks confirmed:
+      - dynamic port fallback still uses `listenOnPort(candidate, host, 0)`
+      - bound ports are read from `candidate.address()`
+      - registry writes are best-effort
+      - registry instance key includes `process.pid`
+      - session discovery has no default fixed IDE bridge URLs
+      - primary no-loss runner has no default `http://127.0.0.1:8787`
+  - current conclusion:
+    - the IDE bridge route is now substantially safer for daily Cursor
+      coexistence: no auto-start by default, no fixed-port default probing,
+      adaptive ports, registry discovery, and instance-scoped state files
+    - this is progress toward the final goal, but it is not proof that all
+      main scenarios are fully background-operable yet
+    - the remaining local process exit instability should be diagnosed
+      separately before relying on long real-run snapshots
+  - next concrete actions:
+    1. run a no-Cursor/no-fixed-IDE-probe major status snapshot once process
+       exit handling is stable enough for long runners
+    2. continue Codex/Claude background routes through app-server/native or CLI
+       probes, keeping app/session/turn safety separated
+    3. only verify Cursor real chat through isolated profile or explicit
+       user-supplied bridge URL
+- 2026-06-05 R198 adaptive bridge final validation and current objective status:
+  - trigger:
+    - user confirmed the IDE bridge should be self-adaptive by dynamically
+      finding an unused port instead of requiring fixed per-machine paths or
+      a shared `127.0.0.1:8787`
+    - user also needs to keep using the current Cursor window during tests
+  - implementation status:
+    - adaptive IDE bridge porting is implemented:
+      - `openwukong.bridge.port = 0` requests an OS-assigned unused port
+      - `openwukong.bridge.dynamicPortOnConflict=true` falls back to port `0`
+        when the preferred/fallback range is unavailable
+      - the actual bound `bridge_url` is published in a per-instance local
+        registry under `%LOCALAPPDATA%/OpenWukong/ide-bridges`
+      - discovery reads explicit URLs, environment URLs, and local registry
+        entries, accepts only loopback/local URLs, and tolerates stale entries
+      - default session discovery and primary no-loss runs no longer probe
+        fixed IDE bridge URLs such as `http://127.0.0.1:8787`
+    - major no-loss runner observability is improved:
+      - primary scenario progress is written to
+        `primary-real-no-loss-progress.json`
+      - `major_real_no_loss` can stop after the first runner timeout with
+        `--stop-on-runner-timeout`, writing a final report instead of hanging
+      - default major snapshots exclude Cursor app/CLI surfaces unless the run
+        uses an isolated profile or explicit user-supplied target
+  - validation:
+    - passed non-GUI regression without starting or probing Cursor:
+      `python -m unittest tests.test_ide_extension_scaffold tests.test_ide_bridge_registry tests.test_session_discovery tests.test_primary_real_no_loss`
+      with `25` tests OK
+    - latest no-Cursor, no-fixed-IDE-probe real status snapshot with owned
+      headless browser helper:
+      `logs/runtime/major-current-status-20260605-r203-browser/report.json`
+      returned process exit code `0`
+    - r203 snapshot showed:
+      - `safe_run_ok=true`, `goal_complete=false`
+      - `control_attempts=0`, `window_input_attempts=0`
+      - `automation_focus_safe=true`
+      - verified/satisfied:
+        `wechat_background_observation`,
+        `word_background_document`,
+        `browser_background_research`,
+        `file_background_search`
+      - still unmet:
+        `wechat_background_send`,
+        `codex_cli_background_task`,
+        `claude_cli_background_task`,
+        `cursor_cli_background_task`,
+        `codex_app_background_chat`,
+        `claude_desktop_background_chat`,
+        `cursor_background_chat`
+  - current conclusion:
+    - the adaptive-port/registry design is now the correct default for
+      multi-machine and daily Cursor coexistence; it removes the fixed-port
+      collision class that produced the user-visible bridge warning
+    - the project has not yet reached full precise operation for all desktop
+      software; the safe background substrate is working for several major
+      routes, but chat/send/task-submission routes still need native bridge or
+      CLI acceptance gates
+  - next concrete actions:
+    1. keep Cursor protected by default; only test Cursor chat through an
+       isolated profile or explicit bridge URL
+    2. close the WeChat send gap through the native bridge/UIA semantic sender
+       gate with readback and zero keyboard/mouse/clipboard attempts
+    3. close Codex/Claude through no-loss CLI or native app-server routes,
+       rejecting any MSIX/Electron foreground-risk evidence
+- 2026-06-05 R199 real Codex CLI background verification and CLI route accuracy:
+  - trigger:
+    - continue the active objective toward verified, precise, background
+      operation for Codex/Claude/Cursor without touching the user's active
+      Cursor workspace
+    - R198 left Codex/Claude CLI routes unverified because real execution had
+      not been opted in
+  - official-doc basis:
+    - Python `unittest` and `dataclasses` documentation was checked before the
+      classification/test update
+  - implementation:
+    - tightened `agent_cli_real_no_loss` status classification so a missing
+      CLI transport or not-ready command plan is reported as
+      `background_cli_unavailable` before `skipped_requires_cli_execution_opt_in`
+    - added regression coverage so a missing `cursor-agent` CLI is not masked
+      by the dry-run execution gate
+    - updated the global `desktop-background-control-testing` skill with the
+      reusable rule that dry-run status must not hide transport absence
+  - validation:
+    - passed:
+      `python -m unittest tests.test_agent_cli_real_no_loss tests.test_agent_task_runner tests.test_agent_conversation`
+      with `33` tests OK
+    - real no-loss Codex CLI probe:
+      `logs/runtime/agent-cli-status-20260605-r200-codex-real/report.json`
+      showed:
+      - `status=verified`, `real_verified=true`
+      - selected transport `codex-cli-managed-terminal`
+      - `agent_command_attempts=1`
+      - `window_input_attempts=0`
+      - `system_dialog_detected=false`
+      - workspace remained clean
+      - required marker `OPENWUKONG_AGENT_CLI_NO_LOSS: PASS` was read back
+    - real no-loss Claude CLI probe:
+      `logs/runtime/agent-cli-status-20260605-r200-claude-real/report.json`
+      showed:
+      - selected transport `claude-code-cli-managed-terminal`
+      - `agent_command_attempts=1`
+      - `window_input_attempts=0`
+      - `system_dialog_detected=false`
+      - status `cli_auth_required` because this machine is not logged in
+    - full no-Cursor major snapshot with owned headless browser helper and
+      real Codex/Claude CLI execution:
+      `logs/runtime/major-current-status-20260605-r204-cli-real/report.json`
+      returned exit code `0` with:
+      - `safe_run_ok=true`, `goal_complete=false`
+      - `control_attempts=0`, `window_input_attempts=0`
+      - `agent_command_attempts=2`
+      - no runner timeout
+      - satisfied requirements increased to `5/11`:
+        `wechat_background_observation`,
+        `word_background_document`,
+        `browser_background_research`,
+        `file_background_search`,
+        `codex_cli_background_task`
+      - remaining unmet:
+        `wechat_background_send`,
+        `claude_cli_background_task`,
+        `cursor_cli_background_task`,
+        `codex_app_background_chat`,
+        `claude_desktop_background_chat`,
+        `cursor_background_chat`
+    - Cursor agent dry-run after the fix:
+      `logs/runtime/agent-cli-status-20260605-r202-cursor-dry-fixed/report.json`
+      showed `status=background_cli_unavailable`,
+      `selected_transport=""`, `agent_command_attempts=0`, and
+      `window_input_attempts=0`
+  - current conclusion:
+    - Codex CLI is now a verified precise background task route on this machine
+    - Claude CLI control path is structurally ready and no-loss, but real task
+      execution is blocked by local auth state, not by OpenWukong routing
+    - Cursor CLI route is not currently available on this machine because
+      `cursor-agent` was not resolved; Cursor desktop remains protected unless
+      an isolated profile or explicit bridge URL is supplied
+    - WeChat background send still requires a native bridge URL or a UIA
+      semantic target that exposes target/composer/submit patterns; the current
+      WeChat UIA snapshot remains read-only only
+  - next concrete actions:
+    1. close WeChat send by installing/implementing a real native bridge or
+       proving a UIA semantic sender target exists with readback
+    2. after Claude login is available, rerun the same no-loss Claude CLI probe
+    3. for Cursor, either install/resolve `cursor-agent` for CLI background
+       tasks or use an isolated Cursor profile/explicit IDE bridge URL for
+       desktop chat verification
+- 2026-06-05 R200 adaptive bridge revalidation and Cursor surface split:
+  - trigger:
+    - user reiterated that the bridge should be adaptive by dynamically finding
+      an unused port, instead of colliding with the active Cursor workspace
+  - implementation status:
+    - adaptive IDE bridge behavior is present in code:
+      - `openwukong.bridge.port` allows `0`
+      - `openwukong.bridge.dynamicPortOnConflict` defaults to `true`
+      - the extension uses `listenOnPort(candidate, host, 0)` for dynamic
+        assignment and reads the actual bound port from `candidate.address()`
+      - the actual bridge URL is written to a per-instance registry under
+        `%LOCALAPPDATA%/OpenWukong/ide-bridges`
+      - `SessionDiscoveryOptions.ide_bridge_urls` defaults to empty and reads
+        explicit/env/registry URLs instead of probing fixed `8787`
+    - current major runner defaults keep Cursor desktop protected:
+      - `DEFAULT_AGENT_APPS = ("codex app", "claude desktop")`
+      - `DEFAULT_CLI_AGENTS` includes `cursor` only as the `cursor-agent`
+        background CLI route, with regression coverage proving it does not
+        fall back to the Cursor desktop shell when unavailable
+  - validation:
+    - passed non-GUI regression without starting or probing Cursor desktop:
+      `python -m unittest tests.test_ide_extension_scaffold tests.test_ide_bridge_registry tests.test_session_discovery tests.test_primary_real_no_loss`
+      with `25` tests OK
+    - passed targeted Cursor-protection and CLI-route regressions:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_aggregates_main_surfaces_and_marks_unmet_background_actions tests.test_major_real_no_loss.MajorRealNoLossTests.test_cli_default_agent_apps_do_not_probe_user_cursor tests.test_major_real_no_loss.MajorRealNoLossTests.test_cli_default_cli_agents_include_only_cursor_agent_cli_route tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_can_isolate_agent_app_and_cli_scenarios_per_agent tests.test_agent_cli_real_no_loss.AgentCliRealNoLossTests.test_cli_probe_does_not_fall_back_to_cursor_desktop_shell_when_agent_cli_missing tests.test_agent_cli_real_no_loss.AgentCliRealNoLossTests.test_dry_run_reports_background_cli_unavailable_when_agent_cli_missing`
+      with `6` tests OK
+  - current conclusion:
+    - the fixed-port collision class is addressed by dynamic port assignment
+      plus local registry discovery
+    - the default path should no longer create `127.0.0.1:8787` conflict
+      popups in the user's active Cursor window
+    - this is still not a claim that all desktop apps are fully background
+      operable; WeChat send, Claude auth, and app-chat send/readback gates
+      remain separate acceptance items
+  - next concrete actions:
+    1. rerun a major no-loss snapshot when needed, with Cursor desktop still
+       protected and Cursor CLI treated only as `cursor-agent`
+    2. close WeChat background send through a native bridge or proven UIA
+       semantic sender with readback
+    3. close Claude/Codex app-chat through background-safe native app-server or
+       CLI routes without MSIX/Electron foreground dialogs
+- 2026-06-05 R201 current major no-loss evidence and protected Cursor reporting:
+  - trigger:
+    - continue the active objective toward verified precise background control
+      across WeChat, Word, Browser, Codex, Claude, and Cursor while preserving
+      the user's active Cursor desktop session
+  - official-doc basis:
+    - Python `dataclasses` documentation was checked for the immutable report
+      model/default-field pattern
+    - Python `unittest` documentation was checked for the focused regression
+      tests
+  - implementation:
+    - fixed major objective reporting for protected Cursor desktop:
+      - when a default no-loss run intentionally omits Cursor desktop app/chat
+        probing, `cursor_background_chat` now reports `status=gated` with
+        blocking reason
+        `gated_cursor_desktop_protected_explicit_bridge_required`
+      - compact evidence now preserves:
+        `protected_default`, `protection_reason`,
+        `required_endpoint_kind`, and `next_action`
+      - this replaces the misleading previous `case_missing` report for a
+        deliberately protected user work surface
+    - updated the global `desktop-background-control-testing` skill with the
+      reusable rule that protected work surfaces must be represented as gated
+      protected requirements, not as missing cases
+  - validation:
+    - passed focused regression:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_missing_default_cursor_app_case_is_reported_as_protected_gate tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_aggregates_main_surfaces_and_marks_unmet_background_actions tests.test_major_real_no_loss.MajorRealNoLossTests.test_cli_default_agent_apps_do_not_probe_user_cursor tests.test_objective_readiness_matrix`
+      with `4` tests OK
+    - R205 real no-loss snapshot before the reporting fix:
+      `logs/runtime/major-current-status-20260605-r205-cursor-cli-default/report.json`
+      showed `safe_run_ok=true`, `control_attempts=0`,
+      `window_input_attempts=0`, `agent_command_attempts=2`,
+      `owned_app_launch_attempts=1`, no runner timeout, and
+      `cursor_background_chat` still as `case_missing`
+    - R206 real no-loss snapshot after the reporting fix:
+      `logs/runtime/major-current-status-20260605-r206-cursor-protected-gate/report.json`
+      returned exit code `0` with:
+      - `safe_run_ok=true`, `goal_complete=false`
+      - `control_attempts=0`, `window_input_attempts=0`
+      - `agent_command_attempts=2`
+      - `owned_app_launch_attempts=1`
+      - `background_screenshot_focus_stable=true`
+      - `cli_foreground_focus_stable=true`
+      - `runner_timed_out=false`, `failed_runner_count=0`
+      - objective summary:
+        `requirement_count=11`, `satisfied_count=5`, `gated_count=3`,
+        `auth_required_count=1`, `unavailable_count=2`
+      - `cursor_background_chat` now reports protected gated evidence:
+        `protected_default=true`,
+        `protection_reason=active_cursor_desktop_protected`,
+        `required_endpoint_kind=explicit_ide_bridge_or_isolated_cursor_profile`
+    - R206 owned headless browser helper evidence:
+      - helper status `started_and_stopped`
+      - profile cleanup `attempted=true`, `deleted=true`
+      - a stop warning for a Chrome child process was present, but an exact
+        read-only command-line scan for the owned profile path found no
+        remaining processes
+  - current conclusion:
+    - real no-loss execution is stable for the already verified main routes:
+      WeChat background observation, hidden Word COM document work, owned
+      browser CDP research, owned filesystem search, and Codex CLI background
+      task
+    - the full goal is still incomplete:
+      - WeChat background send is gated by missing native bridge URL and no
+        ready UIA semantic sender
+      - Claude CLI is structurally ready but local auth is missing
+      - Cursor CLI route is unavailable because `cursor-agent` is not resolved
+      - Codex app chat lacks a visible/ready target task or safe app bridge
+      - Claude Desktop app is not visible/resolved in the current run
+      - Cursor desktop app chat is protected by default and requires an
+        explicit bridge URL or isolated profile
+  - next concrete actions:
+    1. build/attach a deterministic WeChat native bridge or prove a UIA
+       semantic sender with readback for File Transfer Assistant only
+    2. close Claude after login/auth is available by rerunning the same no-loss
+       CLI probe
+    3. for Cursor desktop, use only an explicit IDE bridge URL or isolated
+       profile; otherwise keep it protected and do not probe the user's active
+       window
+- 2026-06-05 R208 adaptive IDE bridge default and scoped-goal reporting fix:
+  - trigger:
+    - user pointed out the IDE bridge should adaptively find an unused port
+      instead of colliding with the active Cursor workspace on `127.0.0.1:8787`
+    - a scoped fixture-only major run exposed that an empty requirement set
+      could incorrectly promote top-level `goal_complete=true`
+  - official-doc basis:
+    - Node.js `net.Server.listen` documentation was checked: port `0`
+      requests an operating-system-assigned unused port, and the actual bound
+      port must be read from `server.address().port` after listening
+    - Python `dataclasses` and `pathlib` documentation was checked before
+      extending readiness report fields and installed-extension diagnostics
+  - implementation:
+    - changed the OpenWukong VS Code/Cursor bridge default port from `8787`
+      to `0` in both `extension.js` and `package.json`
+    - kept explicit fixed ports available only as opt-in settings, with the
+      existing dynamic fallback/registry discovery path preserved
+    - updated extension docs to make `port=0` the default daily-work profile
+      recommendation
+    - strengthened `ide_extension_readiness` so it reports installed stale
+      extension copies that still use default `8787`, `autoStart=true`, no
+      dynamic fallback, or disruptive bridge-start warning popups
+    - confirmed the user's current Cursor-installed extension copy is stale:
+      `C:\Users\Zhangjinqian\.cursor\extensions\openwukong-local.openwukong-vscode-bridge-0.1.0`
+      still has default `8787`, `autoStart=true`, no dynamic fallback, and a
+      `OpenWukong bridge failed to start` warning path
+    - fixed `MajorScenarioRealNoLossReport.goal_complete` so empty
+      requirements can still be safe scoped runs but never count as global
+      objective completion
+    - updated global skills:
+      `debug-connector-helper-readiness` for installed IDE bridge stale-copy
+      checks, and `desktop-background-control-testing` for fixture-only
+      `goal_complete=false`
+  - validation:
+    - passed:
+      `python -m unittest tests.test_ide_extension_scaffold tests.test_ide_extension_readiness tests.test_ide_bridge_registry tests.test_session_discovery`
+      with `21` tests OK
+    - read-only installed-extension probe returned:
+      `status=installed_extension_stale`,
+      `blocking_reason=installed_extension_uses_fixed_port_or_disruptive_autostart`,
+      `control_attempts=0`, `window_input_attempts=0`
+    - passed full major regression:
+      `python -m unittest tests.test_major_real_no_loss`
+      with `67` tests OK
+    - R208 fixture-only major smoke:
+      `logs/runtime/major-wechat-native-bridge-fixture-r208-goal-fix/report.json`
+      returned exit code `0` with:
+      - `safe_run_ok=true`
+      - `goal_complete=false`
+      - `requirements=[]`
+      - `wechat_native_bridge_fixture_smoke_ok=true`
+      - `control_attempts=0`, `window_input_attempts=0`
+      - `wechat_native_bridge_fixture_native_call_attempts=1`
+  - current conclusion:
+    - the repository version now defaults to adaptive IDE bridge ports and
+      should not create new fixed-port `8787` collisions
+    - the visible Cursor popup came from an already-installed old extension
+      copy, not from the current repository source
+    - the active Cursor install was only inspected read-only in this run; it
+      was not patched or reloaded, so the user's active Cursor work surface was
+      not disturbed
+    - the full desktop-control objective remains incomplete at `5/11`
+      verified main requirements until WeChat real native send, Claude auth,
+      Cursor CLI/bridge, and app-chat routes are closed
+  - next concrete actions:
+    1. update/reinstall the Cursor OpenWukong extension through a controlled
+       reload or isolated profile so the active installed copy uses the R208
+       adaptive-port bridge
+    2. keep Cursor protected by default; use registry-discovered or explicit
+       bridge URLs only after the updated extension is active
+    3. continue closing WeChat native bridge, Claude auth, and app-chat
+       background routes with zero keyboard/mouse/clipboard/window input
+- 2026-06-05 R209 controlled IDE extension sync for adaptive-port rollout:
+  - trigger:
+    - user confirmed the bridge should be self-adaptive by dynamically finding
+      an unused port, and also made clear that active Cursor must not be
+      disrupted while they are working
+  - implementation:
+    - added `openwukong.evaluation.ide_extension_sync`, a controlled
+      install-audit/sync tool for the OpenWukong IDE extension
+    - default mode is read-only audit:
+      `python -m openwukong.evaluation.ide_extension_sync --json`
+    - apply mode backs up and replaces stale installed extension copies, but
+      refuses to write an active Cursor/VS Code profile unless explicitly
+      overridden with `--allow-active-profile-update`
+    - sync reports keep `control_attempts=0` and `window_input_attempts=0`,
+      so the tool can be used while the user is working
+    - copy excludes runtime/noise directories such as `logs`, `.git`,
+      `.vscode-test`, `node_modules`, and `__pycache__`
+  - validation:
+    - passed:
+      `python -m unittest tests.test_ide_extension_sync`
+      with `4` tests OK
+    - passed focused IDE/session regression:
+      `python -m unittest tests.test_ide_extension_sync tests.test_ide_extension_readiness tests.test_ide_extension_scaffold tests.test_ide_bridge_registry tests.test_session_discovery`
+      with `25` tests OK
+    - passed protected Cursor gate regression:
+      `python -m unittest tests.test_ide_extension_sync tests.test_ide_extension_readiness tests.test_ide_extension_scaffold tests.test_ide_bridge_registry tests.test_session_discovery tests.test_major_real_no_loss.MajorRealNoLossTests.test_missing_default_cursor_app_case_is_reported_as_protected_gate`
+      with `26` tests OK
+    - `git diff --check` passed, with only pre-existing CRLF warnings
+    - read-only real audit report:
+      `logs/runtime/ide-extension-sync-r209-dry-run/report.json`
+      returned `status=stale_install_detected`,
+      `write_attempts=0`, `control_attempts=0`,
+      `window_input_attempts=0`
+    - real apply attempt without active-profile override:
+      `logs/runtime/ide-extension-sync-r209-apply-refused-active/report.json`
+      returned `status=apply_refused_active_process`,
+      `blocking_reason=active_ide_process_detected`,
+      `write_attempts=0`, `control_attempts=0`,
+      `window_input_attempts=0`
+  - current conclusion:
+    - repository source is already adaptive: default `openwukong.bridge.port=0`
+      and actual OS-assigned port is published through the local IDE bridge
+      registry
+    - the current user-visible Cursor interruption is from the installed stale
+      extension copy under
+      `C:\Users\Zhangjinqian\.cursor\extensions\openwukong-local.openwukong-vscode-bridge-0.1.0`
+    - because active Cursor processes are present, the new sync tool correctly
+      refused to patch the live profile; this preserves the user's current work
+  - next concrete actions:
+    1. when the user is ready to close/reload Cursor, run controlled sync apply
+       or update through an isolated profile so the installed copy receives the
+       adaptive bridge
+    2. after the updated extension is active, validate registry discovery of
+       the dynamic bridge URL without probing fixed port `8787`
+    3. continue the remaining main-scenario closures after the IDE bridge no
+       longer interrupts active work
+- 2026-06-05 R210 objective closure plan for no-focus next actions:
+  - trigger:
+    - active goal continuation required concrete progress toward the full
+      background desktop-control objective without disrupting the user's active
+      Cursor/desktop work
+    - R209 had identified stale Cursor bridge install safety, but the goal
+      matrix still required manual interpretation for the next safe action per
+      unmet requirement
+  - implementation:
+    - extended `objective_readiness_matrix` with a machine-readable
+      `closure_plan`
+    - each unmet required objective item now emits:
+      `action_id`, `action_kind`, preferred transport, safe probe runner,
+      whether it is safe to run now, whether it is blocked by external state,
+      required verification gates, forbidden actions, and notes
+    - added specific closure actions for:
+      - WeChat background send:
+        `attach_wechat_native_bridge_or_verified_uia_send`
+      - owned browser research:
+        `run_owned_browser_devtools_no_loss_probe`
+      - Codex CLI:
+        `rerun_codex_cli_no_loss_with_execution_opt_in`
+      - Claude CLI:
+        separate managed CLI opt-in rerun from proven auth-required state
+      - Cursor CLI:
+        `resolve_cursor_agent_cli_or_explicit_ide_bridge`
+      - Codex app:
+        `attach_codex_native_app_server_or_cdp_bridge`
+      - Claude Desktop:
+        `attach_claude_desktop_native_or_devtools_bridge`
+      - Cursor app:
+        `update_or_attach_cursor_ide_bridge_without_touching_active_profile`
+    - updated the global `desktop-background-control-testing` skill so future
+      reports do not confuse `skipped_requires_*_opt_in` with proven
+      `auth_required`
+  - validation:
+    - official-doc basis:
+      Python dataclasses documentation was checked before adding dataclass
+      fields with `default_factory`
+    - passed:
+      `python -m unittest tests.test_objective_readiness_matrix`
+      with `2` tests OK before the final opt-in/auth distinction, then the
+      expanded objective/major focused suite with `5` tests OK
+    - `git diff --check` passed, with only pre-existing CRLF warnings
+    - R210 real read-only major audit:
+      `logs/runtime/major-real-no-loss-r210-closure-plan-readonly-v2/report.json`
+      returned:
+      - `safe_run_ok=true`
+      - `goal_complete=false`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `external_communication_attempts=0`
+      - `owned_app_launch_attempts=0`
+      - `bridge_send_attempts=0`
+      - `agent_command_attempts=0`
+      - `background_screenshot_success_count=2`
+      - `background_screenshot_focus_stable=true`
+      - `objective_readiness_matrix.summary.requirement_count=11`
+      - `satisfied_count=3`
+      - `closure_plan.action_count=8`
+      - `closure_plan.safe_to_run_now_count=8`
+      - `closure_plan.external_state_blocked_count=0`
+    - R210 unsatisfied requirements in the most conservative read-only run:
+      `wechat_background_send`, `browser_background_research`,
+      `codex_cli_background_task`, `claude_cli_background_task`,
+      `cursor_cli_background_task`, `codex_app_background_chat`,
+      `claude_desktop_background_chat`, `cursor_background_chat`
+  - current conclusion:
+    - the system still has not achieved the full goal; the latest conservative
+      no-launch/no-send audit only satisfies `3/11` because owned browser and
+      managed CLI execution were intentionally not opted in during this run
+    - the new closure plan makes the next safe move explicit instead of
+      ambiguous: it can now drive follow-up runs without using keyboard,
+      mouse, clipboard, foreground takeover, or active Cursor modification
+    - important correction:
+      Claude CLI should only be marked `auth_required` after the no-loss CLI
+      probe actually observes the auth gate; a skipped execution opt-in now
+      maps to a managed rerun action instead
+  - next concrete actions:
+    1. run the safe closure actions that are pure background/no-loss:
+       owned browser DevTools probe and managed Codex/Claude CLI no-loss probe
+       with explicit execution opt-in
+    2. keep Cursor active profile protected; only run read-only sync audit
+       until the user closes/reloads Cursor or supplies an explicit bridge URL
+    3. continue WeChat through native bridge or verified UIA semantic send for
+       File Transfer Assistant only, with marker readback and zero window input
+- 2026-06-05 R211 executed safe closure actions for owned browser and managed CLI:
+  - trigger:
+    - R210 closure plan identified safe background/no-loss actions that could
+      be run immediately without touching active Cursor, foreground input, or
+      external messaging
+  - real managed CLI no-loss run:
+    - command:
+      `python -m openwukong.evaluation.agent_cli_real_no_loss --agent codex --agent claude --agent cursor --output-root logs\runtime\agent-cli-real-no-loss-r211-managed-cli --output logs\runtime\agent-cli-real-no-loss-r211-managed-cli\report.json --allow-cli-execution --timeout-sec 120 --json`
+    - report:
+      `logs/runtime/agent-cli-real-no-loss-r211-managed-cli/report.json`
+    - result:
+      - `passed_cases=3/3`
+      - `verified_cases=1`
+      - `agent_command_attempts=2`
+      - `window_input_attempts=0`
+      - `foreground_no_steal_verified=true`
+      - `system_dialog_detected=false`
+    - per-agent evidence:
+      - Codex CLI:
+        `status=verified`, `real_verified=true`,
+        selected transport `codex-cli-managed-terminal`, marker readback
+        accepted, workspace clean, no window input
+      - Claude CLI:
+        `status=cli_auth_required`, selected transport
+        `claude-code-cli-managed-terminal`, workspace clean, no window input
+      - Cursor agent CLI:
+        `status=background_cli_unavailable`, no command attempts, workspace
+        clean, no window input
+    - foreground note:
+      the Codex CLI case saw foreground HWND change from Codex to Cursor, but
+      it was classified as `changed_to_unrelated_surface`; the run therefore
+      kept `foreground_no_steal_verified=true`
+  - real owned browser + CLI scoped major run:
+    - command:
+      `python -m openwukong.evaluation.major_real_no_loss --output-root logs\runtime\major-real-no-loss-r211-owned-browser-cli --output logs\runtime\major-real-no-loss-r211-owned-browser-cli\report.json --allow-owned-browser-helper-launch --owned-browser-debug-port 9491 --owned-browser-url "data:text/html,<title>OpenWukong R211 Owned Browser</title><body>OpenWukong R211 Owned Browser</body>" --skip-agent-app-scenarios --isolate-agent-cli-scenarios --allow-agent-cli-execution --agent-cli-timeout-sec 120 --runner-timeout-sec 180 --json`
+    - report:
+      `logs/runtime/major-real-no-loss-r211-owned-browser-cli/report.json`
+    - result:
+      - `safe_run_ok=true`
+      - `goal_complete=false`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `external_communication_attempts=0`
+      - `owned_app_launch_attempts=1`
+      - `agent_command_attempts=2`
+      - `background_screenshot_success_count=1`
+      - `background_screenshot_focus_stable=true`
+      - final process scan found no R211 owned browser helper process matching
+        the owned profile or DevTools port
+    - verified scoped requirements:
+      - WeChat background observation:
+        `status=verified`
+      - Word hidden COM document:
+        `status=verified`
+      - Browser owned DevTools research:
+        `status=verified`, selected transport `browser-devtools-owned`
+      - File owned filesystem search:
+        `status=verified`
+    - remaining scoped blockers in that run:
+      - WeChat background send:
+        `gated`, `wechat_native_bridge_url_missing`
+      - Codex CLI:
+        `unavailable`, `cli_usage_limit`
+      - Claude CLI:
+        `auth_required`, `local_cli_not_logged_in`
+      - Cursor CLI:
+        `gated`, `background_cli_unavailable`
+  - current conclusion:
+    - Browser background control is now re-verified through an owned isolated
+      DevTools helper with cleanup and no window input
+    - Codex CLI capability was verified in the standalone R211 CLI run, but a
+      later scoped major rerun reported `cli_usage_limit`; current objective
+      status must treat Codex CLI as temporarily availability-gated until a
+      fresh no-loss CLI run verifies it again
+    - Claude CLI is now correctly proven as `auth_required`, not merely
+      skipped for lack of execution opt-in
+    - Cursor agent CLI is not available; Cursor desktop remains a protected
+      IDE bridge problem, not a CLI fallback problem
+    - the full objective remains incomplete because app desktop chat routes,
+      WeChat background send, Cursor bridge install/update, and current Codex
+      CLI availability are not all verified at once
+  - next concrete actions:
+    1. continue with WeChat native bridge or verified UIA semantic send for
+       File Transfer Assistant only
+    2. keep Codex/Claude desktop app chat on native/app-server/DevTools bridge
+       discovery; do not use CLI as a substitute for explicit app surfaces
+    3. when Cursor can be reloaded or an explicit bridge URL is available,
+       update/attach the adaptive IDE bridge and validate Cursor background
+       chat through registry-discovered dynamic port
+- 2026-06-06 R212 Claude Desktop app-only default route:
+  - trigger:
+    - user clarified that Claude should be treated as a desktop App surface
+      for the current roadmap, and Claude CLI should be paused for now
+  - implementation:
+    - changed the major no-loss default CLI set from
+      `("codex", "claude", "cursor")` to `("codex", "cursor")`
+    - kept `claude desktop` in the default App-surface set
+    - changed major requirement construction so CLI requirements are generated
+      only for the CLI agents selected in that run
+    - retained explicit Claude CLI support through `--cli-agent claude` for
+      future isolated diagnostics, but it no longer substitutes for a Claude
+      Desktop App requirement
+  - official-doc basis:
+    - Python `argparse` documentation was checked for the CLI default/override
+      behavior before changing the runner defaults
+  - validation:
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss tests.test_objective_readiness_matrix`
+      with `70` tests OK
+    - R212 real Claude App-only read-only probe:
+      `logs/runtime/major-real-no-loss-r212-claude-app-only-readonly/report.json`
+      returned:
+      - `safe_run_ok=true`
+      - `goal_complete=false`
+      - `agent_command_attempts=0`
+      - `window_input_attempts=0`
+      - Claude CLI subreport disabled with zero cases
+      - Claude Desktop resolved to
+        `C:\Users\Zhangjinqian\.local\bin\Claude.exe`
+      - Claude Desktop App requirement status:
+        `unavailable`, blocking reason `app_surface_not_ready`
+      - no owned App launch, no bridge send, no keyboard/mouse/clipboard/window
+        input
+    - `git diff --check` passed with only existing CRLF warnings
+  - current conclusion:
+    - Claude is now routed as an App-surface target by default, not as a CLI
+      target
+    - the current machine has a resolvable Claude executable, but no ready
+      local DevTools/native bridge endpoint for no-focus App chat submission
+    - next Claude work should attach or create a deterministic App-side bridge
+      contract before any real App message send; do not fall back to CLI for
+      Claude Desktop requests
+  - next concrete actions:
+    1. implement/read-only probe Claude Desktop native or DevTools endpoint
+       discovery with endpoint-owner validation
+    2. if no endpoint exists, prepare an explicit foreground-gated or isolated
+       owned App launch path; do not run it by default while the user is
+       working
+    3. continue WeChat native bridge send and Cursor adaptive bridge rollout as
+       separate remaining blockers
+- 2026-06-06 R213/R214 current no-loss status and owned App launch-plan hardening:
+  - trigger:
+    - active goal continuation required more real evidence toward precise
+      background operation for the main scenarios without disturbing the
+      user's active Cursor/desktop work
+    - the R212 Claude App-only report showed that the App DevTools launch
+      template still used a relative fallback profile path
+  - implementation:
+    - changed agent App owned DevTools launch-plan templates so fallback
+      `user_data_dir` values are absolute paths under the current major run
+      output directory
+    - preserved default-profile launch reports as `user_data_dir=""`; only
+      isolated owned-profile templates get an absolute owned profile path
+    - added regression coverage proving the template path is absolute, under
+      the current run directory, mirrored in argv, and not created by a
+      read-only report
+  - official-doc basis:
+    - Python `pathlib` documentation was checked before changing path
+      normalization and path composition
+  - validation:
+    - passed focused tests:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_owned_devtools_launch_plan_template_uses_absolute_owned_profile tests.test_major_real_no_loss.MajorRealNoLossTests.test_endpoint_acceptance_uses_actual_default_profile_devtools_launch_report tests.test_major_real_no_loss.MajorRealNoLossTests.test_report_exposes_agent_app_endpoint_readiness_summary`
+    - passed broader regression:
+      `python -m unittest tests.test_major_real_no_loss tests.test_objective_readiness_matrix`
+      with `71` tests OK
+    - R213 Claude App template read-only probe:
+      `logs/runtime/major-real-no-loss-r213-claude-app-template-readonly/report.json`
+      returned:
+      - `safe_run_ok=true`
+      - `agent_command_attempts=0`
+      - `window_input_attempts=0`
+      - `owned_app_launch_attempts=0`
+      - `user_data_dir` under
+        `logs/runtime/major-real-no-loss-r213-claude-app-template-readonly/agent-app-devtools/claude/profile`
+      - profile directory was not created during the read-only report
+    - sandboxed default major read-only run:
+      `logs/runtime/major-real-no-loss-r213-default-readonly-status/report.json`
+      showed Word COM as `word_com_not_available` because COM dispatch failed
+      with a missing login session
+    - non-sandbox hidden Word COM probe:
+      `logs/runtime/word-r213-real-com-escalated/report.json`
+      verified Word background document creation/readback with:
+      - `decision=word_background_probe_verified`
+      - `save_verified=true`
+      - `readback_verified=true`
+      - `visible_requested=false`
+      - foreground stayed on Cursor
+      - `window_input_attempts=0`
+    - non-sandbox default major no-loss run:
+      `logs/runtime/major-real-no-loss-r213-default-readonly-escalated/report.json`
+      returned:
+      - `safe_run_ok=true`
+      - `goal_complete=false`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `agent_command_attempts=0`
+      - `owned_app_launch_attempts=0`
+      - `background_screenshot_success_count=3`
+      - verified requirements:
+        `wechat_background_observation`, `word_background_document`,
+        `file_background_search`
+    - R214 owned browser + non-Claude CLI no-loss run:
+      `logs/runtime/major-real-no-loss-r214-owned-browser-codex-cursor-cli/report.json`
+      returned:
+      - `safe_run_ok=true`
+      - `goal_complete=false`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `external_communication_attempts=0`
+      - `owned_app_launch_attempts=1`
+      - `agent_command_attempts=1`
+      - `background_screenshot_focus_stable=true`
+      - `cli_foreground_no_steal_verified=true`
+      - verified requirements:
+        `wechat_background_observation`, `word_background_document`,
+        `browser_background_research`, `file_background_search`,
+        `codex_cli_background_task`
+      - final exact process scan for the owned profile/DevTools port found
+        zero residual owned browser helper processes
+    - `git diff --check` passed with only existing CRLF warnings
+  - current conclusion:
+    - the current verified objective state is `5/10` requirements:
+      WeChat observation, Word hidden COM document, browser owned DevTools,
+      file search, and Codex CLI background task
+    - the full goal remains incomplete; missing requirements are:
+      `wechat_background_send`, `cursor_cli_background_task`,
+      `codex_app_background_chat`, `claude_desktop_background_chat`, and
+      `cursor_background_chat`
+    - Word needs an interactive/non-sandbox session for COM; sandboxed runs can
+      report a false negative because Office COM creation may fail with a
+      missing login session
+    - Claude remains App-only by default; no Claude CLI was run in R213/R214
+  - next concrete actions:
+    1. WeChat: close background send through native bridge or verified UIA
+       semantic sender for File Transfer Assistant only, with marker readback
+    2. Cursor: keep active profile protected; finish adaptive IDE bridge
+       rollout only via inactive/isolated profile or explicit bridge URL
+    3. Codex/Claude App: attach native App-server/CDP bridge endpoint with
+       endpoint-owner validation before any real app-side message submission
+- 2026-06-06 R215/R216 Claude App-only and WeChat read-only evidence:
+  - trigger:
+    - user clarified Claude must be treated as an App surface for now, not CLI
+    - tests must continue without stealing focus or interrupting active Cursor
+  - official-doc basis:
+    - checked Microsoft `Get-StartApps` documentation; it returns current-user
+      installed app names and AppIDs, which is installation/resolution evidence,
+      not proof that a window is running or background-controllable
+  - implementation:
+    - added App-only status
+      `app_installed_not_running_connector_required` for resolved StartApps/MSIX
+      desktop shells with no running matched window
+    - updated major no-loss requirement mapping so that status is `gated`, not
+      `unavailable`, and it does not create or imply a Claude CLI fallback
+    - added regression tests covering Agent App status and major requirement
+      classification
+  - validation:
+    - real WeChat read-only/no-focus probe:
+      `logs/runtime/primary-r215-wechat-readonly-escalated`
+      - `system_dialog_clear`
+      - `matching_window_count=2`
+      - `background_screenshot_success_count=2`
+      - foreground HWND stayed stable
+      - `send_attempts=0`, `window_input_attempts=0`
+      - current WeChat UIA surface is structure-only; no semantic composer or
+        Invoke-ready send control, so native bridge remains required for
+        background send
+    - real Claude App-only/no-focus probe:
+      `logs/runtime/agent-app-r216-claude-app-only-readonly`
+      - status `app_installed_not_running_connector_required`
+      - StartApps resolved `Claude_pzs8sxrjxfjjc!Claude`
+      - no matched Claude window, no endpoint, no background send contract
+      - `agent_command_attempts=0`, confirming no CLI fallback
+    - real major App-only/no-focus probe:
+      `logs/runtime/major-r216-claude-app-only-readonly`
+      - `safe_run_ok=true`, `goal_complete=false`
+      - `control_attempts=0`, `window_input_attempts=0`
+      - `agent_command_attempts=0`
+      - `claude_desktop_background_chat` is `gated` with blocking reason
+        `app_installed_not_running_connector_required`
+    - tests passed:
+      `python -m unittest tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_objective_readiness_matrix`
+      with `102` tests OK
+  - current conclusion:
+    - Claude route is correctly App-only; local machine has Claude App
+      installation evidence but no running App window or native/background
+      connector endpoint
+    - WeChat observation is solid and background screenshot-safe, but precision
+      send still needs a native WeChat bridge; UIA-only send is not acceptable
+      on the observed surface
+    - the full goal remains incomplete; no claim of universal precise desktop
+      control is justified yet
+  - next concrete actions:
+    1. implement or attach a per-app native bridge registry endpoint for WeChat
+       send to File Transfer Assistant only
+    2. add/attach Claude Desktop native/CDP bridge with endpoint-owner and
+       session/composer validation before any App message send
+    3. keep Cursor active profile protected while fixing adaptive bridge port
+       publishing for isolated or explicit bridge routes
+- 2026-06-06 R217 Cursor/IDE bridge no-focus safety hardening:
+  - trigger:
+    - user reported Cursor popup:
+      `OpenWukong bridge failed to start: listen EADDRINUSE 127.0.0.1:8787`
+    - user also clarified they need to keep using Cursor normally, so active
+      Cursor profile must not be patched or restarted
+  - official-doc basis:
+    - checked Node.js `server.listen(0)` / `server.address().port` behavior for
+      OS-assigned unused ports
+    - checked VS Code `contributes.configuration` docs for extension setting
+      defaults
+    - checked Microsoft PowerShell `Get-CimInstance` and `Get-Process`
+      documentation for process snapshot fallback design
+  - implementation:
+    - confirmed repository extension source already defaults to:
+      `openwukong.bridge.port=0`, `autoStart=false`,
+      `dynamicPortOnConflict=true`, and registry publication of the actual
+      bound URL
+    - changed IDE extension readiness default so it no longer probes fixed
+      `http://127.0.0.1:8787`; it now only probes explicit bridge URLs or
+      loopback URLs discovered from the local IDE bridge registry
+    - added CLI support for explicit `--bridge-registry-path`
+    - fixed IDE extension sync active-process detection:
+      - if `Get-CimInstance Win32_Process` is denied, fallback to
+        `Get-Process`
+      - match `Cursor` / `Code` process names even when they do not include
+        `.exe`
+      - preserve the no-write guard for active Cursor/VS Code profiles
+    - added regressions proving:
+      - default readiness does not touch fixed `8787`
+      - registry dynamic URLs are probed instead
+      - active Cursor is detected even with name `Cursor` and no executable
+        path
+      - CIM denial falls back to `Get-Process`
+  - real no-focus validation:
+    - read-only sync audit:
+      `logs/runtime/ide-extension-sync-r217-readonly-after-fix/report.json`
+      returned:
+      - `status=stale_install_detected`
+      - current installed Cursor extension path:
+        `C:\Users\Zhangjinqian\.cursor\extensions\openwukong-local.openwukong-vscode-bridge-0.1.0`
+      - installed copy is stale:
+        `port_default=8787`, `auto_start_default=true`,
+        `dynamic_port_on_conflict_declared=false`,
+        `source_disruptive_start_popup=true`
+      - active Cursor processes detected
+      - `active_process_detected=true`
+      - `write_attempts=0`, `window_input_attempts=0`
+    - default readiness audit now returned quickly with:
+      - `bridge_url=""`
+      - `bridge_urls=[]`
+      - `bridge_ready=false`
+      - no fixed-port capability probe
+      - status remains `installed_extension_stale` because the installed copy
+        is old
+    - controlled apply safety gate:
+      `logs/runtime/ide-extension-sync-r217-apply-refusal/report.json`
+      returned:
+      - `status=apply_refused_active_process`
+      - `blocking_reason=active_ide_process_detected`
+      - `write_attempts=0`, `backup_attempts=0`,
+        `window_input_attempts=0`
+  - validation:
+    - passed:
+      `python -m unittest tests.test_ide_extension_readiness tests.test_ide_extension_sync tests.test_ide_bridge_registry tests.test_session_discovery`
+      with `25` tests OK
+    - passed focused major IDE bridge tests:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_probes_existing_ide_extension_bridge_and_forwards_ready_endpoint tests.test_major_real_no_loss.MajorRealNoLossTests.test_runner_records_unavailable_existing_ide_extension_bridge_without_forwarding`
+      with `2` tests OK
+    - passed broader regression:
+      `python -m unittest tests.test_ide_extension_readiness tests.test_ide_extension_sync tests.test_ide_bridge_registry tests.test_session_discovery tests.test_major_real_no_loss tests.test_objective_readiness_matrix`
+      with `97` tests OK
+    - `git diff --check` passed with only existing CRLF warnings
+  - current conclusion:
+    - the Cursor popup root cause is the stale installed Cursor extension, not
+      the current repository extension source
+    - the source path is now safer by default for future install/sync:
+      dynamic port, no auto-start in normal profiles, registry discovery, and
+      active-profile write refusal
+    - the active Cursor install remains stale because the user is using Cursor;
+      this is intentionally not modified until Cursor is inactive or an
+      isolated profile is used
+    - full objective remains incomplete; this closes the Cursor bridge
+      infrastructure safety issue but does not yet prove app-side Cursor chat
+      send in a real no-focus session
+  - next concrete actions:
+    1. when Cursor is inactive, apply the controlled extension sync or use an
+       isolated Cursor profile, then verify registry-discovered dynamic bridge
+    2. continue Claude Desktop as App-only through native/CDP bridge discovery,
+       not CLI
+    3. continue WeChat send only through native bridge or a verified semantic
+       provider contract; keep UIA-only send blocked on current surface
+- 2026-06-06 R218 Claude App-only native connector no-CLI gate:
+  - trigger:
+    - user clarified Claude must be treated as the desktop/App surface for this
+      track, not as `claude` CLI
+    - risk found in native connector process matching:
+      `claude.exe` is shared by Claude Desktop evidence and Claude Code CLI,
+      so a CLI process with a DevTools/listening port could be mis-bound as a
+      Claude Desktop endpoint
+  - official-doc basis:
+    - checked official psutil docs for `process_iter(["pid", "name", "exe",
+      "cmdline"])` and process filtering by `name`, `exe`, and `cmdline`
+      before modifying process ownership classification
+  - implementation:
+    - updated native connector process matching to carry the requested agent
+      surface into `_matching_agent_processes`
+    - reused app-resolution surface classifiers for Codex/Claude/Cursor
+      running processes
+    - added command-line/path fallback classification for known CLI fragments:
+      `.local/bin`, `AppData/Roaming/npm`, Claude Code node module paths,
+      Codex local bin paths, and `cursor-agent`
+    - for explicit `claude desktop` / `claude app`, reject CLI-classified
+      `claude.exe` processes before probing DevTools or listening ports
+    - for Claude App requests with only ambiguous process-name evidence and no
+      selected desktop directory/window binding, keep the route unbound instead
+      of treating a CLI endpoint as an App connector
+    - added regression:
+      `test_claude_desktop_probe_rejects_claude_code_cli_process_debugger`
+      proves a Claude Code CLI process exposing `--remote-debugging-port` is
+      not probed as Claude Desktop and leaves window/control attempts at zero
+  - real no-focus validation:
+    - ran:
+      `python -m openwukong.evaluation.agent_app_real_no_loss --agent "claude desktop" --project-name openwukong --task-name desktop-message --output-root logs/runtime/agent-app-r218-claude-app-only-readonly --json`
+    - artifact:
+      `logs/runtime/agent-app-r218-claude-app-only-readonly/agent_app_real_no_loss/claude_desktop.json`
+    - observed:
+      - `status=app_surface_not_ready`
+      - `decision=agent_app_surface_not_ready`
+      - `endpoint_count=0`
+      - `ready_endpoint_count=0`
+      - `process_count=626`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `bridge_send_attempts=0`
+      - `agent_command_attempts=0`
+    - conclusion:
+      - this machine currently has no ready Claude Desktop/App background
+        connector endpoint for the requested project/task
+      - the route correctly did not fall back to Claude CLI
+  - validation:
+    - watched the new focused test fail first with
+      `ready_endpoint_count=1`, proving the previous bug
+    - passed:
+      `python -m unittest tests.test_agent_native_connector_probe`
+      with `25` tests OK
+    - passed:
+      `python -m unittest tests.test_app_resolution`
+      with `24` tests OK
+    - passed:
+      `python -m unittest tests.test_agent_app_real_no_loss`
+      with `30` tests OK
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss`
+      with `69` tests OK
+    - passed combined regression:
+      `python -m unittest tests.test_agent_native_connector_probe tests.test_app_resolution tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_objective_readiness_matrix`
+      with `151` tests OK
+    - `git diff --check` passed with only existing CRLF warnings
+  - current conclusion:
+    - Claude App route is now structurally safer: desktop/App requests cannot
+      silently bind to known Claude Code CLI processes or endpoints
+    - the overall goal is still not complete; Claude Desktop app-side
+      background chat remains gated until a native/App connector or verified
+      desktop CDP bridge is present and session/composer readiness passes
+  - next concrete actions:
+    1. add/read a Claude Desktop native bridge registry or official app-local
+       endpoint if available, then validate endpoint owner and composer/session
+       readiness before any send
+    2. keep WeChat background send on native-bridge path only; UIA-only send
+       remains blocked for current observed surface
+    3. keep Cursor active profile protected; sync stale extension only when
+       Cursor is inactive or an isolated profile is used
+
+- 2026-06-06 R221 Claude App-only launch-plan hardening:
+  - trigger:
+    - user clarified again that Claude must be treated as App/Desktop for this
+      track, temporarily not CLI
+    - R219/R220 evidence showed the major no-loss report could still publish a
+      Claude Desktop owned-DevTools launch template using a CLI-style
+      `.local/bin/Claude.exe` path, and Codex MSIX evidence could still expose
+      copyable Electron argv despite being blocked
+  - official-doc basis:
+    - checked Electron supported command-line switches before deciding when
+      `--remote-debugging-port` / `--user-data-dir` launch templates are valid:
+      https://www.electronjs.org/docs/latest/api/command-line-switches
+    - checked Microsoft AppUserModelID guidance for Windows packaged app
+      identity evidence:
+      https://learn.microsoft.com/en-us/windows/win32/shell/appids
+  - implementation:
+    - updated major no-loss agent-app launch planning to classify candidate
+      surfaces with the shared app-resolution classifiers before emitting an
+      owned DevTools launch plan
+    - explicit `claude desktop` / Claude App routes now block CLI-classified
+      paths with `agent_app_cli_path_not_background_launchable`
+    - WindowsApps/MSIX app evidence is now blocked as
+      `msix_windowsapps_not_background_launchable` for owned DevTools launch
+      templates
+    - blocked launch templates keep evidence fields but force
+      `executable_ready=false` and `argv=[]`, so the report cannot be copied
+      into a foreground-stealing/error-dialog command
+    - the launchable agent-app fleet skips cases classified as CLI/MSIX blocked
+      even if an earlier resolution report claimed `executable_ready=true`
+  - validation:
+    - added failing tests first:
+      `test_claude_desktop_devtools_resolution_rejects_cli_executable_path`
+      and
+      `test_claude_desktop_owned_devtools_template_blocks_cli_executable_path`
+    - red result before fix:
+      CLI-style Claude executable was incorrectly treated as ready and blocked
+      templates lacked the new launch-blocking reason
+    - passed focused regression:
+      `python -m unittest tests.test_major_real_no_loss.MajorRealNoLossTests.test_claude_desktop_devtools_resolution_rejects_cli_executable_path tests.test_major_real_no_loss.MajorRealNoLossTests.test_claude_desktop_owned_devtools_template_blocks_cli_executable_path tests.test_major_real_no_loss.MajorRealNoLossTests.test_owned_devtools_launch_plan_template_uses_absolute_owned_profile`
+      with `3` tests OK
+    - passed:
+      `python -m unittest tests.test_major_real_no_loss`
+      with `71` tests OK
+    - passed combined regression:
+      `python -m unittest tests.test_major_real_no_loss tests.test_agent_native_connector_probe tests.test_app_resolution tests.test_agent_app_real_no_loss`
+      with `150` tests OK
+    - `git diff --check` passed with only CRLF-normalization warnings
+    - fresh no-loss artifact:
+      `logs/runtime/major-r221-current-readiness-app-only-claude/major-real-no-loss-report.json`
+    - R221 observed:
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `agent_command_attempts=0`
+      - `owned_app_launch_attempts=0`
+      - `agent_app_devtools_launch_attempts=0`
+      - `system_dialog_clear`
+      - Claude Desktop status remained `app_surface_not_ready`
+      - Claude template:
+        `launch_blocking_reason=agent_app_cli_path_not_background_launchable`,
+        `executable_ready=false`, `argv=[]`
+      - Codex MSIX template:
+        `launch_blocking_reason=msix_windowsapps_not_background_launchable`,
+        `argv=[]`
+  - current conclusion:
+    - Claude App/Desktop route no longer falls back to or exposes a CLI launch
+      path in the major no-loss plan
+    - the overall objective is still not complete:
+      R221 reported `safe_run_ok=false`, `goal_complete=false`,
+      `satisfied_count=1`, `gated_count=3`, `unavailable_count=6`
+    - the next real milestone is not CLI execution; it is a Claude Desktop
+      native/App connector or already-running verified local endpoint with
+      target/session/composer readiness and no-focus readback
+  - next concrete actions:
+    1. add a Claude Desktop App connector discovery contract that only accepts
+       loopback/native endpoints owned by the desktop app surface, not CLI
+       processes
+    2. add a dry-run Claude App message envelope/readback contract before any
+       real send path exists
+    3. keep Codex WindowsApps/MSIX desktop shell blocked for background
+       `thread/start` / `turn/start`; use app-server/native helper only when
+       owner identity is non-MSIX and foreground preflight remains clear
+
+- 2026-06-06 R222 Claude native-bridge app-binding guard:
+  - trigger:
+    - after R221 blocked Claude App launch-plan fallback to CLI, a second
+      reusable risk remained: a future native bridge capability report could
+      claim `surface_kind=desktop_app` and `process_name=Claude.exe` while its
+      `app_binding.executable_path` still pointed to the Claude Code CLI path
+      under `.local/bin`
+  - implementation:
+    - added `app_binding_surface_kind` to agent-native connector endpoint
+      metadata
+    - classified native bridge `app_binding` with the same shared
+      app-resolution surface classifiers used for process discovery
+    - explicit desktop_app native bridge requests now reject
+      `app_binding_surface_kind=cli` as
+      `agent_native_bridge_app_binding_not_ready`
+    - preserved rejected binding path metadata for audit while keeping endpoint
+      readiness false and send/native attempts at zero
+  - validation:
+    - added failing regression first:
+      `test_claude_desktop_native_bridge_rejects_cli_app_binding_path`
+    - red result before fix:
+      a fake Claude native bridge with `surface_kind=desktop_app`,
+      `process_name=Claude.exe`, and
+      `executable_path=C:/Users/me/.local/bin/claude.exe` was incorrectly
+      accepted as `ok=true`
+    - passed focused regression and adjacent bridge tests:
+      `python -m unittest tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_claude_desktop_native_bridge_rejects_cli_app_binding_path tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_reports_ready_agent_native_bridge_endpoint_from_explicit_bridge_url tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_agent_native_bridge_endpoint_does_not_accept_cli_surface_for_app tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_agent_native_bridge_endpoint_requires_matching_app_binding`
+      with `4` tests OK
+    - passed related regression:
+      `python -m unittest tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss tests.test_major_real_no_loss`
+      with `127` tests OK
+    - passed combined regression:
+      `python -m unittest tests.test_agent_native_connector_probe tests.test_app_resolution tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_objective_readiness_matrix`
+      with `154` tests OK
+    - real Claude App-only native connector probe artifact:
+      `logs/runtime/agent-native-r222-claude-app-only/claude_desktop.json`
+    - probe observed:
+      - `decision=agent_app_surface_not_ready`
+      - `endpoint_count=0`
+      - `ready_endpoint_count=0`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `computer_use_decision=computer_use_client_missing`
+      - only Claude CLI paths under `.local/bin` were discovered; they were
+        not accepted as Claude Desktop/App
+    - fresh major no-loss artifact:
+      `logs/runtime/major-r222-current-readiness-after-claude-binding-guard/major-real-no-loss-report.json`
+    - R222 major observed:
+      - `safe_run_ok=false`
+      - `goal_complete=false`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `agent_command_attempts=0`
+      - `owned_app_launch_attempts=0`
+      - `agent_app_devtools_launch_attempts=0`
+      - `system_dialog_clear`
+      - Claude launch template remained blocked:
+        `agent_app_cli_path_not_background_launchable`, `argv=[]`
+      - Codex MSIX launch template remained blocked:
+        `msix_windowsapps_not_background_launchable`, `argv=[]`
+      - objective summary stayed:
+        `satisfied_count=1`, `gated_count=3`, `unavailable_count=6`
+    - `git diff --check` passed with only CRLF-normalization warnings
+  - reusable pattern captured:
+    - updated global skill:
+      `C:/Users/Zhangjinqian/.codex/skills/desktop-background-control-testing/SKILL.md`
+    - added trigger, diagnosis, required fix, regression test, and completion
+      standard for App bridge binding masquerading as CLI
+  - current conclusion:
+    - Claude App/Desktop is now protected at both launch-plan and native-bridge
+      app-binding layers
+    - this still does not mean Claude App background messaging is complete;
+      the machine currently lacks a verified Claude Desktop native/App
+      connector endpoint and visible target/session/composer readiness
+  - next concrete actions:
+    1. build the Claude Desktop App connector discovery contract against a real
+       desktop extension/native endpoint shape, still App-only and loopback-only
+    2. add a Claude App dry-run message envelope/readback contract once a
+       desktop endpoint exists
+    3. keep all real sends disabled until target/session/composer readiness and
+       no-focus readback are proven
+
+- 2026-06-06 R223 Claude native-bridge name-only binding guard:
+  - trigger:
+    - R222 protected explicit CLI paths in native bridge `app_binding`, but a
+      narrower endpoint-readiness risk remained:
+      if a bridge capability report only exposed `process_name=Claude.exe` and
+      `window_title=Claude`, without a desktop-classified executable path or a
+      UIA-matched pid/hwnd, the endpoint could still be counted as ready when
+      the Claude App target was not visible
+  - implementation:
+    - tightened `_agent_native_bridge_app_binding_ok`
+    - for explicit `desktop_app` requests, app binding now needs strong
+      ownership evidence:
+      desktop-classified binding path, or independently matched UIA pid/hwnd
+    - name-only bindings are no longer sufficient for endpoint readiness
+    - endpoint metadata `app_binding_ready` is now overwritten with the strict
+      binding decision, not the bridge's softer self-report
+  - validation:
+    - first test attempt for the visible-window case passed immediately,
+      proving existing UIA pid/hwnd matching already covered that scenario
+    - added the actual failing regression:
+      `test_claude_desktop_native_bridge_without_visible_target_rejects_name_only_app_binding`
+    - red result before fix:
+      a fake Claude Desktop native bridge with only
+      `process_name=Claude.exe` / `window_title=Claude` was counted as
+      `ready_endpoint_count=1`
+    - after the fix, passed focused regression set:
+      `python -m unittest tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_claude_desktop_native_bridge_without_visible_target_rejects_name_only_app_binding tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_claude_desktop_native_bridge_rejects_name_only_app_binding tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_claude_desktop_native_bridge_rejects_cli_app_binding_path tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_reports_ready_agent_native_bridge_endpoint_from_explicit_bridge_url tests.test_agent_native_connector_probe.AgentNativeConnectorProbeTests.test_discovers_agent_native_bridge_endpoint_from_registry_file`
+      with `5` tests OK
+    - passed:
+      `python -m unittest tests.test_agent_native_connector_probe`
+      with `28` tests OK
+    - passed combined regression:
+      `python -m unittest tests.test_agent_native_connector_probe tests.test_app_resolution tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_objective_readiness_matrix`
+      with `156` tests OK
+    - real Claude App-only native connector probe artifact:
+      `logs/runtime/agent-native-r223-claude-app-only/claude_desktop.json`
+    - probe observed:
+      - `decision=agent_app_surface_not_ready`
+      - `endpoint_count=0`
+      - `ready_endpoint_count=0`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `computer_use_decision=computer_use_client_missing`
+      - `app_resolution_decision=not_found`
+    - fresh major no-loss artifact:
+      `logs/runtime/major-r223-current-readiness-after-name-only-bridge-guard/major-real-no-loss-report.json`
+    - R223 major observed:
+      - `safe_run_ok=false`
+      - `goal_complete=false`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `agent_command_attempts=0`
+      - `owned_app_launch_attempts=0`
+      - `agent_app_devtools_launch_attempts=0`
+      - `system_dialog_clear`
+      - Claude App launch template stayed blocked:
+        `agent_app_cli_path_not_background_launchable`, `argv=[]`
+      - Codex MSIX launch template stayed blocked:
+        `msix_windowsapps_not_background_launchable`, `argv=[]`
+      - objective summary remained:
+        `satisfied_count=1`, `gated_count=3`, `unavailable_count=6`
+    - `git diff --check` passed with only CRLF-normalization warnings
+  - reusable pattern updated:
+    - updated global skill:
+      `C:/Users/Zhangjinqian/.codex/skills/desktop-background-control-testing/SKILL.md`
+    - added the rule that name-only app bindings are not sufficient unless
+      backed by a desktop-classified executable path or independently matched
+      UIA pid/hwnd
+  - current conclusion:
+    - Claude App/Desktop endpoint discovery is now stricter:
+      it rejects CLI paths and rejects name-only bridge bindings
+    - background Claude App messaging is still incomplete until a real verified
+      desktop/native endpoint exists with target/session/composer/readback
+      readiness
+  - next concrete actions:
+    1. model the Claude Desktop extension/native endpoint capability shape and
+       add a dry-run message envelope contract for that shape
+    2. keep real Claude sends disabled until endpoint ownership, target
+       visibility/session identity, composer readiness, and readback markers
+       are proven
+    3. continue moving the same strong binding rule into other app connectors
+       where endpoint ownership can otherwise be inferred from names alone
+
+- 2026-06-06 R224 core native-bridge dry-run App binding guard:
+  - trigger:
+    - user clarified Claude must be treated as the App/Desktop surface for now,
+      not CLI
+    - R222/R223 had hardened endpoint discovery, but the core
+      `agent_native_bridge` dry-run adapter itself could still accept a
+      direct bridge capability report that claimed `surface_kind=desktop_app`
+      while binding to the Claude CLI path or only self-reporting
+      `process_name=Claude.exe` / `window_title=Claude`
+  - implementation:
+    - moved the strong App binding rule into
+      `src/openwukong/control/agent_native_bridge.py`
+    - core dry-run now classifies bridge `app_binding` with the shared
+      Claude/Codex/Cursor surface classifiers and command-line/path fragments
+    - explicit `desktop_app` dry-run requests reject CLI bindings such as
+      `.local/bin/claude.exe`, `AppData/Roaming/npm`, Claude Code module
+      paths, `cursor-agent`, and known agent CLI helper paths
+    - explicit `desktop_app` dry-run requests also reject name-only bindings
+      unless backed by a desktop-classified executable path or an independently
+      matched expected pid/hwnd
+    - the positive native-bridge fixture now includes a desktop-classified
+      Codex executable path instead of relying on name-only self-report
+  - validation:
+    - official documentation checked before editing:
+      Claude Desktop Extensions/MCPB documentation and Microsoft UI Automation
+      documentation
+    - added failing regressions first:
+      `test_dry_run_rejects_claude_desktop_bridge_bound_to_cli_path`
+      and
+      `test_dry_run_rejects_claude_desktop_bridge_with_name_only_binding`
+    - red result before fix:
+      both direct dry-run cases returned `ok=true`
+    - after the fix, focused red-green command passed:
+      `python -m unittest tests.test_agent_native_bridge.AgentNativeBridgeTests.test_dry_run_rejects_claude_desktop_bridge_bound_to_cli_path tests.test_agent_native_bridge.AgentNativeBridgeTests.test_dry_run_rejects_claude_desktop_bridge_with_name_only_binding`
+      with `2` tests OK
+    - passed:
+      `python -m unittest tests.test_agent_native_bridge`
+      with `9` tests OK
+    - passed adjacent regression:
+      `python -m unittest tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_agent_app_real_no_loss`
+      with `67` tests OK
+    - passed combined regression:
+      `python -m unittest tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_app_resolution tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_objective_readiness_matrix`
+      with `165` tests OK
+    - real Claude App-only native connector probe artifact:
+      `logs/runtime/agent-native-r224-claude-app-core-contract/claude_desktop.json`
+    - probe observed:
+      - `decision=agent_app_surface_not_ready`
+      - `endpoint_count=0`
+      - `ready_endpoint_count=0`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `computer_use_decision=computer_use_client_missing`
+      - `app_resolution_decision=not_found`
+    - fresh major no-loss artifact:
+      `logs/runtime/major-r224-current-readiness-core-native-bridge-contract/major-real-no-loss-report.json`
+    - R224 major observed:
+      - `safe_run_ok=false`
+      - `goal_complete=false`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `agent_command_attempts=0`
+      - `owned_app_launch_attempts=0`
+      - `agent_app_devtools_launch_attempts=0`
+      - `system_dialog_clear`
+      - Claude App status stayed `app_surface_not_ready`
+      - Claude launch template stayed blocked as
+        `agent_app_cli_path_not_background_launchable` with `argv=[]`
+      - objective summary stayed:
+        `satisfied_count=1`, `gated_count=3`, `unavailable_count=6`
+  - reusable pattern updated:
+    - updated global skill:
+      `C:/Users/Zhangjinqian/.codex/skills/desktop-background-control-testing/SKILL.md`
+    - added the rule that direct native-bridge dry-run callers must enforce
+      the same CLI/name-only App binding guard as endpoint discovery
+  - current conclusion:
+    - Claude CLI is no longer an acceptable substitute for Claude App/Desktop
+      in launch planning, endpoint discovery, or direct native bridge dry-run
+    - Claude App background messaging is still incomplete until a real
+      Claude Desktop/native extension endpoint exists and proves endpoint
+      ownership, target/session/composer readiness, readback markers, and
+      no-focus stability
+  - next concrete actions:
+    1. build a Claude Desktop extension/native endpoint fixture that mirrors
+       MCPB/local desktop extension ownership and capability shape
+    2. add the Claude App dry-run message envelope/readback contract against
+       that fixture, with send attempts still forced to zero
+    3. keep all real Claude App sends disabled until real endpoint ownership
+       and no-focus readback are proven
+
+- 2026-06-07 R227 dynamic helper ports and focus-risk classification:
+  - trigger:
+    - user reported Cursor extension popup:
+      `OpenWukong bridge failed to start: listen EADDRINUSE 127.0.0.1:8787`
+    - user asked to use dynamic unused ports so normal Cursor work is not
+      interrupted
+  - implementation:
+    - browser helper defaults to `--remote-debugging-port=0` and reads the
+      actual Chrome DevTools endpoint from `DevToolsActivePort`
+    - browser CDP WebSocket client omits the browser-style `Origin` header so
+      Chromium does not reject non-allowlisted loopback automation clients
+    - IDE bridge source already defaults to dynamic port `0`, silently handles
+      port conflicts, and publishes the actual bound port through the local
+      OpenWukong IDE bridge registry
+    - session readiness planning now also defaults `ide_bridge_port=0`
+    - session readiness execution now resolves an isolated IDE bridge dynamic
+      port from the local registry instead of recording
+      `http://127.0.0.1:0`
+    - CLI `openwukong.evaluation.session_readiness_plan --ide-bridge-port`
+      now defaults to `0`; fixed ports are explicit isolated-profile choices
+    - background screenshot focus reporting now distinguishes:
+      `stable`, `external_focus_change`, `target_lost_focus`, and
+      `changed_to_target_window`
+    - only `changed_to_target_window` is treated as automation focus risk, so
+      user-driven focus changes during long no-loss probes do not falsely fail
+      the run
+  - validation:
+    - added failing tests first for:
+      - browser dynamic DevTools port readback
+      - browser helper defaulting to `--remote-debugging-port=0`
+      - CDP WebSocket client omitting `Origin`
+      - IDE bridge plan defaulting to dynamic port
+      - isolated IDE bridge execution reading the real port from registry
+      - CLI IDE bridge defaulting to dynamic port
+      - background screenshot external focus changes not counting as focus risk
+    - focused dynamic-port tests passed:
+      `python -m unittest tests.test_session_readiness_plan.SessionReadinessPlanTests.test_ide_bridge_plan_defaults_to_dynamic_port tests.test_session_readiness_plan.SessionReadinessPlanTests.test_execute_dynamic_ide_bridge_reads_registry_port_after_launch tests.test_session_readiness_plan.SessionReadinessPlanTests.test_cli_ide_bridge_defaults_to_dynamic_port`
+      with `3` tests OK
+    - passed:
+      `python -m unittest tests.test_session_readiness_plan`
+      with `35` tests OK
+    - passed focus/real no-loss related regression:
+      `python -m unittest tests.test_primary_real_no_loss tests.test_agent_app_uia_probe tests.test_agent_app_real_no_loss tests.test_major_real_no_loss tests.test_window_capture`
+      with `127` tests OK
+    - passed combined dynamic-port/browser/IDE regression:
+      `python -m unittest tests.test_session_readiness_plan tests.test_primary_scenario_smoke tests.test_primary_real_no_loss tests.test_major_real_no_loss tests.test_browser_connector tests.test_browser_devtools_health tests.test_control_fabric_browser_workflow tests.test_ide_extension_scaffold tests.test_ide_extension_readiness tests.test_ide_extension_sync tests.test_ide_bridge_registry`
+      with `171` tests OK
+    - `git diff --check` passed with only CRLF-normalization warnings
+    - fresh real no-loss artifact:
+      `logs/runtime/major-r227-dynamic-ports-focus-classified/major-real-no-loss-report.json`
+    - R227 real observed:
+      - `safe_run_ok=true`
+      - `goal_complete=false`
+      - `automation_focus_safe=true`
+      - `background_screenshot_focus_stable=true`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `owned_app_launch_attempts=1`
+      - browser helper command used `--remote-debugging-port=0`
+      - browser helper actual endpoint was `http://127.0.0.1:55346`
+      - browser readback marker:
+        `OPENWUKONG_DYNAMIC_PORTS_R227`
+      - browser helper stopped and isolated profile cleanup succeeded
+      - objective summary:
+        `satisfied_count=4`, `gated_count=3`, `unavailable_count=3`
+  - current conclusion:
+    - fixed-port collision should no longer be part of the owned helper or
+      isolated IDE bridge default path
+    - if the user's active Cursor still shows the `8787` popup, the installed
+      extension copy is stale; run read-only `ide_extension_readiness` or
+      controlled `ide_extension_sync`, but do not overwrite an active Cursor
+      profile unless explicitly allowed
+    - browser search/readback through an owned helper is now truly dynamic-port,
+      background-safe, and cleanup-backed
+    - this still does not mean every app can be precisely controlled:
+      remaining unsatisfied requirements are
+      `wechat_background_send`, `codex_cli_background_task`,
+      `cursor_cli_background_task`, `codex_app_background_chat`,
+      `claude_desktop_background_chat`, and `cursor_background_chat`
+  - next concrete actions:
+    1. audit the active installed Cursor extension read-only and report whether
+       it is stale, without touching the active profile
+    2. keep WeChat real send behind `File Transfer Assistant` plus native bridge
+       or verified UIA send/readback/no-focus gates
+    3. build App/Desktop native endpoint contracts for Codex and Claude instead
+       of falling back to CLI or MSIX foreground launch
+
+- 2026-06-07 R228 dynamic IDE URL defaults plus process-only app visibility:
+  - trigger:
+    - user clarified that bridge ports should dynamically use an unused port
+      instead of fixed values, because normal Cursor work must not be
+      interrupted
+  - implementation:
+    - added `openwukong.evaluation.ide_bridge_url_resolution` so Cursor probe
+      CLIs can resolve the actual IDE bridge URL from the local registry when
+      `--bridge-url` is omitted
+    - changed Cursor draft-hook, live-composer-state, draft-hook-validation,
+      and attach-bridge-validation CLIs away from fixed `8787` defaults
+    - changed IDE contract probe settings builders and `--settings-port`
+      default to `0`
+    - changed owned IDE bridge helper default from fixed `8791` to `0`, then
+      uses the launch report's actual `readiness_url` for capability capture,
+      contract probe, and downstream agent app routing
+    - changed isolated Cursor draft-hook runner default from fixed `8797` to
+      `0`, then uses the launch report's actual dynamic URL for readiness and
+      validation
+    - updated CLI help text to avoid recommending fixed `8787` examples
+    - added a process-only read-only fallback in `accessibility_probe` so
+      running important apps such as `Weixin.exe`, `Cursor.exe`, `Codex.exe`,
+      `claude.exe`, and `winword.exe` are still visible when no accessible
+      top-level window is exposed
+  - validation:
+    - TDD red observed for:
+      - CLI omitted `--bridge-url` still probing fixed `8787`
+      - probe settings defaulting to `8787`
+      - owned helper reporting `http://127.0.0.1:0`
+      - isolated Cursor runner reporting `http://127.0.0.1:0`
+    - focused tests then passed:
+      `python -m unittest tests.test_cursor_draft_hook_probe tests.test_ide_bridge_contract_probe.IDEBridgeContractProbeTests.test_probe_allowlist_settings_defaults_to_dynamic_port tests.test_ide_bridge_contract_probe.IDEBridgeContractProbeTests.test_validated_bridge_settings_default_to_dynamic_port tests.test_ide_bridge_contract_probe.IDEBridgeContractProbeTests.test_cli_can_write_probe_settings_without_contacting_bridge tests.test_major_real_no_loss.MajorRealNoLossTests.test_prepare_owned_ide_bridge_helper_uses_dynamic_launch_readiness_url`
+      with `8` tests OK
+    - isolated Cursor runner dynamic-port test passed:
+      `python -m unittest tests.test_cursor_isolated_draft_hook_runner.CursorIsolatedDraftHookRunnerTests.test_runner_launches_isolated_cursor_profile_validates_and_stops`
+      with `1` test OK
+    - related regression passed:
+      `python -m unittest tests.test_cursor_draft_hook_probe tests.test_cursor_live_composer_state tests.test_cursor_draft_hook_validation tests.test_cursor_attach_bridge_validation tests.test_ide_bridge_contract_probe tests.test_cursor_isolated_draft_hook_runner tests.test_session_readiness_plan tests.test_major_real_no_loss`
+      with `150` tests OK
+    - accessibility fallback focused regression passed:
+      `python -m unittest tests.test_accessibility_probe tests.test_wechat_locator tests.test_primary_real_no_loss`
+      with `27` tests OK
+    - read-only live Cursor extension readiness:
+      - `status=installed_extension_stale`
+      - installed path:
+        `C:\Users\Zhangjinqian\.cursor\extensions\openwukong-local.openwukong-vscode-bridge-0.1.0`
+      - installed copy still has `port_default=8787`,
+        `auto_start_default=true`, no dynamic fallback, and disruptive popup
+        source
+    - controlled sync audit stayed read-only:
+      - `status=stale_install_detected`
+      - `write_attempts=0`
+      - `backup_attempts=0`
+      - active Cursor processes detected, so no active profile update was
+        attempted
+    - `git diff --check` passed with only CRLF-normalization warnings
+  - current conclusion:
+    - repo/source defaults now use dynamic unused ports for IDE bridge helper
+      paths; fixed ports are explicit only
+    - current user-facing Cursor popup is from the stale installed extension
+      copy, not the repo source
+    - because Cursor is actively in use, updating the installed extension must
+      remain a controlled operation and should not be done implicitly
+    - WeChat is now read-only visible through process-only fallback when UIA
+      exposes no top-level window, but background send still remains blocked
+      until a native bridge or verified semantic UIA target is available
+  - next concrete actions:
+    1. when the user is ready or Cursor is closed, run controlled IDE extension
+       sync to replace the stale installed Cursor bridge with the dynamic-port
+       source copy
+    2. continue WeChat background send through a deterministic native bridge
+       or verified UIA semantic target, not blind visual/keyboard fallback
+    3. continue Codex/Claude App native endpoint contracts and avoid MSIX
+       foreground/protocol launches that create system dialogs
+
+- 2026-06-07 R229 agent-app route correction plus dynamic-port confirmation:
+  - trigger:
+    - user reiterated that bridge ports should dynamically use an unused port
+      and asked whether WeChat/app routes are implemented without disrupting
+      normal Cursor work
+  - implementation:
+    - kept Cursor as an IDE route but moved `codex.exe` out of the IDE process
+      family and into an explicit `agent-app` family with `claude.exe`
+    - added `agent-app` route policy:
+      `app-native-bridge-required` with `block_until_deterministic_route`
+      until a verified app/native endpoint exists
+    - updated accessibility readiness so process-only `claude.exe` and
+      `codex.exe` are visible and recommended through
+      `app-native-bridge-required`, not generic desktop or IDE bridge
+    - updated WeChat/IM process-only recommended routes so `Weixin.exe`,
+      `wechat.exe`, and `wxwork.exe` also report
+      `app-native-bridge-required` before MSAA/vision fallback
+    - corrected primary scenario smoke so Codex desktop App no longer writes a
+      fake successful IDE-extension execution artifact; it now remains a
+      dry-run/gated task until a real native bridge exists
+  - validation:
+    - related route/accessibility/profile regression passed:
+      `python -m unittest tests.test_accessibility_probe tests.test_transport_capability_matrix tests.test_universal_app_profile tests.test_primary_scenario_smoke tests.test_agent_app_uia_probe tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe`
+      with `127` tests OK
+    - full related dynamic-port/major-scenario/agent-app regression passed:
+      `python -m unittest tests.test_cursor_draft_hook_probe tests.test_cursor_live_composer_state tests.test_cursor_draft_hook_validation tests.test_cursor_attach_bridge_validation tests.test_ide_bridge_contract_probe tests.test_cursor_isolated_draft_hook_runner tests.test_session_readiness_plan tests.test_major_real_no_loss tests.test_primary_scenario_smoke tests.test_session_registry_report tests.test_transport_capability_matrix tests.test_accessibility_probe tests.test_universal_app_profile tests.test_agent_app_uia_probe tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_agent_native_connector_probe`
+      with `286` tests OK
+    - read-only live accessibility probe observed:
+      - `claude.exe`: `agent-app`, `app-native-bridge-required`,
+        `block_until_deterministic_route`
+      - `codex.exe`: `agent-app`, `app-native-bridge-required`,
+        `block_until_deterministic_route`
+      - `Cursor.exe`: `ide`, `ide-extension-connector`,
+        `prefer_deterministic_connector`
+      - `Weixin.exe`: `im`, `app-native-bridge-required`,
+        `block_until_deterministic_route`
+    - source scan for fixed default bridge ports only found the diagnostic stale
+      extension detector in `ide_extension_readiness.py`
+    - `git diff --check` passed with CRLF-normalization warnings only
+  - current conclusion:
+    - dynamic unused-port behavior is implemented in repo/source defaults for
+      IDE/browser owned helper paths; the active Cursor popup is from a stale
+      installed extension copy, not the current repo source
+    - WeChat has real prior send verification and is now classified correctly,
+      but current safe/background policy still blocks process-only WeChat until
+      native bridge or verified semantic target is available
+    - Codex/Claude desktop Apps are now deliberately blocked from fake IDE
+      execution and require a native/app bridge; this is stricter and closer to
+      the target architecture
+  - next concrete actions:
+    1. implement or bind a real `agent-native-bridge` connector for Codex and
+       Claude desktop App sessions
+    2. implement WeChat native bridge/readback registry so `File Transfer
+       Assistant` send can be repeated as a deterministic background-safe route
+    3. when Cursor is idle or explicitly allowed, sync the installed Cursor
+       extension from repo source so the stale fixed `8787` popup disappears
+
+- 2026-06-07 R230 agent-native bridge becomes a real Fabric connector:
+  - trigger:
+    - goal continuation required moving Codex/Claude desktop App routes from
+      "recognized but blocked" toward true background execution through a
+      deterministic native endpoint
+  - implementation:
+    - added `ConnectorTarget.agent_native_bridge_url` so native agent App
+      endpoints are first-class routing targets instead of being overloaded
+      onto IDE bridge URLs
+    - added `AgentNativeBridgeConnector` with route id
+      `app-native-bridge-required` and connector id `agent-native-bridge`
+    - registered `AgentNativeBridgeConnector` in the default Fabric connector
+      manager
+    - changed Fabric routing so:
+      - Codex/Claude/Cursor agent targets with no native endpoint report
+        `connector_required` with candidate `agent-native-bridge`
+      - owned targets with `agent_native_bridge_url` can execute through the
+        native bridge without window input, keyboard input, clipboard writes, or
+        foreground takeover
+      - weak non-agent App surfaces such as generic Electron or WeChat are not
+        falsely assigned to the agent-native connector; they remain blocked or
+        foreground/native-gated until a target-specific connector exists
+    - changed transport capability so `app-native-bridge-required` maps to a
+      background-native `agent-native-bridge` transport, while connector
+      readiness remains a Fabric/session ownership responsibility
+    - added ownership matching for `app-native-bridge-required` against
+      `agent_native_bridge_url`
+    - corrected the real terminal connector regression test to use a workspace
+      temp directory because the current sandbox denied PowerShell access to the
+      default system temp short path
+  - validation:
+    - TDD red observed:
+      - default runtime returned `blocked` instead of `connector_required` for
+        Codex App native route
+      - `ConnectorTarget` had no `agent_native_bridge_url`
+      - Fabric could not execute an owned native agent bridge endpoint
+    - focused tests passed:
+      `python -m unittest tests.test_control_fabric.ControlFabricTests.test_default_runtime_requires_agent_native_endpoint_for_codex_app tests.test_control_fabric_execution.ControlFabricExecutionTests.test_execute_runs_owned_agent_native_bridge_without_window_input`
+      with `2` tests OK
+    - related regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_primary_scenario_smoke`
+      with `78` tests OK
+    - broad related regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_cursor_draft_hook_probe tests.test_cursor_live_composer_state tests.test_cursor_draft_hook_validation tests.test_cursor_attach_bridge_validation tests.test_ide_bridge_contract_probe tests.test_cursor_isolated_draft_hook_runner tests.test_session_readiness_plan tests.test_major_real_no_loss tests.test_primary_scenario_smoke tests.test_session_registry_report tests.test_transport_capability_matrix tests.test_accessibility_probe tests.test_universal_app_profile tests.test_agent_app_uia_probe tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_agent_native_bridge tests.test_agent_native_connector_probe`
+      with `324` tests OK
+    - read-only live accessibility probe still observed the real current state:
+      `claude.exe`, `codex.exe`, and `Weixin.exe` have no exposed native
+      endpoint yet and remain `app-native-bridge-required` /
+      `block_until_deterministic_route`; `Cursor.exe` remains
+      `ide-extension-connector`
+    - `git diff --check` passed with CRLF-normalization warnings only
+  - current conclusion:
+    - the architecture now has a real Fabric execution path for background
+      Codex/Claude desktop App control when a verified native bridge endpoint is
+      available
+    - current live Codex/Claude Apps on this machine still do not expose that
+      endpoint, so real desktop App sends correctly remain gated
+    - the next bottleneck is no longer Fabric routing; it is endpoint binding:
+      discovering, launching, or installing the actual Codex/Claude native App
+      bridge without using foreground protocol launchers or stale fixed ports
+  - next concrete actions:
+    1. add an agent-native bridge registry/launcher path that can publish
+       `agent_native_bridge_url` for owned Codex/Claude desktop App sessions
+    2. connect `agent_native_connector_probe` ready endpoints to Fabric
+       ownership records so successful probe output can be executed directly
+    3. implement the equivalent WeChat native connector/registry instead of
+       treating WeChat as an agent-native target
+
+- 2026-06-07 R231 agent-native probe output binds directly into Fabric:
+  - trigger:
+    - successful `agent_native_connector_probe` endpoint discovery needed to
+      become an executable Fabric-owned session instead of staying as an
+      isolated report
+  - implementation:
+    - added `openwukong.control.agent_native_probe_binding`
+    - added `AgentNativeFabricBinding`
+    - added `agent_native_fabric_bindings_from_probe_report(...)`
+    - added `ownership_index_from_agent_native_probe_report(...)`
+    - probe endpoints with `endpoint_type=agent_native_bridge`,
+      `ready=true`, and a local `bridge_url` are converted into:
+      - `ConnectorTarget.agent_native_bridge_url`
+      - `SessionOwnership` with
+        `route_id=app-native-bridge-required`
+      - `connector_id=agent-native-bridge`
+      - owned workspace/project/task metadata from endpoint binding fields
+    - exported the binding helpers through `openwukong.control`
+  - validation:
+    - focused binding test passed:
+      `python -m unittest tests.test_agent_native_probe_binding`
+      with `1` test OK
+    - import smoke passed for:
+      `AgentNativeFabricBinding`,
+      `agent_native_fabric_bindings_from_probe_report`, and
+      `ownership_index_from_agent_native_probe_report`
+    - broad related regression later passed under R232 with `331` tests OK
+  - current conclusion:
+    - when a verified agent native bridge endpoint exists, probe output can now
+      become an owned Fabric target and execute through
+      `agent-native-bridge` without keyboard, clipboard, window input, or
+      foreground takeover
+    - current live Codex/Claude desktop Apps still do not expose such an
+      endpoint, so live app sends remain correctly gated
+  - next concrete actions:
+    1. publish or discover real Codex/Claude desktop App native bridge
+       endpoints without MSIX/protocol foreground launch
+    2. add equivalent WeChat native bridge/readback registry binding
+    3. run no-loss real tests only after endpoint ownership is proven
+
+- 2026-06-07 R232 all owned helper defaults use dynamic unused ports:
+  - trigger:
+    - user clarified that ports should dynamically use unoccupied loopback
+      ports instead of fixed values
+    - remaining fixed defaults still existed for agent app DevTools and
+      agent-native CDP bridge helper paths
+  - implementation:
+    - kept IDE bridge source default at `openwukong.bridge.port=0`
+    - kept browser helper default at `--remote-debugging-port=0`
+    - changed `SessionReadinessPlanOptions.agent_app_debug_port` default from
+      `9555` to `0`
+    - changed `SessionReadinessPlanOptions.agent_bridge_port` default from
+      `18888` to `0`
+    - changed CLI defaults in:
+      - `openwukong.evaluation.session_readiness_plan`
+      - `openwukong.evaluation.major_real_no_loss`
+    - `agent-app-devtools-owned` now publishes an empty readiness URL while
+      configured for port `0`, then execution reads the actual endpoint from
+      `DevToolsActivePort`
+    - `agent-native-cdp-bridge` now publishes an empty readiness URL while
+      configured for port `0`, then execution reads the actual endpoint from
+      the native bridge registry after the helper binds
+    - `prepare_agent_native_cdp_bridge_helper(...)` now reads the launched
+      dynamic bridge URL from the launch report before waiting for registry
+      readiness
+    - fleet normalization now allows `bridge_port=0` as a valid dynamic helper
+      spec
+    - agent app DevTools fleet/template defaults now also use dynamic port `0`
+      and never publish `http://127.0.0.1:0`
+  - validation:
+    - TDD red observed before fix:
+      - agent native CDP helper default published
+        `http://127.0.0.1:18888`
+      - dynamic agent native execution reported `http://127.0.0.1:0`
+      - agent app DevTools default published `http://127.0.0.1:9555`
+      - dynamic agent app execution reported `http://127.0.0.1:0`
+    - focused new dynamic-port tests passed with `4` tests OK
+    - full `session_readiness_plan` suite passed:
+      `python -m unittest tests.test_session_readiness_plan`
+      with `41` tests OK
+    - major/agent bridge regression passed:
+      `python -m unittest tests.test_major_real_no_loss tests.test_primary_scenario_smoke tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_agent_native_probe_binding`
+      with `116` tests OK
+    - broad related control/readiness/accessibility regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_primary_scenario_smoke tests.test_cursor_draft_hook_probe tests.test_cursor_live_composer_state tests.test_cursor_draft_hook_validation tests.test_cursor_attach_bridge_validation tests.test_ide_bridge_contract_probe tests.test_cursor_isolated_draft_hook_runner tests.test_session_readiness_plan tests.test_major_real_no_loss tests.test_session_registry_report tests.test_accessibility_probe tests.test_universal_app_profile tests.test_agent_app_uia_probe tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_agent_native_probe_binding`
+      with `331` tests OK
+    - source scan found no remaining fixed defaults in
+      `major_real_no_loss.py` for `19555`, `18890`, `18891`, or `18892`
+    - source/test scan found no `http://127.0.0.1:0` publication in the
+      touched readiness and major scenario paths
+    - read-only live accessibility probe observed:
+      - `claude.exe`, `codex.exe`, and `Weixin.exe` remain
+        `app-native-bridge-required` / `block_until_deterministic_route`
+      - `Cursor.exe` remains `ide-extension-connector` /
+        `prefer_deterministic_connector`
+      - `control_attempts=0`
+    - `git diff --check` passed with CRLF-normalization warnings only
+  - current conclusion:
+    - source-side owned helper defaults now consistently use OS-assigned
+      unused loopback ports across browser, IDE, agent app DevTools, and
+      agent-native CDP bridge helpers
+    - fixed ports are still supported only when explicitly provided for an
+      isolated test/profile
+    - the active Cursor fixed-8787 popup, if it still appears, is from the
+      stale installed Cursor extension copy, not the current repo source
+  - next concrete actions:
+    1. when Cursor is idle or explicitly allowed, run controlled extension sync
+       so the installed copy also gets the dynamic-port source
+    2. continue Codex/Claude App endpoint publication/discovery so
+       `agent-native-bridge` can be used live
+    3. continue WeChat native bridge/readback registry so prior send success
+       becomes repeatable and background-safe
+
+- 2026-06-07 R233 WeChat native bridge is a first-class Fabric connector:
+  - trigger:
+    - goal continuation required moving WeChat from a one-off native bridge
+      contract toward the same unified ControlFabric execution path used by
+      browser/IDE/agent-native routes
+  - implementation:
+    - added `ConnectorTarget.wechat_native_bridge_url`
+    - added `ConnectorTarget.conversation_name`
+    - added background screenshot evidence fields to `ConnectorTarget`:
+      `background_screenshot_focus_stable`,
+      `background_screenshot_count`, and
+      `background_screenshot_success_count`
+    - added `WeChatNativeBridgeConnector`
+      - connector id: `wechat-native-bridge`
+      - route id: `app-native-bridge-required`
+      - sends through `WeChatNativeBridgeSenderAdapter`
+      - refuses readiness unless a local WeChat native URL, target
+        conversation name, and background screenshot evidence are present
+      - does not use keyboard, mouse, clipboard, SendInput, or foreground
+        takeover
+    - registered `WeChatNativeBridgeConnector` in the default Fabric connector
+      manager ahead of the generic agent-native connector
+    - extended Fabric route candidates for `app-native-bridge-required` to
+      include both:
+      - `agent-native-bridge` for Codex/Claude/Cursor agent apps
+      - `wechat-native-bridge` for WeChat/Weixin targets
+    - extended `SessionOwnershipIndex` so owned WeChat native bridge sessions
+      match by `wechat_native_bridge_url`
+    - added `openwukong.control.wechat_native_fabric_binding`
+      - `WeChatNativeFabricBinding`
+      - `wechat_native_fabric_bindings_from_registry(...)`
+      - `ownership_index_from_wechat_native_bridge_registry(...)`
+      - converts discovered WeChat native registry URLs into Fabric targets and
+        owned session records
+    - exported WeChat native Fabric binding helpers through
+      `openwukong.control`
+  - validation:
+    - TDD red observed:
+      - `ConnectorTarget` rejected `conversation_name`
+      - no `wechat_native_fabric_binding` module existed
+      - Fabric had no WeChat native connector candidate
+    - focused WeChat Fabric tests passed:
+      `python -m unittest tests.test_control_fabric_execution.ControlFabricExecutionTests.test_wechat_native_bridge_requires_background_screenshot_evidence tests.test_control_fabric_execution.ControlFabricExecutionTests.test_execute_runs_wechat_native_bridge_without_window_input`
+      with `2` tests OK
+    - registry-to-Fabric binding passed:
+      `python -m unittest tests.test_wechat_native_fabric_binding`
+      with `1` test OK
+    - WeChat/Fabric/ownership related regression passed:
+      `python -m unittest tests.test_control_fabric_execution tests.test_wechat_native_bridge tests.test_wechat_native_bridge_registry tests.test_wechat_native_fabric_binding tests.test_session_ownership`
+      with `32` tests OK
+    - primary/transport related regression passed:
+      `python -m unittest tests.test_transport_capability_matrix tests.test_primary_transport_matrix tests.test_primary_scenario_smoke tests.test_agent_native_probe_binding`
+      with `16` tests OK
+    - broad related regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_primary_scenario_smoke tests.test_cursor_draft_hook_probe tests.test_cursor_live_composer_state tests.test_cursor_draft_hook_validation tests.test_cursor_attach_bridge_validation tests.test_ide_bridge_contract_probe tests.test_cursor_isolated_draft_hook_runner tests.test_session_readiness_plan tests.test_major_real_no_loss tests.test_session_registry_report tests.test_accessibility_probe tests.test_universal_app_profile tests.test_agent_app_uia_probe tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_agent_native_probe_binding tests.test_wechat_native_bridge tests.test_wechat_native_bridge_registry tests.test_wechat_native_fabric_binding`
+      with `340` tests OK
+    - import smoke passed:
+      `WeChatNativeBridgeConnector`,
+      `WeChatNativeFabricBinding`,
+      `wechat_native_fabric_bindings_from_registry`, and
+      `ownership_index_from_wechat_native_bridge_registry`
+    - read-only live accessibility probe still observed:
+      - real `Weixin.exe` is process-only/window-only in the current desktop
+      - no live WeChat native endpoint is registered
+      - route remains `app-native-bridge-required` /
+        `block_until_deterministic_route`
+      - `control_attempts=0`
+    - `git diff --check` passed with CRLF-normalization warnings only
+  - current conclusion:
+    - WeChat now has the same unified background execution path as the agent
+      native bridge path when a verified local WeChat native bridge endpoint
+      exists
+    - unlike the prior one-off send probe, Fabric execution now requires:
+      native endpoint ownership, target conversation identity, and background
+      screenshot evidence before send
+    - current real WeChat on this desktop still lacks a registered native
+      endpoint, so live WeChat sends remain correctly gated
+  - next concrete actions:
+    1. implement or install a real WeChat native endpoint publisher that writes
+       `wechat-native-bridges.json` with a dynamic local URL
+    2. connect the real publisher to `File Transfer Assistant` readback and
+       background screenshot capture so the Fabric target can be built from
+       evidence instead of manual fields
+    3. continue Codex/Claude desktop App endpoint publication/discovery so the
+       existing `agent-native-bridge` path becomes live
+
+- 2026-06-07 R234 WeChat native endpoint publisher added with dynamic port readiness:
+  - trigger:
+    - continuation of the full desktop-control goal, focusing on replacing
+      one-off WeChat bridge fixtures with a reusable background endpoint
+      publisher that uses unused loopback ports and registry discovery
+  - docs consulted before code changes:
+    - official Python `http.server` documentation for `ThreadingHTTPServer`
+    - official Python `socketserver` documentation for `serve_forever` and
+      `server_close`
+    - official Python `argparse` documentation for CLI argument handling
+  - implementation:
+    - added `openwukong.control.wechat_native_endpoint_publisher`
+      - `WeChatNativeEndpointConfig`
+      - `WeChatNativeEndpointPublisher`
+      - `WeChatNativeBackend`
+      - `UnavailableWeChatNativeBackend`
+      - `make_wechat_native_endpoint_handler`
+      - `write_wechat_native_bridge_registry`
+    - publisher binds to `127.0.0.1:0` by default and writes the actual bound
+      URL, never `http://127.0.0.1:0`
+    - default backend intentionally returns
+      `wechat_native_backend_not_configured`, with zero window, keyboard, and
+      clipboard attempts, so it cannot be mistaken for a real send-ready bridge
+    - registry writer preserves unrelated WeChat bridge entries and updates an
+      existing entry by same process/conversation or same URL
+    - exported the publisher API through `openwukong.control`
+    - extended `SessionReadinessPlanOptions` and CLI with:
+      - `wechat_bridge_python_executable`
+      - `wechat_bridge_host`
+      - `wechat_bridge_port`
+      - `wechat_bridge_registry_path`
+      - process/window/conversation identity fields
+    - added readiness route `wechat-native-bridge`
+      - action id: `launch_wechat_native_bridge`
+      - connector id: `wechat-native-bridge`
+      - managed background helper
+      - dynamic readiness URL readback through
+        `discover_wechat_native_bridge_urls`
+    - added stop-manifest support for the WeChat helper action so launched
+      publisher processes can be terminated by the same managed helper cleanup
+      path
+  - validation:
+    - TDD red observed:
+      - no `wechat_native_endpoint_publisher` module
+      - `SessionReadinessPlanOptions` rejected WeChat bridge fields
+      - CLI rejected `--wechat-bridge-*` arguments
+    - publisher tests passed:
+      `python -m unittest tests.test_wechat_native_endpoint_publisher`
+      with `5` tests OK
+    - WeChat readiness focused tests passed:
+      `python -m unittest` for WeChat plan, dynamic registry readback, CLI
+      dynamic default, and stop-manifest acceptance with `4` tests OK
+    - WeChat/Fabric/readiness related regression passed:
+      `python -m unittest tests.test_wechat_native_endpoint_publisher tests.test_wechat_native_bridge tests.test_wechat_native_bridge_registry tests.test_wechat_native_fabric_binding tests.test_control_fabric_execution tests.test_session_readiness_plan`
+      with `77` tests OK
+    - broad related regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_primary_scenario_smoke tests.test_cursor_draft_hook_probe tests.test_cursor_live_composer_state tests.test_cursor_draft_hook_validation tests.test_cursor_attach_bridge_validation tests.test_ide_bridge_contract_probe tests.test_cursor_isolated_draft_hook_runner tests.test_session_readiness_plan tests.test_major_real_no_loss tests.test_session_registry_report tests.test_accessibility_probe tests.test_universal_app_profile tests.test_agent_app_uia_probe tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_agent_native_probe_binding tests.test_wechat_native_bridge tests.test_wechat_native_bridge_registry tests.test_wechat_native_fabric_binding tests.test_wechat_native_endpoint_publisher`
+      with `349` tests OK
+    - read-only live accessibility probe still observed:
+      - `control_attempts=0`
+      - `claude.exe`, `Codex.exe`, and `Weixin.exe` remain blocked until a
+        verified deterministic endpoint exists
+      - `Cursor.exe` remains on the deterministic IDE connector route
+  - current conclusion:
+    - WeChat now has a real reusable endpoint publisher envelope with dynamic
+      port registration, readiness-plan launch, and manifest cleanup
+    - this still does not mean real WeChat is fully controllable on this
+      machine; the missing piece is a real native backend that can safely
+      implement send/readback/background screenshot against the live WeChat
+      client
+  - next concrete actions:
+    1. implement the real WeChat backend behind
+       `WeChatNativeBackend.capabilities/send_message`
+    2. wire background screenshot/readback evidence into the publisher so the
+       Fabric target can be built entirely from live evidence
+    3. continue Codex/Claude desktop App endpoint publication/discovery so the
+       agent-native route becomes live
+
+- 2026-06-07 R235 WeChat publisher now has a live read-only evidence backend:
+  - trigger:
+    - continuation of the full desktop-control goal, specifically connecting
+      the reusable WeChat endpoint publisher to real no-focus locator and
+      background screenshot evidence
+  - docs consulted before code changes:
+    - Microsoft Learn `PrintWindow` documentation, including its synchronous
+      blocking behavior
+    - Microsoft Learn `GetForegroundWindow` documentation for foreground
+      window evidence
+    - Microsoft Learn `GetWindowRect` documentation for HWND bounds
+    - Microsoft Learn `AccessibleObjectFromWindow` documentation for MSAA
+      read-only accessibility access
+  - implementation:
+    - added `LiveWeChatEvidenceBackend`
+      - returns real WeChat locator evidence through
+        `build_wechat_locator_report`
+      - captures target HWNDs through the existing
+        `PrintWindowBackgroundCaptureProvider`
+      - reports background screenshot count, success count, and
+        focus-stability evidence in `/v1/wechat/capabilities`
+      - never advertises `send_message`; `send_action_ready=false`
+      - `/v1/wechat/send` returns
+        `wechat_native_send_backend_not_configured` with zero window,
+        keyboard, and clipboard attempts
+    - added `FastWin32AccessibilityObserver`
+      - default live backend observer now uses Win32 top-level windows and
+        process-only fallback instead of Pywinauto/UIA descendant scans
+      - UIA remains opt-in through `accessibility_backend="uia"`
+    - default live backend disables MSAA unless explicitly enabled, keeping
+      readiness fast and avoiding COM/accessibility stalls during endpoint
+      health checks
+    - added capability timeout protection:
+      - `capability_timeout_sec`
+      - timeout result:
+        `wechat_live_evidence_timeout`
+      - timeout path still reports zero control/window/keyboard/clipboard
+        attempts
+    - exported `LiveWeChatEvidenceBackend`,
+      `FastWin32AccessibilityObserver`, and `build_wechat_native_backend`
+      through `openwukong.control`
+    - publisher CLI now supports:
+      - `--backend read-only-evidence|unavailable`
+      - `--capture-dir`
+      - `--capability-timeout-sec`
+      - `--accessibility-backend win32|uia`
+      - `--accessibility-max-windows`
+      - `--accessibility-max-elements-per-window`
+      - `--enable-msaa`
+  - validation:
+    - TDD red observed:
+      - `LiveWeChatEvidenceBackend` import missing
+      - WeChat readiness action did not pass `--backend`
+      - live endpoint probe initially timed out on heavier UIA/MSAA path
+    - publisher tests passed:
+      `python -m unittest tests.test_wechat_native_endpoint_publisher`
+      with `9` tests OK
+    - WeChat/readiness/Fabric related regression passed:
+      `python -m unittest tests.test_wechat_native_endpoint_publisher tests.test_wechat_native_bridge tests.test_wechat_native_bridge_registry tests.test_wechat_native_fabric_binding tests.test_control_fabric_execution tests.test_session_readiness_plan tests.test_window_capture tests.test_wechat_locator`
+      with `87` tests OK
+    - broad related regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_primary_scenario_smoke tests.test_cursor_draft_hook_probe tests.test_cursor_live_composer_state tests.test_cursor_draft_hook_validation tests.test_cursor_attach_bridge_validation tests.test_ide_bridge_contract_probe tests.test_cursor_isolated_draft_hook_runner tests.test_session_readiness_plan tests.test_major_real_no_loss tests.test_session_registry_report tests.test_accessibility_probe tests.test_universal_app_profile tests.test_agent_app_uia_probe tests.test_agent_app_bridge tests.test_agent_app_real_no_loss tests.test_agent_native_bridge tests.test_agent_native_connector_probe tests.test_agent_native_probe_binding tests.test_wechat_native_bridge tests.test_wechat_native_bridge_registry tests.test_wechat_native_fabric_binding tests.test_wechat_native_endpoint_publisher tests.test_window_capture tests.test_wechat_locator`
+      with `359` tests OK
+    - real live read-only endpoint probe:
+      - dynamic bridge URL example: `http://127.0.0.1:60693`
+      - `ok=true`
+      - `backend=read-only-evidence`
+      - `locator_window_count=2`
+      - `background_screenshot_count=2`
+      - `background_screenshot_success_count=2`
+      - `background_screenshot_focus_stable=true`
+      - `send_action_ready=false`
+      - `window_input_attempts=0`
+      - `keyboard_input_attempts=0`
+      - `clipboard_write_attempts=0`
+    - real live `/v1/wechat/send` refusal probe:
+      - `ok=false`
+      - `sent=false`
+      - `error=wechat_native_send_backend_not_configured`
+      - window/keyboard/clipboard attempts all `0`
+  - current conclusion:
+    - WeChat now has a live dynamic-port endpoint that can provide real
+      no-focus observation and background screenshot evidence
+    - this is a material step toward precise background WeChat control, but it
+      still deliberately does not send messages; real write/send remains gated
+      until a deterministic native backend is implemented and verified
+  - next concrete actions:
+    1. design and implement the real WeChat send backend behind the same
+       endpoint, starting with File Transfer Assistant only and requiring
+       readback plus foreground-stability evidence
+    2. feed live evidence backend output into Fabric binding so targets can be
+       built from `/capabilities` evidence rather than manual screenshot
+       counts
+    3. continue Codex/Claude desktop App endpoint publication/discovery
+
+- 2026-06-07 R236 WeChat Fabric binding now consumes live capability evidence safely:
+  - trigger:
+    - continuation of the full desktop-control goal, specifically removing
+      manual screenshot-count fields from WeChat Fabric binding and using the
+      native endpoint `/v1/wechat/capabilities` report as the source of truth
+  - docs consulted before code changes:
+    - official Python `urllib.request` documentation
+    - official Python `dataclasses` documentation
+  - implementation:
+    - `wechat_native_fabric_bindings_from_registry(...)` now probes each
+      discovered dynamic local WeChat bridge URL and extracts:
+      - process name / PID when reported
+      - conversation/session identity when verified
+      - window title when target evidence is verified
+      - background screenshot focus-stability, count, and success count
+    - capability probing is compatibility-preserving:
+      - enabled by default for live endpoints
+      - falls back to the existing manual evidence arguments if the endpoint
+        is unreachable or probing is explicitly disabled
+    - `ownership_index_from_wechat_native_bridge_registry(...)` forwards the
+      same capability-probe options, so owned-session binding remains aligned
+      with Fabric targets
+    - read-only endpoints that report `send_action_ready=false` can provide
+      observation evidence, but the send adapter still blocks before calling
+      `/v1/wechat/send`
+    - tightened target-safety semantics:
+      - `LiveWeChatEvidenceBackend` now separates "WeChat window observed"
+        from "requested conversation verified"
+      - if the visible/readable WeChat window title does not match the
+        requested target conversation, the endpoint marks the target
+        `available=false` with
+        `availability_reason=wechat_conversation_not_verified`
+      - Fabric binding does not promote screenshot counts from unavailable
+        capability targets, preventing "saw a WeChat window" from becoming
+        "can operate File Transfer Assistant"
+  - validation:
+    - TDD red observed:
+      - registry binding left background screenshot counts at `0` even when a
+        capability endpoint reported real screenshot evidence
+      - read-only capability targets were initially over-promoted into
+        Fabric-ready targets
+      - live read-only probe revealed an important precision issue: current
+        WeChat top-level title was another chat while the requested target was
+        File Transfer Assistant
+    - focused binding tests passed:
+      `python -m unittest tests.test_wechat_native_fabric_binding`
+      with `2` tests OK before the safety-tightening additions
+    - WeChat/Fabric/ownership related regression passed:
+      `python -m unittest tests.test_wechat_native_fabric_binding tests.test_control_fabric_execution tests.test_wechat_native_bridge tests.test_wechat_native_bridge_registry tests.test_wechat_native_endpoint_publisher tests.test_session_ownership`
+      with `42` tests OK
+    - endpoint and binding focused tests passed:
+      `python -m unittest tests.test_wechat_native_fabric_binding tests.test_wechat_native_endpoint_publisher`
+      with `13` tests OK
+    - WeChat/readiness/window related regression passed:
+      `python -m unittest tests.test_wechat_native_fabric_binding tests.test_control_fabric_execution tests.test_wechat_native_bridge tests.test_wechat_native_bridge_registry tests.test_wechat_native_endpoint_publisher tests.test_session_ownership tests.test_wechat_native_bridge_registry tests.test_wechat_native_bridge tests.test_session_readiness_plan tests.test_window_capture tests.test_wechat_locator`
+      with `101` tests OK
+    - safe live read-only binding probe:
+      - dynamic bridge URL example: `http://127.0.0.1:53012`
+      - registry binding found `1` endpoint
+      - current WeChat window was not verified as File Transfer Assistant
+      - target screenshot counts stayed `0`
+      - Fabric blocked at dispatch:
+        `dispatch_gate_not_ready`
+      - `control_attempts=0`
+      - no action report was created, so `/v1/wechat/send` was not called
+    - attempted broad all-related regression twice, but the outer command
+      timed out at 5 minutes and then 10 minutes without returning a complete
+      result; subsequent shell and Node tool calls also timed out, indicating
+      the local tool execution channel or machine load was unstable rather
+      than a deterministic code assertion failure
+  - current conclusion:
+    - WeChat registry-to-Fabric binding now uses live endpoint evidence and is
+      stricter about target conversation verification
+    - this improves precision and safety: observation of a WeChat HWND is no
+      longer enough to mark a specific chat target ready
+    - real WeChat write/send remains intentionally gated until a deterministic
+      native send backend can verify the target conversation, write without
+      foreground takeover, and read back the sent marker
+  - next concrete actions:
+    1. restore/inspect the local shell execution channel, then rerun
+       `git diff --check` and the broad related regression
+    2. design the real File Transfer Assistant send backend with explicit
+       target verification, readback, no foreground takeover, and zero
+       keyboard/clipboard/window input attempts
+    3. continue Codex/Claude desktop App endpoint publication/discovery so
+       agent-native routes can be validated with the same endpoint ownership
+       and capability-evidence pattern
+
+- 2026-06-07 R237 Local command execution channel still unavailable; keep goal active:
+  - trigger:
+    - automatic continuation of the full desktop-control goal after R236
+  - observed state:
+    - `cmd /c echo shell-ok` timed out from the repository workdir
+    - `cmd /c echo shell-ok` also timed out from `C:\Users\Zhangjinqian`
+    - disabling shell login semantics did not change the timeout
+    - MCP metadata tools remained available, so this is not evidence that the
+      OpenWukong control architecture regressed
+  - safety decision:
+    - did not launch real GUI tests
+    - did not run additional browser/WeChat/Cursor/Codex/Claude control
+      attempts
+    - did not mark the active product goal complete
+    - did not mark the goal blocked yet, because the strict repeated-turn
+      blocked threshold is not satisfied
+  - current conclusion:
+    - R236's focused and related WeChat/Fabric validations remain the latest
+      completed evidence
+    - broad regression and `git diff --check` are still pending until the local
+      shell execution channel can start even minimal commands again
+  - next concrete actions when shell recovers:
+    1. run a minimal command liveness check outside and inside the repository
+    2. inspect for orphaned Python/unittest helper processes without killing
+       unrelated user work
+    3. run `git diff --check`
+    4. rerun focused WeChat binding/publisher tests
+    5. rerun broad related control/readiness/accessibility regression
+    6. continue implementation of the deterministic File Transfer Assistant
+       native send backend only after those checks are green or the remaining
+       failures are clearly classified as unrelated environment issues
+
+- 2026-06-27 R238 Cua-inspired no-foreground contract and trajectory evidence base:
+  - trigger:
+    - user asked what parts of Cua should be absorbed, then asked to start
+      implementing the first batch
+  - docs consulted before code changes:
+    - Cua no-foreground/control trajectory documentation
+    - official Python `dataclasses` documentation
+  - implementation:
+    - added `openwukong.control.execution_contract`
+      - global `NoForegroundContract`
+      - `build_no_foreground_contract(...)`
+      - `validate_no_foreground_contract(...)`
+      - validates focus stability, foreground takeover, keyboard/mouse/window
+        input, clipboard writes, and cursor movement against the selected route
+    - added `openwukong.control.trajectory`
+      - `ControlTrajectoryRecorder`
+      - `ControlTrajectory`
+      - `ControlTrajectoryStep`
+      - `TrajectoryArtifact`
+      - append-only JSON manifest/step records for dispatch/action evidence
+    - wired `ControlFabric` dispatch reports to include
+      `no_foreground_contract`
+    - wired `ControlFabric` execution reports to include
+      `no_foreground_contract` and `no_foreground_validation`
+    - exported the new contract and trajectory APIs from
+      `openwukong.control`
+  - validation:
+    - focused tests passed:
+      `python -m unittest tests.test_no_foreground_contract tests.test_control_trajectory`
+      with `6` tests OK
+    - related Fabric/transport regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_transport_capability_matrix tests.test_no_foreground_contract tests.test_control_trajectory`
+      with `23` tests OK
+    - execution-gate regression passed:
+      `python -m unittest tests.test_control_fabric_execution tests.test_no_foreground_contract tests.test_control_trajectory`
+      with `26` tests OK
+    - wider control-layer regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract tests.test_wechat_native_bridge tests.test_no_foreground_contract tests.test_control_trajectory`
+      with `87` tests OK
+    - `py_compile` passed for:
+      - `src/openwukong/control/execution_contract.py`
+      - `src/openwukong/control/trajectory.py`
+      - `src/openwukong/control/fabric.py`
+      - `src/openwukong/control/__init__.py`
+      - `tests/test_no_foreground_contract.py`
+      - `tests/test_control_trajectory.py`
+    - `git diff --check` passed for the touched files; Git reported only
+      existing CRLF normalization warnings on modified files
+  - current conclusion:
+    - Cua's no-foreground contract has been absorbed as an OpenWuKong-native
+      global control/evidence contract rather than a visual-click-first agent
+      layer
+    - trajectory recording now gives a reusable evidence schema for future
+      replay/debug/training data without triggering any desktop control
+  - next concrete actions:
+    1. attach `ControlTrajectoryRecorder` to `ControlFabric.execute(...)` and
+       the primary real-no-loss runners when an output root is provided
+    2. promote no-foreground validation failures into hard execution failures
+       for all non-command desktop control paths
+    3. extend L1/L3 fixture schema with trajectory/oracle fields inspired by
+       Cua-Bench while preserving connector-first routing
+
+- 2026-06-27 R239 Trajectory recording is now attached to execution and primary no-loss cases:
+  - trigger:
+    - user asked to continue after R238's next concrete action
+  - docs consulted before code changes:
+    - official Python `pathlib` documentation
+    - previously consulted Cua no-foreground/trajectory documentation remains
+      the product reference for the absorbed pattern
+  - implementation:
+    - `ControlFabric.execute(...)` now accepts:
+      - `trajectory_root`
+      - `trajectory_metadata`
+    - when `trajectory_root` is provided, Fabric writes a
+      `ControlTrajectoryRecorder` manifest with:
+      - dispatch step
+      - execution step
+      - route / connector / decision metadata
+    - `ControlExecutionReport.to_dict()` now exposes:
+      - `trajectory_id`
+      - `trajectory_path`
+      - `trajectory_error`
+    - `control_fabric_execute` CLI now accepts `--trajectory-root` and passes
+      entrypoint metadata into the Fabric trajectory
+    - `primary_real_no_loss` now writes a per-case trajectory under
+      `control_trajectories/` when writing each case artifact
+    - primary case details now include `trajectory_path`
+  - validation:
+    - focused execution/primary/trajectory tests passed:
+      `python -m unittest tests.test_control_fabric_execution tests.test_primary_real_no_loss tests.test_control_trajectory`
+      with `37` tests OK
+    - related Fabric/transport/contract/primary regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_no_foreground_contract tests.test_control_trajectory tests.test_primary_real_no_loss`
+      with `58` tests OK
+    - wider control-layer regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract tests.test_wechat_native_bridge tests.test_no_foreground_contract tests.test_control_trajectory tests.test_primary_real_no_loss`
+      with `102` tests OK
+    - `py_compile` passed for:
+      - `src/openwukong/control/fabric.py`
+      - `src/openwukong/control/trajectory.py`
+      - `src/openwukong/evaluation/control_fabric_execute.py`
+      - `src/openwukong/evaluation/primary_real_no_loss.py`
+      - `tests/test_control_fabric_execution.py`
+      - `tests/test_primary_real_no_loss.py`
+    - `git diff --check` passed for touched files; Git reported only CRLF
+      normalization warnings
+  - current conclusion:
+    - real control execution and primary no-loss case reports now produce
+      durable, structured trajectory evidence when an output root is available
+    - this turns the Cua-inspired trajectory idea into a native OpenWuKong
+      audit/replay substrate without changing default route gates
+  - next concrete actions:
+    1. promote no-foreground validation failures into hard execution failures
+       for non-command desktop control paths
+    2. attach screenshot/app-state artifacts to trajectory steps where existing
+       probes already emit artifact paths
+    3. extend L1/L3 fixture schema with trajectory/oracle fields inspired by
+       Cua-Bench while preserving connector-first routing
+
+- 2026-06-27 R240 No-foreground validation is now a hard gate for non-command desktop execution:
+  - trigger:
+    - user asked to start the next step after the computer-operation readiness
+      discussion
+  - docs consulted before code changes:
+    - official Python `dataclasses` documentation
+    - official Python `unittest` documentation for focused regression coverage
+  - implementation:
+    - `ControlFabric.execute(...)` now calls `_enforce_no_foreground_contract`
+      after an action report is produced and before trajectory finalization
+    - non-command desktop routes now fail execution when the action report
+      violates the no-foreground contract
+    - command routes remain excluded from this desktop hard gate:
+      - `terminal-native-session`
+      - `git-cli`
+    - hard-gate failures set:
+      - `ok=false`
+      - `decision=failed`
+      - `control_allowed=false`
+      - `error=no_foreground_contract_violation:<violations>`
+    - `validate_no_foreground_contract(...)` now merges top-level action
+      report fields with nested connector `payload` fields, so native
+      connector evidence is actually checked
+  - validation:
+    - focused hard-gate tests passed:
+      `python -m unittest tests.test_control_fabric_execution tests.test_no_foreground_contract`
+      with `27` tests OK
+    - related Fabric/transport/contract/trajectory regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_no_foreground_contract tests.test_control_trajectory`
+      with `46` tests OK
+    - wider control-layer regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract tests.test_wechat_native_bridge tests.test_no_foreground_contract tests.test_control_trajectory tests.test_primary_real_no_loss`
+      with `104` tests OK
+    - `py_compile` passed for:
+      - `src/openwukong/control/fabric.py`
+      - `src/openwukong/control/execution_contract.py`
+      - `tests/test_control_fabric_execution.py`
+      - `tests/test_no_foreground_contract.py`
+    - `git diff --check` passed for touched files; Git reported only CRLF
+      normalization warnings
+  - TDD evidence:
+    - first focused run failed because terminal connector evidence was nested
+      under action report `payload`, while the validator only checked top-level
+      fields
+    - validator was corrected to merge nested `payload` evidence before
+      evaluating focus/input violations
+  - current conclusion:
+    - OpenWuKong now has a real execution-time safety boundary: a route that
+      promises no foreground takeover cannot silently succeed after stealing
+      focus or using keyboard/mouse/clipboard
+    - this materially raises the system from "records unsafe evidence" to
+      "fails unsafe execution" for non-command desktop control paths
+  - next concrete actions:
+    1. attach screenshot/app-state artifacts to trajectory steps where existing
+       probes already emit artifact paths
+    2. build a Computer Operation Readiness Matrix across Browser / Terminal /
+       Git / IDE / Office / WeChat / Generic Desktop
+    3. implement the first end-to-end safe operation demo with an owned browser:
+       launch isolated browser, operate a controlled page, verify DOM readback,
+       and persist trajectory evidence
+
+- 2026-06-27 R241 Computer Operation Readiness Matrix added:
+  - trigger:
+    - user asked to continue after Windows Defender allowed the Codex Desktop
+      helper warning and wanted project progress resumed
+  - safety note:
+    - real Codex Desktop Computer Use was not used for this task
+    - all work stayed in file edits, Fabric dispatch plans, and test commands
+  - docs consulted before code changes:
+    - official Python `dataclasses` documentation
+    - official Python `argparse` documentation
+    - official Python `unittest` documentation
+  - implementation:
+    - added `openwukong.evaluation.computer_operation_readiness_matrix`
+    - the new plan-only matrix classifies seven computer operation surfaces:
+      - Browser
+      - Terminal
+      - Git
+      - IDE
+      - Office
+      - WeChat
+      - Generic Desktop
+    - each surface is classified into:
+      - `background_execute`
+      - `read_only`
+      - `foreground_required`
+      - `blocked`
+    - the matrix is built from `ControlFabric.dispatch(...)` and therefore
+      respects connector readiness, route policy, transport capability, and
+      no-control plan-only boundaries
+    - current default workspace classification is:
+      - `terminal`: `background_execute`
+      - `git`: `background_execute`
+      - `browser`: `blocked` until owned debugger URL evidence exists
+      - `ide`: `blocked` until IDE bridge URL evidence exists
+      - `office`: `blocked` until an Office object-model/add-in connector is
+        present
+      - `wechat`: `blocked` until WeChat native bridge URL plus background
+        screenshot evidence exists
+      - `generic_desktop`: `foreground_required` under current Fabric gates
+    - with explicit browser debugger URL, IDE bridge URL, WeChat native bridge
+      URL, and verified WeChat background screenshot evidence, Browser / IDE /
+      WeChat promote to `background_execute` without attempting control
+    - added CLI support:
+      - `python -m openwukong.evaluation.computer_operation_readiness_matrix`
+      - optional JSON output and evidence flags for browser, IDE, WeChat, and
+        workspace path
+  - validation:
+    - focused tests passed:
+      `python -m unittest tests.test_computer_operation_readiness_matrix`
+      with `3` tests OK
+    - related Fabric/transport/readiness regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_transport_capability_matrix tests.test_primary_transport_matrix tests.test_no_foreground_contract tests.test_computer_operation_readiness_matrix`
+      with `27` tests OK
+    - wider control-layer regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract tests.test_wechat_native_bridge tests.test_no_foreground_contract tests.test_control_trajectory tests.test_primary_real_no_loss tests.test_primary_transport_matrix tests.test_objective_readiness_matrix tests.test_computer_operation_readiness_matrix`
+      with `113` tests OK
+    - `py_compile` passed for:
+      - `src/openwukong/evaluation/computer_operation_readiness_matrix.py`
+      - `tests/test_computer_operation_readiness_matrix.py`
+    - `git diff --check` passed for the touched readiness matrix files
+  - current conclusion:
+    - OpenWuKong can already operate the developer workstation in background
+      mode for Terminal and Git through structured command/session routes
+    - Browser / IDE / WeChat are architecturally ready but require explicit
+      deterministic connector evidence before background execution is allowed
+    - Office and arbitrary Generic Desktop remain below the safe background
+      operation bar in the current Fabric policy
+  - next concrete actions:
+    1. implement the first end-to-end safe operation demo with an owned browser:
+       launch isolated browser, operate a controlled page, verify DOM readback,
+       and persist trajectory evidence
+    2. attach screenshot/app-state artifacts to trajectory steps where existing
+       probes already emit artifact paths
+    3. add or bind an Office object-model connector if Office document creation
+       remains part of the primary workstation objective
+
+- 2026-06-27 R242 Owned Browser Safe Operation Demo added:
+  - trigger:
+    - user said "start" after R241 identified owned browser as the next
+      concrete path to prove safe computer operation
+  - docs consulted before code changes:
+    - official Python `subprocess` documentation
+    - official Python `http.server` documentation
+    - Chrome DevTools Protocol `Page` domain documentation
+  - safety note:
+    - real Codex Desktop Computer Use was not used
+    - no foreground mouse/keyboard desktop control was used
+    - tests use fake launch/action runners and do not require a real Chrome
+      installation
+  - implementation:
+    - added `openwukong.evaluation.owned_browser_safe_operation_demo`
+    - the demo starts a loopback controlled page server
+    - it launches an owned isolated browser through existing
+      `SessionReadinessPlan` using:
+      - isolated `--user-data-dir`
+      - local DevTools endpoint
+      - `--headless=new`
+      - manifest-based cleanup
+    - it runs the existing Fabric-gated browser workflow against the owned
+      browser only, with ownership enforced from the readiness manifest
+    - workflow steps:
+      - navigate to controlled page
+      - set input value
+      - submit the controlled form
+      - read the page
+      - extract result links
+    - quality gates verify:
+      - URL contains the verified state
+      - DOM text contains the required marker
+      - result link href and text contain the expected evidence
+      - at least one result is extracted
+    - the demo stops the owned browser via manifest PID-tree cleanup
+    - the isolated browser profile is deleted by default and can be kept only
+      with explicit `--keep-profile`
+    - the demo writes:
+      - `owned_browser_safe_operation_demo.json`
+      - browser workflow artifact
+      - stop artifact
+      - `ControlTrajectoryRecorder` manifest with controlled page, launch,
+        workflow, cleanup, and final report steps
+  - validation:
+    - focused tests passed:
+      `python -m unittest tests.test_owned_browser_safe_operation_demo`
+      with `3` tests OK
+    - related browser/session/Fabric/trajectory regression passed:
+      `python -m unittest tests.test_owned_browser_safe_operation_demo tests.test_control_fabric_browser_workflow tests.test_session_readiness_plan tests.test_control_trajectory tests.test_control_fabric_execution`
+      with `82` tests OK
+    - wider control/browser/readiness regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract tests.test_wechat_native_bridge tests.test_no_foreground_contract tests.test_control_trajectory tests.test_primary_real_no_loss tests.test_primary_transport_matrix tests.test_objective_readiness_matrix tests.test_computer_operation_readiness_matrix tests.test_control_fabric_browser_workflow tests.test_session_readiness_plan tests.test_owned_browser_safe_operation_demo`
+      with `170` tests OK
+    - `py_compile` passed for:
+      - `src/openwukong/evaluation/owned_browser_safe_operation_demo.py`
+      - `tests/test_owned_browser_safe_operation_demo.py`
+    - `git diff --check` passed for the touched owned-browser demo files
+    - live owned Chrome demo passed on this Windows workstation:
+      `python -m openwukong.evaluation.owned_browser_safe_operation_demo --browser-executable "C:\Program Files\Google\Chrome\Application\chrome.exe" --output-root logs\runtime\owned-browser-safe-operation-demo-live --settle-seconds 0.2`
+      with:
+      - `ok=true`
+      - `decision=owned_browser_demo_verified`
+      - `control_attempts=3`
+      - `desktop_control_attempts=0`
+      - `window_input_attempts=0`
+      - `stop_attempts=1`
+      - `profile_cleanup.deleted=true`
+      - `browser_workflow.quality_summary.failed=0`
+      - trajectory manifest written under
+        `logs/runtime/owned-browser-safe-operation-demo-live/control_trajectories/`
+  - current conclusion:
+    - OpenWuKong now has a first explicit Browser computer-operation demo that
+      performs real browser-side DOM operations through a deterministic
+      DevTools connector contract while preserving the no-foreground design
+    - the demo has now passed a live owned Chrome run on Windows, while the
+      default tests remain hermetic and do not depend on external browser state
+  - next concrete actions:
+    1. attach screenshot/app-state artifacts to trajectory steps where existing
+       probes already emit artifact paths
+    2. promote the same owned-session pattern to IDE bridge and WeChat native
+       bridge demos once their connector evidence is present
+    3. add a compact dashboard/report view for readiness matrix plus owned
+       browser live-demo artifacts
+
+- 2026-06-27 R243 Trajectory Artifact Auto-Attach added:
+  - trigger:
+    - user asked to continue after R242, and the current roadmap's first next
+      action was to attach screenshot/app-state artifacts to trajectory steps
+  - docs consulted before code changes:
+    - official Python `pathlib` documentation
+    - official Python `mimetypes` documentation
+  - safety note:
+    - real Codex Desktop Computer Use was not used
+    - no foreground mouse/keyboard desktop control was used
+    - this change only records existing artifact files that probe reports
+      already wrote to disk
+  - implementation:
+    - added `extract_trajectory_artifacts(...)` to
+      `openwukong.control.trajectory`
+    - the extractor recursively scans nested reports for known artifact-like
+      path fields, including:
+      - `artifact_path`
+      - `output_path`
+      - `screenshot_path`
+      - `report_path`
+      - `manifest_path`
+      - `trajectory_path`
+      - matching suffix forms such as `_screenshot_path` and `_state_path`
+    - only existing files are attached; missing files, URLs, profile
+      directories, and workspace directories are ignored
+    - attached artifacts now receive deterministic roles, inferred media types,
+      and SHA-256 hashes
+    - `ControlFabric.execute(..., trajectory_root=...)` now attaches action
+      report artifacts to the execution step automatically
+    - `primary_real_no_loss` case trajectories now attach existing probe
+      artifacts from case details, such as background screenshot outputs, while
+      keeping the existing case report artifact reference
+  - validation:
+    - focused regression passed:
+      `python -m unittest tests.test_control_trajectory tests.test_control_fabric_execution tests.test_primary_real_no_loss`
+      with `41` tests OK
+    - wider control/browser/readiness regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract tests.test_wechat_native_bridge tests.test_no_foreground_contract tests.test_control_trajectory tests.test_primary_real_no_loss tests.test_primary_transport_matrix tests.test_objective_readiness_matrix tests.test_computer_operation_readiness_matrix tests.test_control_fabric_browser_workflow tests.test_session_readiness_plan tests.test_owned_browser_safe_operation_demo`
+      with `172` tests OK
+    - `py_compile` passed for:
+      - `src/openwukong/control/trajectory.py`
+      - `src/openwukong/control/fabric.py`
+      - `src/openwukong/evaluation/primary_real_no_loss.py`
+      - `tests/test_control_trajectory.py`
+      - `tests/test_control_fabric_execution.py`
+      - `tests/test_primary_real_no_loss.py`
+    - `git diff --check` passed for touched code/test files, with only CRLF
+      working-copy warnings
+  - current conclusion:
+    - execution trajectories now preserve the concrete screenshot and app-state
+      files needed for audit, debugging, replay, and later training-data export
+      without broadening the control surface
+  - next concrete actions:
+    1. promote the owned-session pattern to IDE bridge and WeChat native bridge
+       demos once their connector evidence is present
+    2. add a compact dashboard/report view for readiness matrix plus owned
+       browser live-demo and trajectory artifacts
+    3. extend artifact auto-attach coverage to standalone probe CLIs that write
+       reports outside Fabric or primary-real-no-loss
+
+- 2026-06-27 R244 Computer Operation Status Report added:
+  - trigger:
+    - user asked to continue after R243
+    - IDE and WeChat owned-session demos still require live bridge evidence, so
+      the next directly actionable roadmap item was a compact readiness plus
+      artifact report view
+  - docs consulted before code changes:
+    - official Python `json` documentation
+    - official Python `argparse` documentation
+    - official Python `pathlib` documentation
+  - safety note:
+    - real Codex Desktop Computer Use was not used
+    - no foreground mouse/keyboard desktop control was used
+    - the new report only reads existing JSON/Markdown-ready evidence and does
+      not launch or control applications
+  - implementation:
+    - added `openwukong.evaluation.computer_operation_status_report`
+    - the report combines:
+      - `ComputerOperationReadinessMatrixReport`
+      - owned-browser safe-operation demo JSON
+      - owned-browser trajectory manifest artifacts
+    - if an owned-browser demo report is supplied or discovered, its verified
+      DevTools readiness URL and controlled-page URL are fed into the readiness
+      matrix so Browser can be shown as `background_execute`
+    - report outputs include:
+      - JSON status report
+      - Markdown status view
+      - surface readiness table
+      - owned-browser demo status
+      - trajectory artifact roles, media types, counts, and file-existence
+        checks
+      - next actions derived from blocked IDE / Office / WeChat surfaces
+    - CLI added:
+      - `python -m openwukong.evaluation.computer_operation_status_report`
+      - supports explicit owned-browser report path
+      - supports runtime-root discovery
+      - supports `--output`, `--markdown-output`, and `--json`
+  - validation:
+    - focused tests passed:
+      `python -m unittest tests.test_computer_operation_status_report`
+      with `3` tests OK
+    - related readiness/demo/trajectory regression passed:
+      `python -m unittest tests.test_computer_operation_status_report tests.test_computer_operation_readiness_matrix tests.test_owned_browser_safe_operation_demo tests.test_control_trajectory tests.test_control_fabric_execution tests.test_primary_real_no_loss`
+      with `50` tests OK
+    - wider control/browser/readiness regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract tests.test_wechat_native_bridge tests.test_no_foreground_contract tests.test_control_trajectory tests.test_primary_real_no_loss tests.test_primary_transport_matrix tests.test_objective_readiness_matrix tests.test_computer_operation_readiness_matrix tests.test_computer_operation_status_report tests.test_control_fabric_browser_workflow tests.test_session_readiness_plan tests.test_owned_browser_safe_operation_demo`
+      with `175` tests OK
+    - `py_compile` passed for:
+      - `src/openwukong/evaluation/computer_operation_status_report.py`
+      - `tests/test_computer_operation_status_report.py`
+    - `git diff --check` passed for touched R244 files
+    - generated current workstation status artifacts:
+      - `logs/runtime/computer-operation-status-r244/status.json`
+      - `logs/runtime/computer-operation-status-r244/status.md`
+    - generated report summary:
+      - `surface_count=7`
+      - `background_execute_count=3`
+      - `blocked_count=3`
+      - `foreground_required_count=1`
+      - `owned_browser_demo_status=verified`
+      - `owned_browser_artifact_count=4`
+      - `observed_prior_control_attempts=3`
+      - `observed_prior_window_input_attempts=0`
+  - current conclusion:
+    - the current validated computer-operation level is:
+      - Browser: `background_execute` through owned DevTools demo evidence
+      - Terminal: `background_execute`
+      - Git: `background_execute`
+      - IDE: `blocked` until live IDE bridge evidence is available
+      - Office: `blocked` until an Office object-model/add-in connector exists
+      - WeChat: `blocked` until native bridge plus background screenshot
+        evidence is available
+      - Generic Desktop: `foreground_required`
+  - next concrete actions:
+    1. implement the IDE owned-session demo against explicit IDE bridge
+       evidence or a hermetic bridge fixture
+    2. implement the WeChat native bridge demo once native bridge URL and
+       background screenshot evidence are present
+    3. extend artifact auto-attach coverage to standalone probe CLIs that write
+       reports outside Fabric or primary-real-no-loss
+
+- 2026-06-27 R245 Hermetic Owned IDE Bridge Demo added:
+  - trigger:
+    - user asked to start after R244
+    - the selected breakthrough was to move IDE from `blocked` to
+      `background_execute` using owned bridge evidence before attempting generic
+      desktop control
+  - docs consulted before code changes:
+    - official Python `http.server` documentation
+    - official Python `urllib.request` documentation
+    - official Python `mimetypes` documentation
+  - safety note:
+    - real Codex Desktop Computer Use was not used
+    - no real IDE, Cursor, or VS Code process was launched
+    - no foreground mouse/keyboard desktop control was used
+    - the demo uses only a local loopback hermetic bridge and an owned scratch
+      workspace under `logs/runtime`
+  - implementation:
+    - added `openwukong.evaluation.owned_ide_safe_operation_demo`
+    - the demo starts a local hermetic IDE bridge with endpoints matching the
+      existing IDE extension bridge contract:
+      - `/v1/ide/capabilities`
+      - `/v1/ide/state`
+      - `/v1/ide/read`
+      - `/v1/ide/send`
+      - `/v1/ide/command`
+    - the demo writes an IDE session ownership manifest compatible with
+      `SessionOwnershipIndex`
+    - Fabric execution then runs through the real `IDEExtensionConnector`
+      route:
+      - read owned IDE state
+      - write an owned scratch buffer
+      - read back the scratch marker
+    - the write action is scoped to `local_draft.write` side-effect policy and
+      stays within the owned output workspace
+    - trajectory evidence now includes IDE state, scratch, readback, ownership,
+      Fabric execution, and final report artifacts
+    - `extract_trajectory_artifacts(...)` now recognizes `scratch_path` and
+      `readback_path`
+    - `computer_operation_status_report` now accepts:
+      - `--owned-ide-report`
+      - `--no-discover-owned-ide-report`
+      and can promote IDE readiness from owned demo evidence
+  - validation:
+    - focused tests passed:
+      `python -m unittest tests.test_owned_ide_safe_operation_demo tests.test_computer_operation_status_report tests.test_control_trajectory`
+      with `9` tests OK
+    - related IDE/Fabric/readiness tests passed:
+      `python -m unittest tests.test_owned_ide_safe_operation_demo tests.test_computer_operation_status_report tests.test_computer_operation_readiness_matrix tests.test_owned_browser_safe_operation_demo tests.test_control_trajectory tests.test_control_fabric_execution tests.test_ide_bridge_capture tests.test_ide_extension_readiness tests.test_ide_bridge_registry`
+      with `56` tests OK
+    - wider control/browser/IDE/readiness regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract tests.test_wechat_native_bridge tests.test_no_foreground_contract tests.test_control_trajectory tests.test_primary_real_no_loss tests.test_primary_transport_matrix tests.test_objective_readiness_matrix tests.test_computer_operation_readiness_matrix tests.test_computer_operation_status_report tests.test_control_fabric_browser_workflow tests.test_session_readiness_plan tests.test_owned_browser_safe_operation_demo tests.test_owned_ide_safe_operation_demo tests.test_ide_bridge_capture tests.test_ide_extension_readiness tests.test_ide_bridge_registry`
+      with `195` tests OK
+    - `py_compile` passed for:
+      - `src/openwukong/evaluation/owned_ide_safe_operation_demo.py`
+      - `src/openwukong/evaluation/computer_operation_status_report.py`
+      - `src/openwukong/control/trajectory.py`
+      - `tests/test_owned_ide_safe_operation_demo.py`
+      - `tests/test_computer_operation_status_report.py`
+    - `git diff --check` passed for touched R245 files
+    - generated hermetic owned IDE demo:
+      - `logs/runtime/owned-ide-safe-operation-demo-r245/owned_ide_safe_operation_demo.json`
+      - `ok=true`
+      - `decision=owned_ide_demo_verified`
+      - `control_attempts=2`
+      - `desktop_control_attempts=0`
+      - `window_input_attempts=0`
+      - `quality_summary.failed=0`
+    - generated combined R245 status report:
+      - `logs/runtime/computer-operation-status-r245/status.json`
+      - `logs/runtime/computer-operation-status-r245/status.md`
+      - `surface_count=7`
+      - `background_execute_count=4`
+      - `blocked_count=2`
+      - `foreground_required_count=1`
+      - `owned_browser_demo_status=verified`
+      - `owned_ide_demo_status=verified`
+      - `observed_prior_control_attempts=5`
+      - `observed_prior_window_input_attempts=0`
+  - current conclusion:
+    - the current validated computer-operation level is:
+      - Browser: `background_execute`
+      - Terminal: `background_execute`
+      - Git: `background_execute`
+      - IDE: `background_execute` through hermetic owned bridge evidence
+      - Office: `blocked`
+      - WeChat: `blocked`
+      - Generic Desktop: `foreground_required`
+  - next concrete actions:
+    1. move from hermetic IDE bridge to live VS Code/Cursor bridge evidence in
+       an owned scratch workspace
+    2. implement the WeChat native bridge demo once native bridge URL and
+       background screenshot evidence are present
+    3. extend artifact auto-attach coverage to standalone probe CLIs that write
+       reports outside Fabric or primary-real-no-loss
+
+- 2026-06-27 R246 Owned IDE Live Bridge Path added:
+  - trigger:
+    - user asked to continue after R245
+    - the selected breakthrough was to move IDE from a hermetic-only bridge
+      proof toward a live VS Code/Cursor bridge path using an owned scratch
+      workspace and no foreground desktop control
+  - docs consulted before code changes:
+    - official VS Code Extension API documentation
+    - official Python `argparse` documentation
+  - safety note:
+    - real Codex Desktop Computer Use was not used
+    - no real IDE, Cursor, or VS Code process was launched by the demo
+    - no foreground mouse/keyboard desktop control was used
+    - the live demo refuses to execute the write step unless bridge metadata
+      proves the bridge is bound to the owned scratch workspace
+  - implementation:
+    - extended the VS Code-compatible bridge extension with two built-in
+      workspace-scoped commands:
+      - `openwukong.writeScratch`
+      - `openwukong.readScratch`
+    - added those commands to the default `openwukong.bridge.allowedCommands`
+      list because they only touch `.openwukong/openwukong-owned-scratch.txt`
+      under the current workspace
+    - documented the owned scratch command workflow in
+      `extensions/openwukong-vscode/README.md`
+    - added `openwukong.evaluation.owned_ide_live_bridge_demo`
+    - the live demo can use an explicit `--ide-bridge-url` or discover a local
+      bridge from the registry
+    - the live demo verifies:
+      - `/v1/ide/capabilities` is reachable
+      - `openwukong.writeScratch` is available
+      - the bridge metadata's first workspace equals the owned scratch
+        workspace under the output root
+      - Fabric execution is owned through `SessionOwnershipIndex`
+      - the scratch marker is read back
+      - window/keyboard/clipboard foreground counters remain zero
+    - `computer_operation_status_report` now discovers both:
+      - `owned_ide_safe_operation_demo.json`
+      - `owned_ide_live_bridge_demo.json`
+    - created global skill:
+      `C:/Users/Zhangjinqian/.codex/skills/owned-session-manifest-compatibility`
+      after the reusable `owned_session_required` / ownership-manifest schema
+      pattern surfaced during R246 validation
+  - validation:
+    - focused tests passed:
+      `python -m unittest tests.test_owned_ide_live_bridge_demo tests.test_ide_extension_scaffold`
+      with `9` tests OK
+    - related IDE/status/readiness tests passed:
+      `python -m unittest tests.test_owned_ide_live_bridge_demo tests.test_owned_ide_safe_operation_demo tests.test_computer_operation_status_report tests.test_computer_operation_readiness_matrix tests.test_control_trajectory tests.test_control_fabric_execution tests.test_ide_bridge_capture tests.test_ide_extension_readiness tests.test_ide_bridge_registry tests.test_ide_extension_scaffold`
+      with `62` tests OK
+    - wider control/browser/IDE/readiness regression passed:
+      `python -m unittest tests.test_control_fabric tests.test_control_fabric_execution tests.test_transport_capability_matrix tests.test_agent_app_bridge tests.test_agent_app_uia_action_contract tests.test_wechat_native_bridge tests.test_no_foreground_contract tests.test_control_trajectory tests.test_primary_real_no_loss tests.test_primary_transport_matrix tests.test_objective_readiness_matrix tests.test_computer_operation_readiness_matrix tests.test_computer_operation_status_report tests.test_control_fabric_browser_workflow tests.test_session_readiness_plan tests.test_owned_browser_safe_operation_demo tests.test_owned_ide_safe_operation_demo tests.test_owned_ide_live_bridge_demo tests.test_ide_bridge_capture tests.test_ide_extension_readiness tests.test_ide_bridge_registry tests.test_ide_extension_scaffold`
+      with `204` tests OK
+    - `py_compile` passed for touched Python modules/tests
+    - `node --check extensions/openwukong-vscode/src/extension.js` passed
+    - `git diff --check` passed for touched R246 files, with only CRLF
+      working-copy warnings
+    - global skill validation passed:
+      `quick_validate.py C:/Users/Zhangjinqian/.codex/skills/owned-session-manifest-compatibility`
+    - generated owned IDE live-path demo artifact:
+      - `logs/runtime/owned-ide-live-bridge-demo-r246/owned_ide_live_bridge_demo.json`
+      - `ok=true`
+      - `decision=owned_ide_live_bridge_demo_verified`
+      - `control_attempts=2`
+      - `desktop_control_attempts=0`
+      - `window_input_attempts=0`
+      - `quality_summary.failed=0`
+    - generated combined R246 status report:
+      - `logs/runtime/computer-operation-status-r246/status.json`
+      - `logs/runtime/computer-operation-status-r246/status.md`
+      - `surface_count=7`
+      - `background_execute_count=4`
+      - `blocked_count=2`
+      - `foreground_required_count=1`
+      - `owned_browser_demo_status=verified`
+      - `owned_ide_demo_status=verified`
+      - `owned_ide_artifact_count=11`
+      - `observed_prior_window_input_attempts=0`
+  - current conclusion:
+    - the current validated computer-operation level is:
+      - Browser: `background_execute`
+      - Terminal: `background_execute`
+      - Git: `background_execute`
+      - IDE: `background_execute` through owned bridge evidence, with a
+        live VS Code/Cursor bridge path now implemented and workspace-gated
+      - Office: `blocked`
+      - WeChat: `blocked`
+      - Generic Desktop: `foreground_required`
+    - this reaches "operate the computer" for owned deterministic surfaces, not
+      arbitrary desktop takeover; arbitrary Generic Desktop remains unsafe
+      without a native connector or foreground authorization
+  - next concrete actions:
+    1. run the live IDE bridge demo against an actual VS Code/Cursor process
+       opened on the owned scratch workspace after the extension is installed
+       and the bridge is manually started
+    2. implement the WeChat native bridge demo once native bridge URL and
+       background screenshot evidence are present
+    3. add an Office object-model/add-in connector before claiming background
+       Office write readiness
+
+- 2026-06-27 R247 Correct Cursor Profile Bridge Attempt:
+  - trigger:
+    - user clarified that the manually opened Cursor process was the correct
+      logged-in process and that the previously launched isolated Cursor
+      instance was the wrong one
+  - safety note:
+    - stopped the wrong isolated Cursor launch recorded in
+      `logs/runtime/cursor-owned-live-r247/session_readiness_manifest.json`
+      using manifest-scoped stop only
+    - after the correction, no new isolated Cursor profile was launched
+    - later `cursor --reuse-window` probes were cleaned up after they created
+      no-window helper processes
+  - live findings:
+    - correct visible Cursor window:
+      `pasted-text.txt - PaoPaoHeZi - Cursor`
+    - initial live bridge was reachable at `http://127.0.0.1:8787`
+      and exposed Cursor command candidates including `composer.sendToAgent`
+    - installed correct-profile extension path:
+      `C:/Users/Zhangjinqian/.cursor/extensions/openwukong-local.openwukong-vscode-bridge-0.1.0`
+    - the installed extension was stale:
+      - fixed default port `8787`
+      - disruptive autostart warning path still present
+      - no dynamic registry fallback
+      - no `openwukong.writeScratch` / `openwukong.readScratch`
+    - correct-profile extension sync was applied with backup:
+      `logs/runtime/cursor-owned-live-r247/ide_extension_sync_correct_profile.json`
+    - user-level Cursor settings were updated outside the repository to keep
+      existing Cursor adapter commands and add:
+      - `openwukong.writeScratch`
+      - `openwukong.readScratch`
+      - dynamic bridge port fallback settings
+    - after the stale extension host was stopped, Cursor did not automatically
+      re-activate the OpenWukong bridge
+    - current bridge registry remains empty:
+      `C:/Users/Zhangjinqian/AppData/Local/OpenWukong/ide-bridges`
+    - current Cursor NodeService processes expose no OpenWukong bridge listener
+  - current blocker:
+    - the correct Cursor window needs a real extension-host/window reload after
+      the profile update before the live bridge demo can run
+    - current evidence points to Cursor extension host/window state, not to a
+      missing extension install or missing login
+  - next concrete actions:
+    1. reload the correct Cursor window once, then verify registry discovery
+       and `openwukong.writeScratch` capability
+    2. run `owned_ide_live_bridge_demo` against the discovered live bridge
+       only after workspace binding is confirmed
+    3. add a dedicated "installed extension updated but active host still old"
+       readiness status so future runs stop before hanging on stale hosts
+
+- 2026-06-27 R248/R249 Live Cursor Send and Bounded Await Recovery:
+  - trigger:
+    - user reloaded the correct logged-in Cursor window and explicitly allowed
+      a real send validation
+    - after a first real Cursor Agent send attempt, the bridge stopped
+      responding, which exposed an extension-host request-handler hang rather
+      than a missing login or missing bridge install
+  - docs consulted before code changes:
+    - official VS Code API documentation for extension command execution and
+      extension-host APIs
+  - safety note:
+    - no foreground mouse, keyboard, or clipboard route was used for the
+      validation
+    - the deterministic scratch validation used only the installed Cursor
+      extension bridge and a workspace-scoped scratch file under
+      `E:/ideaProjects/agent/PaoPaoHeZi/.openwukong`
+    - the later Cursor restart was performed only after the user reported the
+      window was unusable and asked to close it and restart Cursor
+  - live findings before the fix:
+    - correct Cursor bridge registry appeared at:
+      `C:/Users/Zhangjinqian/AppData/Local/OpenWukong/ide-bridges/0eeee662e051336efe7f99d3.json`
+    - bridge URL was `http://127.0.0.1:8787`
+    - bridge workspace was `E:/ideaProjects/agent/PaoPaoHeZi`
+    - capabilities exposed `openwukong.writeScratch`,
+      `openwukong.readScratch`, and Cursor command candidates including
+      `composer.sendToAgent`
+    - safe scratch validation passed:
+      - artifact:
+        `logs/runtime/cursor-owned-live-r247/cursor_live_scratch_validation.json`
+      - marker:
+        `OPENWUKONG_CURSOR_SCRATCH_R248_20260627162710`
+      - `ok=true`
+      - `readback_verified=true`
+      - `window_input_attempts=0`
+      - `keyboard_input_attempts=0`
+      - `clipboard_write_attempts=0`
+    - first real send attempt through `composer.sendToAgent` timed out after
+      35 seconds and subsequent `/v1/ide/capabilities` calls also timed out
+    - root cause:
+      - `handleChat(...)` awaited `vscode.commands.executeCommand(...)`
+        directly
+      - Cursor Agent/private commands can be long-running or non-resolving from
+        the extension-host perspective, so one Agent send blocked the local
+        bridge request path
+  - implementation:
+    - updated `extensions/openwukong-vscode/src/extension.js`
+      `handleChat(...)` to use a bounded await helper for chat adapter commands
+    - added `executeCommandWithBoundedAwait(...)` and
+      `normalizeCommandAwaitTimeout(...)`
+    - chat send responses now include `dispatch_status`:
+      - `resolved` when the command returns within the bound
+      - `pending` when the command is dispatched but does not resolve before
+        the timeout
+      - `rejected` only when the command promise rejects
+    - added extension setting:
+      `openwukong.bridge.chatCommandAwaitTimeoutMs`
+      with default `2500`
+    - documented that `dispatch_status=pending` means dispatch-pending and
+      transcript/state readback is a separate proof layer
+    - extended `tests/test_ide_extension_scaffold.py` to lock the bounded await
+      contract, setting, README wording, and dispatch-pending behavior
+    - synced the fixed extension into the correct Cursor profile with backup:
+      `logs/runtime/cursor-owned-live-r247/ide_extension_sync_r248_chat_timeout.json`
+  - recovery and live validation:
+    - user reported the Cursor window was unusable and asked to close it and
+      restart Cursor
+    - all `Cursor.exe` processes were stopped, the stale bridge registry file
+      was removed, and the normal Cursor profile was restarted on:
+      `E:/ideaProjects/agent/PaoPaoHeZi`
+    - new live registry appeared at:
+      `C:/Users/Zhangjinqian/AppData/Local/OpenWukong/ide-bridges/0358330502d0e374c785665d.json`
+    - visible Cursor window after restart:
+      `pasted-text.txt - PaoPaoHeZi - Cursor`
+    - installed running extension source contained:
+      `executeCommandWithBoundedAwait`, `chatCommandAwaitTimeoutMs`,
+      `dispatch_status`, and `Promise.race`
+    - real Cursor Agent send validation artifact:
+      `logs/runtime/cursor-owned-live-r247/cursor_live_agent_send_validation_r249.json`
+    - real send marker:
+      `OPENWUKONG_CURSOR_AGENT_SEND_R249_20260627163729`
+    - real send result:
+      - `ok=true`
+      - `send_ok=true`
+      - `send_status=200`
+      - `send_elapsed_ms=230`
+      - `dispatch_status=resolved`
+      - `command_id=composer.sendToAgent`
+      - `adapter_id=cursor`
+      - `capability_alive_after_send=true`
+      - `control_attempts=0`
+      - `window_input_attempts=0`
+      - `keyboard_input_attempts=0`
+      - `clipboard_write_attempts=0`
+    - transcript readback remains separate and currently pending:
+      - `full_readback_ok=false`
+      - `readback_decision=cursor_transcript_readback_pending`
+      - scanned key:
+        `composerData:5a04a9fe-de69-4691-ad54-ca141c04f53a`
+  - validation:
+    - focused tests passed:
+      `python -m unittest tests.test_ide_extension_scaffold`
+      with `4` tests OK
+    - syntax check passed:
+      `node --check extensions/openwukong-vscode/src/extension.js`
+    - `git diff --check` passed for the touched extension and scaffold test
+      files, with only CRLF working-copy warnings
+    - created reusable global skill:
+      `C:/Users/Zhangjinqian/.codex/skills/ide-extension-bounded-await-debug`
+  - current conclusion:
+    - the correct logged-in Cursor profile now has a live OpenWukong bridge
+      that can execute deterministic owned scratch commands and dispatch a real
+      Cursor Agent send without freezing the bridge
+    - this validates background IDE operation at the bridge/command-dispatch
+      layer for Cursor
+    - full model-response proof still requires a stronger Cursor transcript or
+      state readback path; the current storage scanner did not find the marker
+      after dispatch
+  - next concrete actions:
+    1. strengthen Cursor transcript/state readback so a sent marker and Agent
+       reply can be verified after dispatch without foreground UI control
+    2. promote the live Cursor send path into an owned live IDE demo/report once
+       transcript readback or an equivalent state proof is available
+    3. keep arbitrary Generic Desktop at `foreground_required` until there is a
+       deterministic native bridge or explicitly authorized foreground session
+
+## 2026-06-28 R250-R253: Reboot recovery, Cursor bridge hardening, and Codex-panel route split
+
+- user rebooted Windows and asked to continue from the Cursor/Codex bridge
+  validation work
+- context and rules:
+  - reread `.agents/README.md`
+  - reread `.agents/conversation_index.md`
+  - used the global `project-memory-snapshot` workflow; this file remains the
+    repository-owned durable memory for current project state
+  - used the global `ide-extension-bounded-await-debug` workflow because the
+    failure involved VS Code/Cursor extension bridge endpoints and private IDE
+    commands hanging the bridge
+  - official docs consulted before code changes:
+    - VS Code API documentation for `vscode.commands.executeCommand`,
+      extension commands, and extension-host APIs
+    - Python official dataclasses documentation for touched report dataclasses
+- reboot recovery:
+  - no active bridge registry existed after reboot
+  - restarted the correct logged-in Cursor profile, not the wrong login-needed
+    program:
+    `E:/cursor/cursor/cursor/Cursor.exe E:/ideaProjects/agent/PaoPaoHeZi`
+  - live bridge restored at:
+    `http://127.0.0.1:8787`
+  - active registry after final restart:
+    `C:/Users/Zhangjinqian/AppData/Local/OpenWukong/ide-bridges/1cb852fd550221186240d6c2.json`
+  - running workspace:
+    `e:/ideaProjects/agent/PaoPaoHeZi`
+- R250 after-reboot deterministic validation:
+  - safe scratch validation passed with marker:
+    `OPENWUKONG_CURSOR_SCRATCH_R250_AFTER_REBOOT_20260628`
+  - artifact:
+    `logs/runtime/cursor-owned-live-r250-after-reboot/cursor_after_reboot_scratch_validation.json`
+  - no foreground mouse, keyboard, or clipboard route was used
+- R250/R251 send and state-read findings:
+  - `composer.sendToAgent` dispatch returned quickly after the R248 bounded
+    chat-await fix:
+    - R250 marker:
+      `OPENWUKONG_CURSOR_AGENT_SEND_R250_AFTER_REBOOT_20260628`
+    - artifact:
+      `logs/runtime/cursor-owned-live-r250-after-reboot/cursor_live_agent_send_after_reboot_r250.json`
+    - `send_elapsed_ms=101`
+    - `dispatch_status=resolved`
+  - first composer-state hardening added bounded await around
+    `composer.getComposerHandleById`, but live validation showed this was not
+    sufficient:
+    - immediate composer-state returned
+      `cursor_live_composer_state_pending`
+    - following `/v1/ide/capabilities` calls then timed out
+  - mandatory third-round复盘 conclusion:
+    - first fix solved the unbounded `/v1/ide/chat` await
+    - second fix solved an unbounded composer-state await
+    - both missed a deeper layer: invoking Cursor's private
+      `composer.getComposerHandleById` can itself poison/block the extension
+      host or command service while an Agent turn is active, even if our caller
+      stops awaiting it
+- R251/R252 selected-only composer-state fix:
+  - changed `/v1/ide/cursor/composer-state` default behavior to read selected
+    composer ids only
+  - full handle reads now require:
+    - `include_handles: true`
+    - `safety_profile: "isolated_cursor_read_probe"`
+  - Python client and live probe now carry:
+    - `include_handles`
+    - `handle_read_allowed`
+    - `handle_read_policy`
+    - `pending_commands`
+    - `command_errors`
+  - fallback state read no longer invokes
+    `composer.getComposerHandleById` unless isolated read profile is explicit
+  - live selected-only validation before and after send stayed alive:
+    - artifact before send:
+      `logs/runtime/cursor-owned-live-r250-after-reboot/cursor_live_composer_state_r251_selected_only_before_send.json`
+    - R252 send artifact:
+      `logs/runtime/cursor-owned-live-r250-after-reboot/cursor_live_agent_send_r252_selected_only.json`
+    - post-send state artifact:
+      `logs/runtime/cursor-owned-live-r250-after-reboot/cursor_live_composer_state_r252_after_send.json`
+    - `state_status=selected_only`
+    - `handle_read_allowed=false`
+    - capabilities remained alive after state read
+- R253 command/draft-hook safety gate:
+  - added `DANGEROUS_CURSOR_COMMANDS` in
+    `extensions/openwukong-vscode/src/extension.js`
+  - `/v1/ide/command` now blocks direct
+    `composer.getComposerHandleById` with:
+    `cursor_command_requires_isolated_profile`
+    unless the request carries an isolated Cursor safety profile
+  - Cursor draft hook now blocks both dry-run and write handle reads outside:
+    `safety_profile: "isolated_cursor_draft_probe"`
+  - draft-hook validation now passes isolated safety profile into the dry-run
+    phase and uses isolated read profile for post-write composer readback
+  - updated extension README and scaffold tests to lock the new safety contract
+  - updated global reusable skill:
+    `C:/Users/Zhangjinqian/.codex/skills/ide-extension-bounded-await-debug`
+    with the lesson that bounded await is not enough if command invocation
+    itself is unsafe
+- R253 live install and validation:
+  - controlled sync applied the updated extension to Cursor:
+    `logs/runtime/cursor-owned-live-r250-after-reboot/ide_extension_sync_r253_command_gate.json`
+  - backup directory:
+    `logs/runtime/cursor-owned-live-r250-after-reboot/ide-extension-backups-r253`
+  - after a final selected-handle policy correction, controlled sync was
+    applied again:
+    `logs/runtime/cursor-owned-live-r250-after-reboot/ide_extension_sync_r254_selected_handle_policy.json`
+  - final backup directory:
+    `logs/runtime/cursor-owned-live-r250-after-reboot/ide-extension-backups-r254`
+  - restarted the correct Cursor profile:
+    `E:/ideaProjects/agent/PaoPaoHeZi`
+  - final active registry:
+    `C:/Users/Zhangjinqian/AppData/Local/OpenWukong/ide-bridges/a0754ea87f8734e3307d9820.json`
+  - final bridge process id:
+    `40732`
+  - installed running extension source contains:
+    - `DANGEROUS_CURSOR_COMMANDS`
+    - `cursor_command_requires_isolated_profile`
+    - `cursor_draft_hook_read_requires_isolated_profile`
+  - live gate validation artifact:
+    `logs/runtime/cursor-owned-live-r250-after-reboot/cursor_live_r253_command_gate_validation.json`
+  - live gate result:
+    - `ok=true`
+    - capabilities before gate: HTTP `200`, about `76.74ms`
+    - default composer-state: HTTP `200`, `state_status=selected_only`
+    - direct dangerous command: HTTP `403`,
+      `error=cursor_command_requires_isolated_profile`
+    - draft hook without safety: HTTP `409`,
+      `error=cursor_draft_hook_read_requires_isolated_profile`
+    - capabilities after gate: HTTP `200`, about `18.225ms`
+    - `control_attempts=0`
+    - `window_input_attempts=0`
+    - `keyboard_input_attempts=0`
+    - `clipboard_write_attempts=0`
+  - final post-R254 live gate check:
+    - artifact:
+      `logs/runtime/cursor-owned-live-r250-after-reboot/cursor_live_r254_final_gate_check.json`
+    - `ok=true`
+    - capabilities: HTTP `200`
+    - direct dangerous command: HTTP `403`
+    - `error=cursor_command_requires_isolated_profile`
+    - running installed source contains the selected-handle policy correction:
+      `if (allowHandleRead && !commandSet.has(CURSOR_COMPOSER_HANDLE_COMMAND))`
+  - safe owned scratch command still works after the gate:
+    - artifact:
+      `logs/runtime/cursor-owned-live-r250-after-reboot/cursor_live_r253_scratch_after_gate.json`
+    - marker:
+      `OPENWUKONG_CURSOR_SCRATCH_R253_COMMAND_GATE_20260628`
+    - write/read both HTTP `200`
+    - marker readback verified
+- OpenAI Codex panel route discovery:
+  - live capabilities expose OpenAI/Codex extension commands such as:
+    - `chatgpt.addToThread`
+    - `chatgpt.addFileToThread`
+    - `chatgpt.newChat`
+    - `chatgpt.newCodexPanel`
+    - `chatgpt.openSidebar`
+    - `chatgpt.openCommandMenu`
+  - installed Codex extension:
+    `C:/Users/Zhangjinqian/.cursor/extensions/openai.chatgpt-26.5623.31443-win32-x64`
+  - local code inspection showed:
+    - `chatgpt.addToThread` adds the active editor/selection to context; it
+      does not accept prompt text
+    - `chatgpt.addFileToThread` adds file URI context
+    - `chatgpt.newChat` and `chatgpt.newCodexPanel` open/create UI surfaces;
+      they do not expose a direct prompt-send command contract
+    - webview assets support prefill through `shared-object-set` key
+      `composer_prefill` followed by an `open-vscode-command` message, but
+      that is a webview-message route, not a plain
+      `vscode.commands.executeCommand(...)` prompt-send route
+- current conclusion:
+  - background IDE bridge operation is now stable for:
+    - capabilities
+    - owned scratch write/read
+    - selected-only Cursor composer state
+    - rejecting dangerous Cursor private handle reads in normal profiles
+  - `composer.sendToAgent` dispatch can return successfully, but transcript
+    readback still has no marker proof
+  - the visible right-side agent is the OpenAI Codex extension panel, so the
+    next real breakthrough is not more `composer.sendToAgent` retries; it is a
+    Codex-extension-specific bridge or webview-message path for:
+    1. prefill/send prompt
+    2. observe thread/turn state
+    3. prove transcript/readback without foreground input
+- validation:
+  - focused tests:
+    `python -m unittest tests.test_ide_extension_scaffold tests.test_cursor_live_composer_state tests.test_cursor_draft_hook_validation tests.test_cursor_draft_hook_probe tests.test_ide_extension_connector`
+    with `36` tests OK
+  - related tests:
+    `python -m unittest tests.test_ide_extension_scaffold tests.test_cursor_live_composer_state tests.test_cursor_draft_hook_validation tests.test_cursor_draft_hook_probe tests.test_ide_extension_connector tests.test_ide_extension_readiness tests.test_cursor_attach_bridge_validation`
+    with `49` tests OK
+  - syntax:
+    `node --check extensions/openwukong-vscode/src/extension.js`
+    OK
+  - skill validation:
+    `quick_validate.py C:/Users/Zhangjinqian/.codex/skills/ide-extension-bounded-await-debug`
+    OK
+  - diff check:
+    `git diff --check` passed for touched files with only CRLF working-copy
+    warnings
+- next concrete actions:
+  1. build a Codex extension bridge/readback probe that targets the installed
+     `openai.chatgpt` extension and its webview/shared-object route, rather
+     than Cursor composer private commands
+  2. add a Codex-panel capability matrix that marks `chatgpt.addToThread` as
+     context-only and blocks treating it as a prompt-send command
+  3. promote "operate computer via IDE" only after a complete
+     `send + transcript/readback` proof exists for the Codex panel; until then
+     the validated level is stable background IDE bridge control, not full
+     arbitrary desktop operation
+
+## 2026-06-28 R255-R256: Codex extension command matrix and webview-route proof
+
+- user asked to continue after the Cursor bridge hardening work
+- context and rules:
+  - reread `.agents/README.md`
+  - reread `.agents/conversation_index.md`
+  - used the global `project-memory-snapshot` workflow; this file remains the
+    repository-owned durable memory for current project state
+  - official docs consulted before code changes:
+    - VS Code API documentation for extension commands, `vscode.extensions`,
+      and webview/extension-host boundaries
+  - OpenAI product handling:
+    - checked the locally installed OpenAI Codex extension first:
+      `C:/Users/Zhangjinqian/.cursor/extensions/openai.chatgpt-26.5623.31443-win32-x64`
+- implementation:
+  - added read-only endpoint:
+    `POST /v1/ide/codex/capabilities`
+  - endpoint inspects the installed `openai.chatgpt` extension through
+    `vscode.extensions.getExtension("openai.chatgpt")`
+  - endpoint classifies known Codex commands instead of treating them as
+    prompt-send commands:
+    - `chatgpt.addToThread`: `context_only`
+    - `chatgpt.addFileToThread`: `context_only`
+    - `chatgpt.newChat`: `surface_open`
+    - `chatgpt.newCodexPanel`: `surface_open`
+    - `chatgpt.openSidebar`: `surface_open`
+    - `chatgpt.openCommandMenu`: `surface_open`
+    - `chatgpt.showLspMcpCliArgs`: `diagnostic`
+  - endpoint reports:
+    - `prompt_send_ready`
+    - `requires_webview_bridge`
+    - `extension.exports` type and export keys
+    - contributed `chatgpt.*` commands
+    - zero control/window/keyboard/clipboard attempts
+  - added Python client method:
+    `IDEExtensionBridgeClient.read_codex_capabilities(...)`
+  - added read-only probe:
+    `openwukong.evaluation.codex_extension_bridge_probe`
+  - the probe scans the local installed Codex extension for route markers:
+    - `composer_prefill`
+    - `shared-object-set`
+    - `open-vscode-command`
+  - updated extension README and tests to lock the Codex command-role
+    contract
+- live validation:
+  - controlled sync applied the new bridge endpoint:
+    `logs/runtime/codex-extension-bridge-r255/ide_extension_sync_r255_codex_capabilities.json`
+  - after adding runtime export-key probing, controlled sync applied again:
+    `logs/runtime/codex-extension-bridge-r255/ide_extension_sync_r256_codex_exports.json`
+  - Cursor was restarted on the correct logged-in profile:
+    `E:/ideaProjects/agent/PaoPaoHeZi`
+  - final live bridge registry:
+    `C:/Users/Zhangjinqian/AppData/Local/OpenWukong/ide-bridges/08c4d25ccf4c4102de5eed67.json`
+  - final live bridge process id:
+    `59500`
+  - live probe artifact:
+    `logs/runtime/codex-extension-bridge-r255/codex_extension_bridge_probe_live_r256.json`
+  - live result:
+    - `ok=true`
+    - `decision=codex_extension_webview_bridge_required`
+    - `extension_installed=true`
+    - `extension_version=26.5623.31443`
+    - `prompt_send_ready=false`
+    - `requires_webview_bridge=true`
+    - `extension_exports_type=undefined`
+    - `extension_export_keys=[]`
+    - `control_attempts=0`
+    - `window_input_attempts=0`
+    - `keyboard_input_attempts=0`
+    - `clipboard_write_attempts=0`
+  - webview route snippet artifact:
+    `logs/runtime/codex-extension-bridge-r255/codex_webview_route_snippets_r256.json`
+  - route evidence:
+    - `out/extension.js` contains host-side handling for
+      `shared-object-set` and `open-vscode-command`
+    - `webview/assets/composer-BSCaQqMy.js` contains
+      `composer_prefill` and `prefillPrompt`
+    - `codex-micro-insert-composer-text` exists in the webview bundle and is
+      a DOM/webview-side event handler, not a VS Code command
+- current conclusion:
+  - the OpenAI Codex extension has no public prompt-send command exposed
+    through `vscode.commands`
+  - the OpenAI Codex extension exports no callable public extension API in the
+    live profile (`extension.exports` is `undefined`)
+  - the available route is webview/shared-object based:
+    - host handles `shared-object-set`
+    - webview consumes `composer_prefill`
+    - webview can ask host to run commands through `open-vscode-command`
+  - because VS Code does not expose a public API for one extension to post
+    arbitrary messages into another extension's webview, a complete Codex panel
+    send path needs a dedicated Codex-side bridge strategy rather than retries
+    through public `chatgpt.*` commands
+- validation:
+  - focused tests:
+    `python -m unittest tests.test_codex_extension_bridge_probe tests.test_ide_extension_connector tests.test_ide_extension_scaffold`
+    with `20` tests OK
+  - related tests:
+    `python -m unittest tests.test_codex_extension_bridge_probe tests.test_ide_extension_connector tests.test_ide_extension_scaffold tests.test_ide_extension_readiness tests.test_ide_extension_sync`
+    with `35` tests OK
+  - syntax:
+    `node --check extensions/openwukong-vscode/src/extension.js`
+    OK
+  - Python compile:
+    `python -m py_compile src/openwukong/evaluation/codex_extension_bridge_probe.py src/openwukong/connectors/ide_extension.py`
+    OK
+  - diff check:
+    `git diff --check` passed for the touched Codex bridge files with only
+    CRLF working-copy warnings
+- next concrete actions:
+  1. design a Codex-side bridge strategy that can set `composer_prefill` and
+     trigger `chatgpt.newChat/newCodexPanel` without foreground keyboard or
+     clipboard input
+  2. keep `chatgpt.addToThread` and `chatgpt.addFileToThread` permanently
+     marked as context-only, not prompt-send
+  3. only promote Codex panel operation after a live `send + transcript/readback`
+     marker proof exists through the Codex-specific bridge
+
+## 2026-06-28 R257: Codex webview/shared-object bridge strategy contract
+
+- user asked to continue from the Codex extension command-matrix work
+- context and rules:
+  - reread `.agents/README.md`
+  - reread `.agents/conversation_index.md`
+  - used the global `project-memory-snapshot` workflow; this file remains the
+    repository-owned durable memory for current project state
+  - official docs consulted before code changes:
+    - VS Code Webview API documentation for message-passing and webview
+      ownership boundaries
+- extra local inspection:
+  - inspected the installed OpenAI Codex extension URI handler around
+    `registerUriHandler`
+  - handler class `hI` only uses `uri.path` and calls
+    `codexWebviewProvider.navigateToRoute(path)`
+  - no URI/deep-link prompt or `composer_prefill` parameter contract was found
+  - snippet files written under:
+    `logs/runtime/codex-extension-bridge-r255/uri_handler_*.txt`
+- implementation:
+  - added dry-run strategy module:
+    `src/openwukong/evaluation/codex_webview_bridge_strategy.py`
+  - added tests:
+    `tests/test_codex_webview_bridge_strategy.py`
+  - the strategy report consumes the R256 Codex extension probe and classifies
+    all candidate routes:
+    - `public_vscode_prompt_command`: blocked because no `chatgpt.*` command
+      is classified as `prompt_send`
+    - `public_extension_exports_api`: blocked because live
+      `openai.chatgpt` has `extension.exports=undefined`
+    - `deep_link_prefill`: blocked because the URI handler only navigates by
+      path and exposes no prompt/prefill contract
+    - `cross_extension_webview_post_message`: blocked because VS Code does not
+      expose another extension's webview object for arbitrary `postMessage`
+    - `foreground_keyboard_or_clipboard`: rejected by the no-foreground and
+      no-clipboard operation contract
+    - `codex_side_shared_object_bridge`: selected as the only candidate route
+      because `composer_prefill`, `shared-object-set`, and
+      `open-vscode-command` markers are verified
+  - required contract now explicitly lists the future bridge steps:
+    1. run inside the Codex extension/webview boundary or an explicitly owned
+       patched Codex profile
+    2. set shared object key `composer_prefill` with text, cwd, and attachments
+    3. trigger `chatgpt.newChat` or `chatgpt.newCodexPanel` after prefill is
+       present
+    4. submit from Codex-side code without keyboard, mouse, or clipboard input
+    5. read thread or turn state and prove the marker appears in transcript or
+       response
+- live strategy validation:
+  - input probe artifact:
+    `logs/runtime/codex-extension-bridge-r255/codex_extension_bridge_probe_live_r256.json`
+  - strategy artifact:
+    `logs/runtime/codex-extension-bridge-r255/codex_webview_bridge_strategy_r257.json`
+  - result:
+    - `ok=true`
+    - `decision=codex_webview_bridge_strategy_ready`
+    - `recommended_strategy=codex_side_shared_object_bridge`
+    - `implementation_stage=dry_run_contract`
+    - `public_prompt_command_ready=false`
+    - `public_extension_api_ready=false`
+    - `webview_route_verified=true`
+    - `control_attempts=0`
+    - `window_input_attempts=0`
+    - `keyboard_input_attempts=0`
+    - `clipboard_write_attempts=0`
+- validation:
+  - focused tests:
+    `python -m unittest tests.test_codex_webview_bridge_strategy tests.test_codex_extension_bridge_probe`
+    with `4` tests OK
+  - related tests:
+    `python -m unittest tests.test_codex_webview_bridge_strategy tests.test_codex_extension_bridge_probe tests.test_ide_extension_connector tests.test_ide_extension_scaffold tests.test_ide_extension_readiness tests.test_ide_extension_sync`
+    with `37` tests OK
+  - Python compile:
+    `python -m py_compile src/openwukong/evaluation/codex_webview_bridge_strategy.py src/openwukong/evaluation/codex_extension_bridge_probe.py src/openwukong/connectors/ide_extension.py`
+    OK
+  - diff check:
+    `git diff --check` passed for the touched strategy files with only CRLF
+    working-copy warnings
+- current conclusion:
+  - the next build step should not target `vscode.commands`,
+    `extension.exports`, URI deep links, or foreground UI
+  - the only evidence-backed route is a Codex-side shared-object bridge that
+    runs within the Codex extension/webview boundary or an explicitly owned
+    patched Codex profile
+- next concrete actions:
+  1. build an isolated Codex-profile patch/sync mechanism that can add a
+     minimal Codex-side bridge without touching the user's normal Codex
+     extension install
+  2. implement the first bridge dry-run inside that isolated profile:
+     set `composer_prefill` only, verify it appears in composer state, and make
+     zero send attempts
+  3. only after prefill readback is proven, add Codex-side submit and transcript
+     marker readback
+
+## 2026-06-28 R258: Isolated Codex bridge patch/sync mechanism
+
+- user asked to continue after Windows reboot and after the correct Cursor/Codex
+  bridge process was available
+- context and rules:
+  - reread `.agents/README.md`
+  - reread `.agents/conversation_index.md`
+  - used the global `project-memory-snapshot` workflow; this file remains the
+    repository-owned durable memory for current project state
+  - official docs consulted before code changes:
+    - VS Code command API documentation for `registerCommand` command
+      contribution/runtime behavior
+    - VS Code Webview API documentation for webview ownership/message
+      boundaries
+- implementation:
+  - added isolated Codex bridge patch module:
+    `src/openwukong/evaluation/codex_isolated_bridge_patch.py`
+  - added tests:
+    `tests/test_codex_isolated_bridge_patch.py`
+  - the patch mechanism:
+    - treats the normal Cursor/VS Code extension profile as read-only
+    - blocks any isolated root under normal extension roots such as
+      `.cursor/extensions` and `.vscode/extensions`
+    - validates the live Codex extension markers:
+      `composer_prefill`, `shared-object-set`, and `open-vscode-command`
+    - validates the concrete Codex entrypoint insertion anchor:
+      `e.push(Ue);let _e=new hI(Ue);`
+    - copies the Codex extension only into an explicit isolated root when
+      `--apply` is passed
+    - patches only the isolated copy with command:
+      `openwukong.codexBridge.prefillDryRun`
+    - command behavior is intentionally prefill-only:
+      writes shared object key `composer_prefill`, broadcasts
+      `shared-object-updated`, and returns zero send/control/keyboard/
+      clipboard attempts
+    - writes an isolated manifest:
+      `openwukong-codex-bridge-manifest.json`
+    - reports `codex_extension_source_not_found` when automatic extension
+      discovery fails instead of treating the current repository as a source
+- live isolated patch validation:
+  - source Codex extension:
+    `C:/Users/Zhangjinqian/.cursor/extensions/openai.chatgpt-26.5623.31443-win32-x64`
+  - source version:
+    `26.5623.31443`
+  - live dry-run artifact:
+    `logs/runtime/codex-extension-bridge-r258/codex_isolated_bridge_patch_dry_run.json`
+  - live apply artifact:
+    `logs/runtime/codex-extension-bridge-r258/codex_isolated_bridge_patch_applied.json`
+  - isolated patched extension:
+    `logs/runtime/codex-extension-bridge-r258/isolated-extensions/openai.chatgpt-26.5623.31443-win32-x64`
+  - result:
+    - `ok=true`
+    - `decision=codex_isolated_bridge_patch_applied`
+    - `normal_profile_touched=false`
+    - `write_attempts=3`
+    - `copy_attempts=1`
+    - `patch_attempts=1`
+    - `send_attempts=0`
+    - `control_attempts=0`
+    - `window_input_attempts=0`
+    - `keyboard_input_attempts=0`
+    - `clipboard_write_attempts=0`
+  - second-pass verification:
+    - isolated copy contains `OPENWUKONG_CODEX_BRIDGE_PATCH_V1`
+    - isolated copy contains `openwukong.codexBridge.prefillDryRun`
+    - normal source extension does not contain the OpenWukong patch marker
+    - isolated manifest exists and records zero send/control/input attempts
+- validation:
+  - focused tests:
+    `python -m unittest tests.test_codex_isolated_bridge_patch tests.test_codex_webview_bridge_strategy tests.test_codex_extension_bridge_probe`
+    with `9` tests OK
+  - related tests:
+    `python -m unittest tests.test_codex_isolated_bridge_patch tests.test_codex_webview_bridge_strategy tests.test_codex_extension_bridge_probe tests.test_ide_extension_connector tests.test_ide_extension_scaffold tests.test_ide_extension_readiness tests.test_ide_extension_sync`
+    with `42` tests OK
+  - Python compile:
+    `python -m py_compile src/openwukong/evaluation/codex_isolated_bridge_patch.py src/openwukong/evaluation/codex_webview_bridge_strategy.py src/openwukong/evaluation/codex_extension_bridge_probe.py`
+    OK
+  - JavaScript syntax:
+    `node --check logs/runtime/codex-extension-bridge-r258/isolated-extensions/openai.chatgpt-26.5623.31443-win32-x64/out/extension.js`
+    OK
+  - diff/whitespace:
+    `git diff --check` passed for tracked touched files
+    - direct trailing-whitespace scan over the two new files produced no
+      matches
+  - Git hygiene:
+    - `logs/` is ignored by `.gitignore`
+    - the 724 MB isolated Codex copy under `logs/runtime` does not appear in
+      `git status`
+- current conclusion:
+  - we now have a safe isolated patched Codex extension copy that can be used
+    for the first real `composer_prefill` bridge experiment
+  - no normal Cursor/Codex extension install was modified
+- next concrete actions:
+  1. launch a Cursor/Codex test profile that uses the isolated extension root
+     instead of the normal `.cursor/extensions` root
+  2. execute `openwukong.codexBridge.prefillDryRun` against that isolated
+     profile through the owned IDE bridge and prove `composer_prefill` readback
+     in composer state
+  3. only after prefill readback is proven, add a second isolated command for
+     Codex-side submit and transcript marker readback
+
+## 2026-06-28 R259 - Codex app-server real send probe
+
+- scope:
+  - validate a real Codex app-server send path without foreground desktop
+    input
+  - use the bundled local Codex CLI instead of touching the live Codex
+    Desktop stdio app-server process
+- verified environment:
+  - live Codex Desktop process is backed by:
+    `C:/Program Files/WindowsApps/OpenAI.Codex_26.623.5546.0_x64__2p2nqsd0c76g0/app/resources/codex.exe app-server --analytics-default-enabled`
+  - direct WindowsApps binary execution from PowerShell is blocked by
+    Windows permissions
+  - bundled local Codex CLI is available at:
+    `C:/Users/Zhangjinqian/AppData/Local/OpenAI/Codex/bin/aec6b7c6fcdfb66a/codex.exe`
+  - `codex --version` reports `codex-cli 0.142.3`
+  - `codex app-server --help` supports `--listen <URL>` including
+    `ws://IP:PORT`
+- readiness result:
+  - launched an ephemeral loopback app-server with:
+    `codex app-server --listen ws://127.0.0.1:57232`
+  - `probe_codex_app_server_ws` returned:
+    - `ok=true`
+    - `decision=codex_app_server_ws_ready`
+    - `thread_list_ok=true`
+    - `initialize_ok=true`
+    - `control_attempts=0`
+    - `window_input_attempts=0`
+  - artifact:
+    `logs/runtime/codex-real-send-r259/ephemeral_ws_readiness.json`
+- real send result:
+  - launched a second ephemeral loopback app-server with:
+    `codex app-server --listen ws://127.0.0.1:62497`
+  - created a real Codex thread for this repository:
+    `019f0c7f-7582-7831-956f-d1d2c7caf578`
+  - `windowsSandbox/readiness` returned `status=ready`
+  - called `turn/start` with marker:
+    `OPENWUKONG_REAL_SEND_R259_20260628T123147`
+  - created turn:
+    `019f0c7f-8176-77d2-86f9-e6a89b625b28`
+  - `app_server_thread_start_attempts=1`
+  - `app_server_turn_start_attempts=1`
+  - `control_attempts=0`
+  - `window_input_attempts=0`
+  - artifact:
+    `logs/runtime/codex-real-send-r259/codex_real_send_actual.json`
+- observed failure:
+  - the send reached Codex and wrote a session JSONL under:
+    `C:/Users/Zhangjinqian/.codex/sessions/2026/06/28/rollout-2026-06-28T12-31-47-019f0c7f-7582-7831-956f-d1d2c7caf578.jsonl`
+  - the session contains the user marker request and a `token_count` event
+  - that `token_count` event reports:
+    `credits.has_credits=false`, `credits.unlimited=false`, and
+    `credits.balance=0`
+  - the thread then emitted `thread/status/changed` with `systemError`
+  - no assistant delta or marker readback was produced
+- conclusion:
+  - the no-foreground app-server send path reached `thread/start` and
+    `turn/start`
+  - the remaining blocker for transcript marker readback is the Codex account
+    credit state, not local bridge delivery
+  - the ephemeral WS app-server process was terminated after the probe and left
+    no live helper process
+- next concrete actions:
+  1. restore usable Codex credits/account state and rerun the same marker-only
+     real send probe
+  2. after assistant marker readback succeeds, promote the ephemeral WS
+     app-server launcher/cleanup path into a first-class connector
+  3. update connector metadata and foreground gates so owned ephemeral
+     loopback app-servers are not misclassified as live foreground Desktop UI
+
+## 2026-06-28 R260-R262 - Codex app-server real send verified
+
+- user asked to retry after the previous Codex credit blocker
+- rerun basis:
+  - used the bundled local Codex CLI:
+    `C:/Users/Zhangjinqian/AppData/Local/OpenAI/Codex/bin/aec6b7c6fcdfb66a/codex.exe`
+  - used ephemeral loopback `codex app-server --listen ws://127.0.0.1:<port>`
+  - did not touch the live Codex Desktop stdio app-server process
+  - used `approvalPolicy=never` and read-only sandbox policy
+  - all probes kept:
+    - `control_attempts=0`
+    - `window_input_attempts=0`
+- R260:
+  - artifact:
+    `logs/runtime/codex-real-send-r260/codex_real_send_actual.json`
+  - result was initially reported as success, but stricter inspection showed
+    the marker hit came from `userMessage` echo, not assistant output
+  - R260 is not accepted as assistant readback proof
+  - this exposed a reusable parser requirement:
+    marker validation must count only `item/agentMessage/delta`,
+    assistant `response_item`, or `task_complete.last_agent_message`
+- R261:
+  - artifact:
+    `logs/runtime/codex-real-send-r261/codex_real_send_actual.json`
+  - real thread:
+    `019f0ca2-76a6-78b2-b21a-d199db1d4b9e`
+  - real turn:
+    `019f0ca2-839c-7bc2-a5fa-576f7a6b479c`
+  - assistant delta text:
+    `OPENWUKONG_REAL_SEND_R261_20260628T131001`
+  - `turn_status=completed`
+  - `system_error_seen=false`
+  - strict assistant marker readback was verified
+  - foreground hwnd changed during the run:
+    - before: Codex window, hwnd `394890`
+    - after: Weixin window, hwnd `132456`
+  - because of that foreground change, R261 proves send/readback but is not
+    used as no-foreground stability proof
+- R262:
+  - artifact:
+    `logs/runtime/codex-real-send-r262/codex_real_send_actual.json`
+  - real thread:
+    `019f0ca4-0c52-7dc2-9b04-de368e1b224f`
+  - real turn:
+    `019f0ca4-1810-7070-8090-1a8263ce1b10`
+  - assistant delta text:
+    `OPENWUKONG_REAL_SEND_R262_20260628T131145`
+  - `assistant_marker_seen_in_delta=true`
+  - `assistant_marker_seen_in_session=true`
+  - `turn_done=true`
+  - `turn_status=completed`
+  - `system_error_seen=false`
+  - `foreground_hwnd_before=394890`
+  - `foreground_hwnd_after=394890`
+  - `foreground_focus_stable=true`
+  - no live ephemeral app-server process remained after cleanup
+- current conclusion:
+  - the owned ephemeral Codex app-server WS path can now:
+    1. start a real thread for the repository
+    2. call real `turn/start`
+    3. receive assistant `item/agentMessage/delta`
+    4. verify exact assistant marker readback
+    5. complete without foreground focus change in the accepted R262 run
+  - this is the first accepted end-to-end Codex app operation proof through a
+    product-native app-server transport, not keyboard/mouse/clipboard
+  - reusable validation pattern was promoted into a global skill:
+    `C:/Users/Zhangjinqian/.codex/skills/codex-app-server-marker-readback-debug/SKILL.md`
+    - `quick_validate.py` passed
+- next concrete actions:
+  1. promote the ephemeral WS app-server launcher/cleanup and strict assistant
+     readback parser into first-class connector code with regression tests
+  2. fix connector metadata/gating so owned loopback app-server endpoints are
+     classified separately from live Windows Desktop app-server foreground risk
+  3. update the readiness matrix so Codex App moves from blocked/dry-run to
+     background native app-server send/readback ready when the strict contract
+     passes
+
+## 2026-06-28 R263-R265 - Codex app-server first-class connector promoted
+
+- continued the owned ephemeral Codex app-server work after R262
+- code promoted the ephemeral app-server path into first-class connector logic:
+  - owned `codex app-server --listen ws://127.0.0.1:<port>` launcher/cleanup
+  - owned endpoint metadata:
+    - `surface_kind=owned_ephemeral_app_server`
+    - `owned_loopback_app_server=true`
+    - `turn_start_foreground_safe=true`
+    - `force_fresh_thread_start=true`
+  - readiness matrix accepts Codex app-server send only after strict
+    `turn/start` verification
+- R263 real integrated run:
+  - artifact:
+    `logs/runtime/codex-app-server-integrated-r263/integrated_real_send_r263.json`
+  - failed because a stale R262 thread from `thread/list useStateDbOnly=true`
+    was reused and the fresh app-server returned `thread not found`
+  - fix: owned ephemeral app-server now forces fresh `thread/start`
+- R264 real integrated run:
+  - artifact:
+    `logs/runtime/codex-app-server-integrated-r264/integrated_real_send_r264.json`
+  - created a new thread and real turn
+  - WebSocket notifications did not deliver `turn/completed`, so the runner
+    initially reported `codex_app_server_turn_start_completion_missing`
+  - later evidence from the real session JSONL proved assistant completion:
+    - assistant `response_item`
+    - `event_msg.task_complete.last_agent_message`
+    - exact marker:
+      `OPENWUKONG_REAL_SEND_R264_20260628T132940`
+  - fix: strict session fallback was added, counting only assistant-owned
+    records and never request/user echoes
+- R265 real integrated run:
+  - artifact:
+    `logs/runtime/codex-app-server-integrated-r265/integrated_real_send_r265.json`
+  - marker:
+    `OPENWUKONG_REAL_SEND_R265_20260628T133942`
+  - result:
+    - `decision=codex_app_server_turn_start_verified`
+    - `codex_app_server_thread_start_verified=true`
+    - `codex_app_server_turn_start_verified=true`
+    - transport matrix `send_ready=true`
+    - strict assistant/session readback verified
+    - `control_attempts=0`
+    - `window_input_attempts=0`
+    - `foreground_no_steal_verified=true`
+  - temporary owned app-server process was stopped after the run
+- validation:
+  - focused Codex/app-server suite: 107 tests OK
+  - wider control suite: 185 tests OK
+  - `py_compile` OK for touched modules
+  - `git diff --check` OK except existing CRLF normalization warnings
+- reusable learning:
+  - updated global skill:
+    `C:/Users/Zhangjinqian/.codex/skills/codex-app-server-marker-readback-debug/SKILL.md`
+  - created project memory snapshot:
+    `docs/project-memory-snapshot.md`
+- current conclusion:
+  - Codex now has a verified background native app-server send/readback path
+    for real messages
+  - this reaches "operate the app through a product-native transport" for
+    Codex, not arbitrary OS-level mouse/keyboard takeover
+- next concrete actions:
+  1. use the same first-class connector standard for Cursor owned bridge /
+     browser DevTools paths
+  2. add a concise Computer Operation Readiness Matrix view that surfaces
+     Codex as `background_execute_verified`
+  3. keep foreground UIA/desktop input gated as fallback, not the primary route
+
+## 2026-06-28 R266 - Computer Operation Matrix surfaces Codex verified background execution
+
+- continued after R265 by promoting the verified Codex app-server proof into
+  the plan-only Computer Operation Readiness Matrix
+- implementation:
+  - added a first-class `codex` surface to
+    `src/openwukong/evaluation/computer_operation_readiness_matrix.py`
+  - added `operation_status` and `verified` fields per surface
+  - Codex keeps `readiness_level=background_execute` for compatibility, and
+    adds `operation_status=background_execute_verified` only when strict
+    app-server turn evidence passes
+  - CLI now accepts `--codex-app-server-turn-start-report`
+    - it can read either a bare turn/start report or a full integrated artifact
+    - R265 artifact is accepted directly
+- strict Codex matrix requirements:
+  - `decision=codex_app_server_turn_start_verified`
+  - `turn_completed=true`
+  - `turn_status=completed`
+  - required marker appears in assistant readback
+  - no missing required markers
+  - no forbidden markers
+  - `foreground_no_steal_verified=true`
+  - `control_attempts=0`
+  - `window_input_attempts=0`
+  - exactly one app-server turn/start attempt
+- generated R266 artifact:
+  `logs/runtime/computer-operation-status-r266/computer_operation_readiness_r266.json`
+  - summary `background_execute_verified_surfaces=["codex"]`
+  - Codex `operation_status=background_execute_verified`
+  - Codex `verified=true`
+  - matrix `control_attempts=0`
+- validation:
+  - `tests.test_computer_operation_readiness_matrix`: 5 tests OK
+  - related suite:
+    `tests.test_computer_operation_readiness_matrix`
+    `tests.test_objective_readiness_matrix`
+    `tests.test_agent_app_transport_matrix`
+    `tests.test_agent_app_real_no_loss`
+    - 49 tests OK
+  - `py_compile` OK for the matrix module
+  - `git diff --check` OK for touched files except existing CRLF warning on
+    `.agents/conversation_index.md`
+- current conclusion:
+  - Codex is now visibly classified as a verified background-execute surface
+    in the project-level operation matrix
+  - Terminal/Git remain background-execute ready by deterministic connector
+  - Browser/Cursor/WeChat/Office remain unverified or blocked until their own
+    owned/background evidence passes
+- next concrete actions:
+  1. run the same owned/background verification standard for Cursor owned
+     bridge and browser DevTools
+  2. when each passes, feed their artifacts into the matrix rather than
+     manually marking them ready
+  3. keep Generic Desktop foreground-required until a semantic native route is
+     proven
+
+## 2026-06-28 R267 - Browser DevTools verified and promoted into operation matrix
+
+- selected Browser DevTools as the next surface after Codex because it already
+  has an owned isolated helper path and does not depend on user login state
+- code changes:
+  - extended `ComputerOperationReadinessOptions` with
+    `owned_browser_demo_report`
+  - added CLI flag `--owned-browser-demo-report`
+  - Browser remains blocked/ready-only by default, but upgrades to:
+    - `readiness_level=background_execute`
+    - `operation_status=background_execute_verified`
+    - `verified=true`
+    only when an owned browser demo artifact passes strict checks
+- strict Browser verification requires:
+  - `decision=owned_browser_demo_verified`
+  - `safety_mode=isolated_owned_browser_devtools`
+  - Browser workflow `ok=true`
+  - workflow quality summary has `failed=0` and passed checks
+  - owned DevTools launch result started
+  - manifest stop succeeded
+  - profile cleanup deleted the isolated profile
+  - `desktop_control_attempts=0`
+  - `window_input_attempts=0`
+  - Browser CDP control attempts are present for real DOM operation
+- real R267 run:
+  - command launched isolated headless Chrome with loopback DevTools
+  - marker:
+    `OPENWUKONG_OWNED_BROWSER_R267`
+  - browser demo artifact:
+    `logs/runtime/owned-browser-safe-operation-demo-r267/owned_browser_safe_operation_demo.json`
+  - result:
+    - `decision=owned_browser_demo_verified`
+    - `control_attempts=3`
+    - `desktop_control_attempts=0`
+    - `window_input_attempts=0`
+    - workflow steps:
+      `navigate_url`, `set_input_value`, `submit_form`, `read_page`,
+      `extract_results`
+    - quality summary: `passed=6`, `failed=0`
+    - manifest stop succeeded
+    - isolated profile cleanup deleted the profile
+  - residual process check found no R267 Chrome/helper process; only the
+    current PowerShell check command matched its own command line
+- generated matrix:
+  `logs/runtime/computer-operation-status-r267/computer_operation_readiness_r267.json`
+  - summary `background_execute_verified_surfaces=["codex","browser"]`
+  - background execute surfaces:
+    `["codex","browser","terminal","git"]`
+  - verified background execute count: `2`
+  - matrix `control_attempts=0`
+- validation:
+  - `tests.test_computer_operation_readiness_matrix`: 7 tests OK
+  - related browser/matrix suite:
+    `tests.test_computer_operation_readiness_matrix`
+    `tests.test_owned_browser_safe_operation_demo`
+    `tests.test_browser_devtools_action`
+    `tests.test_browser_devtools_health`
+    `tests.test_browser_devtools_dom_probe`
+    `tests.test_control_fabric_browser_workflow`
+    `tests.test_agent_app_transport_matrix`
+    - 43 tests OK
+  - `py_compile` OK for touched Browser/matrix modules
+  - `git diff --check` OK except existing CRLF warning on
+    `.agents/conversation_index.md`
+- current conclusion:
+  - Browser is now the second verified background-execute surface after Codex
+  - verified surfaces now cover:
+    - Codex app-server text send/readback
+    - owned Browser DevTools DOM operation/readback
+  - Terminal/Git remain deterministic background-execute ready but not yet
+    artifact-marked as `background_execute_verified`
+- next concrete actions:
+  1. run the same evidence standard for Cursor owned bridge
+  2. then decide whether Terminal/Git need explicit verified artifact status or
+     whether deterministic command connector readiness is enough for this stage
+  3. keep Office/WeChat/Generic Desktop blocked or foreground-required until
+     owned native routes pass equivalent proofs
+
+## 2026-06-28 R268-R270 - IDE matrix verification and Cursor attach-only correction
+
+- R268 promoted owned IDE live bridge evidence into the Computer Operation
+  Readiness Matrix:
+  - accepted artifact:
+    `logs/runtime/owned-ide-live-bridge-demo-r246/owned_ide_live_bridge_demo.json`
+  - generated matrix:
+    `logs/runtime/computer-operation-status-r268/computer_operation_readiness_r268.json`
+  - summary:
+    `background_execute_verified_surfaces=["codex","browser","ide"]`
+  - verified background execute count: `3`
+  - matrix `control_attempts=0`
+- implementation:
+  - `ComputerOperationReadinessOptions` now accepts `owned_ide_demo_report`
+  - matrix CLI accepts `--owned-ide-demo-report`
+  - IDE only becomes `operation_status=background_execute_verified` when
+    strict owned live bridge evidence passes:
+    owned scratch workspace binding, `openwukong.writeScratch`, readback,
+    quality checks, ownership gate, and zero desktop/window/keyboard/clipboard
+    input
+  - status report now passes owned browser/IDE matrix evidence, not just bridge
+    URLs, when it discovers runtime artifacts
+- Cursor process correction:
+  - attempted isolated Cursor validation with `--user-data-dir` created an
+    unauthenticated Cursor login window
+  - that route is not suitable for the user's already logged-in Cursor workflow
+  - removed stale isolated bridge registry:
+    `C:/Users/Zhangjinqian/AppData/Local/OpenWukong/ide-bridges/4c1cfd516bb01beeb08af937.json`
+  - retained correct live bridge:
+    `http://127.0.0.1:8787`
+  - correct bridge is registered in:
+    `C:/Users/Zhangjinqian/AppData/Local/OpenWukong/ide-bridges/08c4d25ccf4c4102de5eed67.json`
+  - correct bridge is bound to:
+    `E:/ideaProjects/agent/PaoPaoHeZi`
+- registry hardening:
+  - IDE bridge discovery now filters by workspace identity when target
+    `workspace_path` is provided
+  - same-family Cursor bridges from different workspaces are no longer accepted
+  - legacy registry entries without workspace identity are rejected for
+    workspace-specific attach
+- R270 attach-only run:
+  - artifact:
+    `logs/runtime/cursor-attach-r270-correct-bridge/cursor_attach_r270_correct_bridge.json`
+  - no launch attempts
+  - no stop attempts
+  - `control_attempts=0`
+  - `window_input_attempts=0`
+  - foreground stayed stable on Codex
+  - bridge readiness passed against `http://127.0.0.1:8787`
+  - draft-hook dry-run timed out after 8 seconds on live `PaoPaoHeZi`
+- validation:
+  - focused related tests:
+    `python -m unittest tests.test_computer_operation_readiness_matrix tests.test_computer_operation_status_report tests.test_owned_ide_live_bridge_demo tests.test_owned_ide_safe_operation_demo tests.test_owned_browser_safe_operation_demo tests.test_ide_bridge_registry tests.test_cursor_attach_bridge_validation tests.test_cursor_isolated_draft_hook_runner tests.test_cursor_draft_hook_probe tests.test_cursor_draft_hook_validation`
+    with `46` tests OK
+  - `py_compile` OK for touched matrix/status/registry/Cursor attach modules
+  - `git diff --check` reported only existing CRLF normalization warnings
+- current conclusion:
+  - Codex, Browser, and IDE now have artifact-backed verified background
+    execution status in the matrix
+  - live Cursor should now be handled through attach-only `8787`, not by
+    launching an isolated profile
+  - the next real Cursor blocker is live draft-hook latency/timeout, not
+    workspace or bridge selection
+- next concrete actions:
+  1. fix/bound `/v1/ide/cursor/draft-hook` on the live logged-in
+     `PaoPaoHeZi` bridge without starting a new Cursor process
+  2. add a strict attach-only Cursor send/readback artifact after the bounded
+     route passes
+  3. keep isolated Cursor profile launch disabled for the normal logged-in
+     workflow unless the user explicitly asks for isolated-profile testing
+
+## 2026-06-28 R271 - Live Cursor attach-only fix and real dispatch proof
+
+- trigger:
+  - user corrected that the previous isolated Cursor process was the wrong
+    login window and that the correct logged-in Cursor process was already
+    open
+- root cause review:
+  - R248 fixed unbounded `/v1/ide/chat` awaits
+  - R253 gated dangerous Cursor private handle reads
+  - the remaining R270 timeout happened because draft-hook still read the VS
+    Code command registry before rejecting or selecting the safe profile; a
+    stale/poisoned command service could therefore block even an intended
+    fast rejection
+  - a second failure layer appeared during recovery: an empty Cursor window
+    auto-started an OpenWukong bridge on `8789` with no workspace identity
+- implementation:
+  - added `live_cursor_attach_draft_probe` for attach-only dry-runs against
+    the existing logged-in Cursor bridge
+  - `/v1/ide/cursor/draft-hook` now validates unsafe safety profiles before
+    `vscode.commands.getCommands(true)`
+  - added bounded command discovery via
+    `openwukong.bridge.cursorDraftHookCommandAwaitTimeoutMs`
+  - live attach dry-run checks a low-risk `composer.createNew` route and does
+    not read `composer.getComposerHandleById`
+  - live attach writes remain blocked; private handle reads remain
+    isolated-profile-only
+  - added `openwukong.bridge.autoStartRequiresWorkspace=true` so empty Cursor
+    windows do not publish workspace-less bridge endpoints
+  - synced the updated extension into:
+    `C:/Users/Zhangjinqian/.cursor/extensions/openwukong-local.openwukong-vscode-bridge-0.1.0`
+    with backups under `logs/runtime/cursor-attach-r271/`
+- live correction:
+  - stopped only the stale Cursor NodeService that owned the old 8787 bridge,
+    then restored the correct `PaoPaoHeZi` workspace bridge
+  - stopped the empty-workspace 8789 bridge and removed only its registry file
+  - final registry set contains only:
+    `C:/Users/Zhangjinqian/AppData/Local/OpenWukong/ide-bridges/10fe1fa3e9302e323b861bc8.json`
+  - final correct bridge:
+    `http://127.0.0.1:8787`
+  - final workspace:
+    `E:/ideaProjects/agent/PaoPaoHeZi`
+- validation artifacts:
+  - attach-only:
+    `logs/runtime/cursor-attach-r271/cursor_attach_r271_final.json`
+    - `decision=cursor_attach_bridge_dry_run_ready`
+    - `ok=true`
+    - `launch_attempts=0`
+    - `window_input_attempts=0`
+    - `foreground_changed=false`
+    - dry-run response:
+      `cursor_draft_hook_live_attach_ready`
+      with `handle_read_allowed=false`
+  - real Cursor Agent dispatch:
+    `logs/runtime/cursor-attach-r271/cursor_agent_send_r271_final.json`
+    - `decision=cursor_agent_send_dispatched`
+    - `ok=true`
+    - `command_id=composer.sendToAgent`
+    - `dispatch_status=resolved`
+    - `chat_elapsed_ms=30.519`
+    - `scratch_readback_verified=true`
+    - `window_input_attempts=0`
+    - `keyboard_input_attempts=0`
+    - `clipboard_write_attempts=0`
+    - `foreground_changed=false`
+  - final bridge state:
+    - `8787` is live and workspace-bound
+    - `8789` did not respawn after the autoStart workspace guard
+- validation:
+  - focused suite:
+    `python -m unittest tests.test_ide_extension_scaffold tests.test_cursor_draft_hook_probe tests.test_cursor_draft_hook_validation tests.test_cursor_attach_bridge_validation tests.test_ide_extension_connector tests.test_ide_extension_readiness tests.test_ide_extension_sync tests.test_ide_bridge_registry tests.test_computer_operation_readiness_matrix tests.test_computer_operation_status_report tests.test_owned_ide_live_bridge_demo`
+    with `70` tests OK
+  - `node --check extensions/openwukong-vscode/src/extension.js` passed
+  - `py_compile` passed for touched Python modules
+  - `git diff --check` reported only CRLF normalization warnings
+- reusable learning:
+  - updated global skill:
+    `C:/Users/Zhangjinqian/.codex/skills/ide-extension-bounded-await-debug/SKILL.md`
+  - added patterns for:
+    1. rejection paths hanging before they reject
+    2. empty IDE windows publishing workspace-less bridges
+- next concrete actions:
+  1. add strict Cursor transcript/readback proof after `composer.sendToAgent`
+     without active-profile private handle reads
+  2. promote R271 live Cursor dispatch evidence into the readiness matrix once
+     transcript/readback acceptance criteria are defined
+  3. keep isolated Cursor launches disabled for the normal logged-in workflow
+
+## 2026-06-28 R272 - Strict Cursor assistant transcript gate and dispatch-only negative proof
+
+- trigger:
+  - user asked to continue after correcting that the previously opened Cursor
+    login window was the wrong process and that the correct logged-in Cursor
+    bridge was already running
+- implementation:
+  - tightened `cursor_transcript_readback` from broad marker search to
+    role-aware marker evidence
+  - default acceptance now requires `required_response_role=assistant`
+  - Cursor `bubbleId... type=1` is classified as user-side
+  - Cursor `bubbleId... type=2` is classified as assistant-side
+  - `composerData`, `messageRequestContext`, prompt blobs, and ambiguous
+    `agentKv:blob` hits no longer satisfy final assistant readback
+  - exact marker scanning now also checks `bubbleId`, `messageRequestContext`,
+    `composerData`, and `agentKv:blob` rows so selected-composer drift does not
+    hide diagnostic hits
+  - CLI gained `--required-response-role` and `--allow-any-role`; the latter
+    is discovery-only
+- false-positive review:
+  - historical `OPENWUKONG_CURSOR_REAL_SEND_R75` was reclassified as
+    `cursor_transcript_readback_non_response_marker_only`
+  - the marker existed in:
+    - `agentKv:blob:6048a022...` as ambiguous prompt/request content
+    - `bubbleId:a9a6e98f... type=1` user `text` / `richText`
+  - no assistant-side marker location was present
+- real R272 send:
+  - artifact:
+    `logs/runtime/cursor-transcript-r272/cursor_agent_strict_readback_r272.json`
+  - marker:
+    `OPENWUKONG_CURSOR_AGENT_STRICT_R272_20260628T144055`
+  - route:
+    existing logged-in Cursor bridge `http://127.0.0.1:8787`
+    bound to `E:/ideaProjects/agent/PaoPaoHeZi`
+  - result:
+    - `command_id=composer.sendToAgent`
+    - `dispatch_status=resolved`
+    - strict transcript result:
+      `cursor_agent_assistant_transcript_readback_pending`
+    - after `22` polls / about `120` seconds:
+      `required_markers_found=[]`
+    - `required_markers_found_anywhere=[]`
+    - `response_marker_locations=[]`
+    - scanned keys only contained current `composerData`
+  - no Cursor process was launched
+  - no keyboard, mouse, clipboard, or foreground UI input path was used
+- validation:
+  - `python -m unittest tests.test_cursor_transcript_readback`
+    with `6` tests OK
+  - `python -m unittest tests.test_cursor_transcript_readback
+    tests.test_agent_app_real_no_loss tests.test_ide_extension_connector
+    tests.test_ide_bridge_capture tests.test_ide_bridge_contract_probe`
+    with `75` tests OK
+  - `py_compile` passed for
+    `src/openwukong/evaluation/cursor_transcript_readback.py` and
+    `tests/test_cursor_transcript_readback.py`
+- reusable learning:
+  - updated global skill:
+    `C:/Users/Zhangjinqian/.codex/skills/ide-extension-bounded-await-debug/SKILL.md`
+  - added the pattern that dispatch `resolved` is not assistant completion and
+    marker acceptance must require assistant/response-side evidence
+- current conclusion:
+  - Cursor dispatch is not the same as operation completion
+  - `composer.sendToAgent` can return resolved while neither the user marker
+    nor an assistant marker appears in the readable local transcript stores
+  - do not promote R271/R272 Cursor Agent dispatch to
+    `background_execute_verified`
+- next concrete actions:
+  1. stop spending primary effort on more `composer.sendToAgent` retries
+  2. build a verifiable Cursor native composer/draft-submit hook or locate an
+     official/readable transcript surface that exposes assistant response rows
+  3. keep the strict assistant transcript gate as the acceptance condition for
+     any future Cursor Agent send proof
+
+## 2026-06-28 R273/R274 - Cursor draft write verified, Glass Agent query proven prefill-only
+
+- trigger:
+  - user asked to continue after the correct logged-in Cursor window was open
+    and allowed real send validation
+  - previous attempts had accidentally opened an unauthenticated Cursor login
+    window, so all live work stayed on the registered `PaoPaoHeZi` bridge
+- R273 implementation:
+  - added `live_cursor_attach_draft_write_probe` as an explicit live safety
+    profile for Cursor draft writes
+  - live draft writes use `composer.createNew` with `skipShowAndFocus`,
+    `skipSelect`, `openInNewTab=false`, and Agent-mode `partialState`
+  - live draft readback uses local Cursor storage with
+    `required_response_role=user`; it does not read private composer handles
+    in the user's active profile
+- R273 live result:
+  - artifact:
+    `logs/runtime/cursor-draft-r273/live_draft_validation.json`
+  - decision:
+    `cursor_draft_hook_validated`
+  - marker:
+    `OPENWUKONG_CURSOR_LIVE_DRAFT_R273_20260628T165752`
+  - `draft_write_attempts=1`
+  - `window_input_attempts=0`
+  - `foreground_changed=false`
+  - marker found in Cursor `composerData` user/draft-side state
+  - conclusion: Cursor background draft injection is verified, but this is not
+    assistant completion
+- R274 implementation:
+  - added dedicated endpoint:
+    `/v1/ide/cursor/glass-agent-query`
+  - added safety profile:
+    `live_cursor_glass_agent_query_probe`
+  - added Python probe and strict validation:
+    `cursor_glass_agent_query_probe.py`
+    and `cursor_glass_agent_query_validation.py`
+  - validation accepts completion only when assistant-side transcript readback
+    finds the required marker; `user_marker_only` is explicitly incomplete
+  - validation now supports `--required-marker` so the prompt may differ from
+    the marker expected in assistant output
+- R274 live setup:
+  - extension synced into the installed Cursor profile with backup:
+    `logs/runtime/cursor-glass-r274/ide-extension-backups/openwukong-local.openwukong-vscode-bridge-0.1.0.openwukong-backup-20260628-170831`
+  - the correct workspace bridge stayed:
+    `http://127.0.0.1:8787`
+    for `E:/ideaProjects/agent/PaoPaoHeZi`
+  - temporary `workbench.action.reloadWindow` allowlist change was restored
+    after reload
+- R274 dry-run result:
+  - artifact:
+    `logs/runtime/cursor-glass-r274/glass_query_dry_run_after_reload.json`
+  - decision:
+    `cursor_glass_agent_query_ready`
+  - selected command:
+    `glass.newAgentWithQuery`
+- R274 real send result:
+  - artifact:
+    `logs/runtime/cursor-glass-r274/glass_agent_live_validation_r274b.json`
+  - marker:
+    `OPENWUKONG_CURSOR_GLASS_AGENT_R274B_20260628T171413`
+  - `command_id=glass.newAgentWithQuery`
+  - `dispatch_status=resolved`
+  - `decision=cursor_glass_agent_query_readback_pending`
+  - `foreground_changed=false`
+  - `system_dialog_detected=false`
+  - `window_input_attempts=0`
+  - `keyboard_input_attempts=0`
+  - `clipboard_write_attempts=0`
+  - user-side readback: pending, marker absent
+  - assistant-side readback: pending, marker absent
+  - full SQLite marker searches found zero matches:
+    - `logs/runtime/cursor-glass-r274/global_marker_search_r274b.json`
+    - `logs/runtime/cursor-glass-r274/workspace_marker_search_r274b.json`
+- Cursor bundle evidence:
+  - `glass.newAgentWithQuery` emits:
+    `setPendingPromptRequested`
+    followed by
+    `newAgentRequested`
+  - the real submit path is deeper:
+    `submitInitialLocalAgentMessage`
+    calling
+    `submitChatMaybeAbortCurrent`
+  - conclusion:
+    `glass.newAgentWithQuery` is a prefill/open route, not a verified submit
+    route
+- validation:
+  - `node --check extensions/openwukong-vscode/src/extension.js` passed
+  - `py_compile` passed for the new Cursor Glass probe/validation modules and
+    touched bridge files
+  - `python -m unittest tests.test_cursor_glass_agent_query_probe
+    tests.test_cursor_glass_agent_query_validation tests.test_ide_extension_scaffold`
+    ran `12` tests OK
+  - after adding `--required-marker`,
+    `python -m unittest tests.test_cursor_glass_agent_query_validation
+    tests.test_cursor_glass_agent_query_probe`
+    ran `8` tests OK
+- reusable learning:
+  - updated global skill:
+    `C:/Users/Zhangjinqian/.codex/skills/ide-extension-bounded-await-debug/SKILL.md`
+  - added the pattern that Agent-query-like commands may only prefill/open a
+    draft and must not be treated as submit routes without assistant-side
+    readback
+- current conclusion:
+  - Cursor can now be controlled to the level of background draft injection
+    with local storage proof
+  - Cursor still cannot be claimed as background Agent execution because both
+    `composer.sendToAgent` and `glass.newAgentWithQuery` resolve without
+    assistant-side completion evidence
+- next concrete actions:
+  1. stop retrying `composer.sendToAgent` and `glass.newAgentWithQuery` as
+     submit routes
+  2. find or build an in-process Cursor service hook to reach
+     `submitInitialLocalAgentMessage` / `submitChatMaybeAbortCurrent`, or find
+     an official transcript/readback surface
+  3. in parallel, continue expanding real computer-operation coverage through
+     transports already proven background-safe: Codex app-server, Browser
+     DevTools, owned IDE bridge, and Cursor draft injection
+
+## 2026-06-28 R275 Cursor Readiness Matrix Split
+
+- user correction:
+  - Cursor had already been implemented earlier through foreground UIA/clipboard
+    fallback and later through the live logged-in draft-hook path
+  - the missing piece is not "Cursor control exists", but "Cursor Agent submit
+    plus assistant readback exists without foreground input"
+- implementation:
+  - added a dedicated `cursor` / `Cursor Agent` surface to
+    `computer_operation_readiness_matrix`
+  - added explicit report fields:
+    - `verified_capabilities`
+    - `partial_capabilities`
+    - `fallback_transports`
+  - preserved real Cursor capabilities separately:
+    - `background_draft_injection`
+    - `foreground_uia_clipboard_draft_fallback`
+  - kept full Cursor Agent send blocked with:
+    - `operation_status=cursor_submit_readback_blocked`
+    - missing `cursor_submit_native_service_hook`
+    - missing `assistant_response_marker_readback`
+  - updated `computer_operation_status_report` markdown and next actions so
+    Cursor draft/fallback proof does not imply `background_execute`
+  - exposed Cursor evidence JSON arguments in both readiness/status CLIs
+- real read-only artifact generation:
+  - `logs/runtime/computer-operation-status-r275/computer_operation_readiness_r275.json`
+  - `logs/runtime/computer-operation-status-r275/computer_operation_status_r275.json`
+  - `logs/runtime/computer-operation-status-r275/computer_operation_status_r275.md`
+  - summary from real artifacts:
+    - `background_draft_surfaces=["cursor"]`
+    - Cursor not present in `background_execute_surfaces`
+    - Cursor not present in `background_execute_verified_surfaces`
+    - Cursor `can_write_without_focus=true`
+    - Cursor `can_execute_without_focus=false`
+- validation:
+  - `python -m unittest tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report` ran `13` tests OK
+  - `python -m unittest tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report
+    tests.test_objective_readiness_matrix tests.test_agent_app_transport_matrix
+    tests.test_agent_app_real_no_loss` ran `57` tests OK
+  - `python -m py_compile src\openwukong\evaluation\computer_operation_readiness_matrix.py
+    src\openwukong\evaluation\computer_operation_status_report.py` passed
+  - `git diff --check` reported only existing CRLF normalization warnings
+- reusable learning:
+  - updated global skill
+    `C:/Users/Zhangjinqian/.codex/skills/ide-extension-bounded-await-debug/SKILL.md`
+  - added the pattern that capability matrices must not collapse draft,
+    foreground fallback, private command dispatch, and assistant-completed
+    submit into one readiness state
+- next concrete actions:
+  1. implement or discover a submit-capable Cursor service hook around
+     `submitInitialLocalAgentMessage` / `submitChatMaybeAbortCurrent`
+  2. prove assistant/response-side readback after that hook with zero keyboard,
+     clipboard, mouse, and foreground changes
+  3. keep Cursor draft and foreground UIA fallback available as separate
+     capabilities, not as background execution proof
+
+## 2026-06-28 R276 WeChat Readiness Matrix Split
+
+- user correction:
+  - stop forcing the Cursor path for now
+  - move the next breakthrough to WeChat because WeChat had already been
+    implemented earlier
+- historical evidence reclassified:
+  - 2026-05-27 live WeChat File Transfer Assistant send remains a real
+    successful send, but it used explicit foreground keyboard/clipboard
+    takeover and is therefore a foreground fallback, not background control
+  - the WeChat native bridge contract, dynamic endpoint registry, fixture
+    smoke, live read-only evidence backend, and Fabric binding remain valid
+    infrastructure
+  - fixture sends prove the local bridge protocol only; they do not prove real
+    personal WeChat background sending
+- implementation:
+  - added WeChat-specific readiness logic in
+    `computer_operation_readiness_matrix`
+  - added evidence JSON inputs:
+    - `wechat_foreground_send_report`
+    - `wechat_native_bridge_send_report`
+    - `wechat_native_bridge_fixture_report`
+  - added CLI flags with the same names in readiness/status reports
+  - added `foreground_send_surfaces` summary output
+  - WeChat now only becomes `background_execute_verified` when a real
+    `wechat-native-bridge-send` report proves:
+    - one native call
+    - zero window/keyboard/clipboard attempts
+    - foreground focus stable
+    - target matched
+    - background screenshot verified
+    - required marker readback present
+    - forbidden markers absent
+  - bridge URL plus screenshot evidence alone is now kept out of
+    `background_execute`
+  - foreground File Transfer Assistant send is preserved as verified capability
+    `foreground_file_transfer_send`
+  - fixture bridge send is preserved as partial capability
+    `native_bridge_fixture_send_verified`
+- real read-only artifact generation:
+  - `logs/runtime/computer-operation-status-r276/computer_operation_readiness_r276.json`
+  - `logs/runtime/computer-operation-status-r276/computer_operation_status_r276.json`
+  - `logs/runtime/computer-operation-status-r276/computer_operation_status_r276.md`
+  - R276 artifact summary:
+    - `foreground_send_surfaces=["wechat"]`
+    - WeChat is not in `background_execute_surfaces`
+    - WeChat `readiness_level=foreground_required`
+    - WeChat `operation_status=foreground_required`
+    - WeChat `blocking_reason=wechat_native_send_readback_not_verified`
+- validation:
+  - `python -m py_compile src\openwukong\evaluation\computer_operation_readiness_matrix.py
+    src\openwukong\evaluation\computer_operation_status_report.py` passed
+  - focused suite:
+    `python -m unittest tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report`
+    ran `17` tests OK
+  - related suite:
+    `python -m unittest tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report
+    tests.test_objective_readiness_matrix tests.test_agent_app_transport_matrix
+    tests.test_agent_app_real_no_loss tests.test_wechat_native_bridge
+    tests.test_wechat_native_fabric_binding
+    tests.test_wechat_native_endpoint_publisher`
+    ran `78` tests OK
+  - `python -m py_compile src\openwukong\control\wechat_native_bridge.py
+    src\openwukong\connectors\wechat_native_bridge.py` passed
+- reusable learning:
+  - updated global skill:
+    `C:/Users/Zhangjinqian/.codex/skills/desktop-background-control-testing/SKILL.md`
+  - added the pattern that foreground IM sends, native bridge fixtures, route
+    readiness, and real background-native send/readback must not be collapsed
+    into one capability
+- next concrete actions:
+  1. implement the real WeChat File Transfer Assistant native send/readback
+     backend behind the existing local bridge contract
+  2. keep it File Transfer Assistant only until target matching and readback are
+     deterministic
+  3. maintain zero window/keyboard/clipboard and foreground-stability gates as
+     hard acceptance criteria
+
+## 2026-06-28 R277 WeChat Real Foreground Send Revalidated
+
+- trigger:
+  - user explicitly allowed a real WeChat send test and redirected the next
+    breakthrough from Cursor to WeChat
+  - the goal was to verify the already implemented foreground File Transfer
+    Assistant path without mistaking it for background-native control
+- real preflight and target selection:
+  - app resolution selected the already running personal WeChat executable:
+    `E:\software\Weixin\Weixin.exe`
+  - system-dialog preflight stayed clear:
+    `logs/runtime/wechat-real-send-r277/preflight_system_dialog.json`
+  - read-only locator found personal WeChat `微信` and Enterprise WeChat
+    separately; the send probe remained constrained to personal
+    `Weixin.exe` / `WeChat.exe`
+  - locator artifact:
+    `logs/runtime/wechat-real-send-r277/wechat_locator_before_send.json`
+- foreground takeover evidence:
+  - foreground takeover request:
+    `logs/runtime/wechat-real-send-r277/foreground_takeover_request.json`
+  - approved action:
+    `send_message`
+  - approved target:
+    `文件传输助手`
+  - approved transport:
+    `foreground-keyboard-clipboard`
+  - risk flags preserved:
+    `native_connector_missing`, `foreground_focus_steal`,
+    `clipboard_mutation`
+- prepare/no-send run:
+  - artifact:
+    `logs/runtime/wechat-real-send-r277/prepare_no_send/report.json`
+  - result:
+    `blocked_target_not_verified`
+  - send attempts stayed zero
+  - screenshot confirmed the File Transfer Assistant target before the real run
+- real send result:
+  - artifact:
+    `logs/runtime/wechat-real-send-r277/real_send/report.json`
+  - marker:
+    `OPENWUKONG_WECHAT_R277_REAL_SEND_20260628T174958`
+  - status:
+    `sent`
+  - `send_attempts=1`
+  - `keyboard_input_attempts=6`
+  - `clipboard_write_attempts=2`
+  - `clipboard_restore_attempts=1`
+  - `foreground_restore_attempts=1`
+  - `target_verified=true`
+  - `post_send_screenshot_bound=true`
+  - bound-window screenshot:
+    `logs/runtime/wechat-real-send-r277/real_send/post_send_verify.png`
+  - cropped visual evidence:
+    `logs/runtime/wechat-real-send-r277/real_send/post_send_verify_chat_crop.png`
+  - screenshot visibly contains the marker in the `文件传输助手`
+    conversation
+- important limitation:
+  - `post_send_verified=false`
+  - `post_send_verification.method=not_available`
+  - therefore R277 proves a real foreground fallback send, not automated
+    marker readback and not background-native WeChat control
+- status/reporting fix:
+  - `computer_operation_status_report` now accepts:
+    `--codex-app-server-ws-url`
+    and
+    `--codex-app-server-turn-start-report`
+  - status summary now includes:
+    `verified_background_execute_count`
+  - reason:
+    full evidence status reports were otherwise unable to include the
+    existing strict Codex app-server proof and could misleadingly show Codex as
+    blocked
+- reusable learning:
+  - updated global skill:
+    `C:/Users/Zhangjinqian/.codex/skills/desktop-background-control-testing/SKILL.md`
+  - added the pattern that wrapper/status reports must not silently drop
+    lower-level readiness evidence, because that creates a false capability
+    regression
+- generated artifacts:
+  - focused readiness:
+    `logs/runtime/computer-operation-status-r277/computer_operation_readiness_r277.json`
+  - focused status:
+    `logs/runtime/computer-operation-status-r277/computer_operation_status_r277.json`
+  - focused markdown:
+    `logs/runtime/computer-operation-status-r277/computer_operation_status_r277.md`
+  - full evidence readiness:
+    `logs/runtime/computer-operation-status-r277/computer_operation_readiness_r277_full_evidence.json`
+  - full evidence status:
+    `logs/runtime/computer-operation-status-r277/computer_operation_status_r277_full_evidence.json`
+  - full evidence markdown:
+    `logs/runtime/computer-operation-status-r277/computer_operation_status_r277_full_evidence.md`
+  - full evidence summary:
+    - `background_execute_surfaces=["codex","browser","terminal","git","ide"]`
+    - `background_execute_verified_surfaces=["codex","browser","ide"]`
+    - `background_draft_surfaces=["cursor"]`
+    - `foreground_send_surfaces=["wechat"]`
+    - `verified_background_execute_count=3`
+    - `verified_background_draft_count=1`
+- validation:
+  - `python -m unittest tests.test_computer_operation_status_report
+    tests.test_computer_operation_readiness_matrix`
+    ran `18` tests OK
+  - `python -m unittest tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report
+    tests.test_objective_readiness_matrix tests.test_agent_app_transport_matrix
+    tests.test_agent_app_real_no_loss tests.test_wechat_native_bridge
+    tests.test_wechat_native_fabric_binding
+    tests.test_wechat_native_endpoint_publisher`
+    ran `79` tests OK
+  - `python -m py_compile
+    src\openwukong\evaluation\computer_operation_status_report.py
+    tests\test_computer_operation_status_report.py`
+    passed
+- next concrete actions:
+  1. add automated post-send marker readback for the bound WeChat HWND, using
+     OCR/accessibility if available, so the foreground fallback can be verified
+     without manual screenshot inspection
+  2. implement the real WeChat native File Transfer Assistant send/readback
+     backend behind the existing local bridge contract
+  3. keep WeChat `foreground_file_transfer_send`,
+     `native_bridge_fixture_send_verified`, and real
+     `background_execute_verified` as separate capability layers
+
+## 2026-06-28 R278 - WeChat OCR readback moved off encoded PowerShell
+
+- user reported Windows Defender false positive:
+  - `Trojan:Win32/Steanoz.Z!MTB`
+  - affected command line shape:
+    `powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand ...`
+  - this came from the exploratory Windows OCR verifier, not from a fresh
+    WeChat send
+- change:
+  - removed the WeChat post-send OCR/readback dependency on encoded
+    PowerShell launchers
+  - `src/openwukong/evaluation/wechat_send_probe.py` now calls Windows OCR
+    through Python WinRT:
+    `Windows.Media.Ocr`, `Windows.Graphics.Imaging`, and
+    `Windows.Storage.Streams`
+  - declared Windows-only dependencies in:
+    - `pyproject.toml`
+    - `requirements.txt`
+  - installed the same packages in `.venv`:
+    - `winrt-Windows.Media.Ocr==3.2.1`
+    - `winrt-Windows.Graphics.Imaging==3.2.1`
+    - `winrt-Windows.Storage.Streams==3.2.1`
+- regression:
+  - `tests/test_wechat_send_probe.py` now verifies that the WeChat
+    OCR/readback module does not contain:
+    - `-EncodedCommand`
+    - `ExecutionPolicy`
+    - `_run_ocr_powershell`
+- real screenshot replay:
+  - artifact:
+    `logs/runtime/wechat-readback-r278/post_send_python_winrt_ocr_replay_r277.json`
+  - source screenshot:
+    `logs/runtime/wechat-real-send-r277/real_send/post_send_verify.png`
+  - marker:
+    `OPENWUKONG_WECHAT_R277_REAL_SEND_20260628T174958`
+  - result:
+    - `verified=true`
+    - `ocr_method=python-winrt-windows-media-ocr`
+    - `normalized_marker_matched=true`
+    - `fresh_send_attempted=false`
+    - `powershell_encoded_command_used=false`
+- reusable learning:
+  - updated global skill:
+    `C:/Users/Zhangjinqian/.codex/skills/desktop-background-control-testing/SKILL.md`
+  - added failure pattern:
+    encoded PowerShell OCR/readback launchers can trip Defender; use a native
+    API backend such as Python WinRT and add a no-encoded-launcher regression
+- validation:
+  - `python -m py_compile
+    src\openwukong\evaluation\wechat_send_probe.py
+    tests\test_wechat_send_probe.py`
+    passed
+  - `python -m unittest tests.test_wechat_send_probe`
+    ran `14` tests OK
+- next concrete action:
+  - run one fresh explicit foreground WeChat File Transfer Assistant send with
+    the Python WinRT OCR helper active, and require the integrated report to
+    show `post_send_verified=true` without encoded PowerShell
+
+## 2026-06-28 R279 - Fresh WeChat foreground send with Python WinRT OCR readback
+
+- preflight:
+  - `logs/runtime/wechat-real-send-r279/preflight_system_dialog.json`
+    reported `system_dialog_clear`
+  - `logs/runtime/wechat-real-send-r279/security_window_scan.json`
+    reported `security_window_detected=false`
+  - `logs/runtime/wechat-real-send-r279/wechat_locator_before_send.json`
+    observed both personal WeChat and Enterprise WeChat:
+    - personal: `Weixin.exe`, title `微信`, class `Qt51514QWindowIcon`
+    - enterprise: `WXWork.exe`, title `企业微信`, class `WeWorkWindow`
+  - the send probe selected personal WeChat by exact process/class, not by
+    fuzzy app name
+- foreground takeover:
+  - `logs/runtime/wechat-real-send-r279/foreground_takeover_request.json`
+  - request id:
+    `fgt-wechat-r279-filehelper-python-winrt-ocr`
+- real send:
+  - artifact:
+    `logs/runtime/wechat-real-send-r279/real_send/report.json`
+  - marker:
+    `OPENWUKONG_WECHAT_R279_REAL_SEND_20260628T190000`
+  - result:
+    - `status=sent`
+    - `target_name=文件传输助手`
+    - `send_attempts=1`
+    - `keyboard_input_attempts=6`
+    - `clipboard_write_attempts=2`
+    - `clipboard_restore_attempts=1`
+    - `foreground_restore_attempts=1`
+    - `post_send_screenshot_bound=true`
+    - `post_send_verified=true`
+    - `post_send_verification.method=windows-media-ocr-readback`
+    - `ocr_method=python-winrt-windows-media-ocr`
+    - `normalized_marker_matched=true`
+- status report:
+  - `logs/runtime/computer-operation-status-r279/computer_operation_status_r279.json`
+  - `logs/runtime/computer-operation-status-r279/computer_operation_status_r279.md`
+  - WeChat remains `readiness_level=foreground_required`
+  - WeChat verified capabilities now include:
+    - `foreground_file_transfer_send`
+    - `foreground_post_send_marker_readback`
+  - evidence now includes:
+    - `wechat_foreground_post_send_verified=true`
+    - `wechat_foreground_post_send_verification_method=windows-media-ocr-readback`
+    - `wechat_foreground_post_send_ocr_method=python-winrt-windows-media-ocr`
+    - `wechat_foreground_post_send_normalized_marker_matched=true`
+  - background-native blocker remains:
+    `wechat_native_send_readback_not_verified`
+- code update:
+  - `computer_operation_readiness_matrix` now preserves foreground post-send
+    readback evidence without promoting WeChat to background execution
+- validation:
+  - `python -m py_compile
+    src\openwukong\evaluation\computer_operation_readiness_matrix.py
+    tests\test_computer_operation_readiness_matrix.py`
+    passed
+  - `python -m unittest tests.test_computer_operation_readiness_matrix`
+    ran `13` tests OK
+  - final focused validation:
+    `python -m unittest tests.test_wechat_send_probe
+    tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report`
+    ran `32` tests OK
+  - final focused `python -m py_compile` on the WeChat send probe,
+    readiness matrix, status report, and focused tests passed
+  - `git diff --check` reported only existing CRLF normalization warnings
+- next concrete action:
+  - implement a real WeChat native bridge send/readback backend that keeps
+    window, keyboard, clipboard, and foreground-focus attempts at zero
+
+## 2026-06-28 R280 - WeChat native real-send probe and current backend blocker
+
+- added explicit native real-send probe:
+  - `src/openwukong/evaluation/wechat_native_bridge_real_send_probe.py`
+  - test:
+    `tests/test_wechat_native_bridge_real_send_probe.py`
+- behavior:
+  - discovers localhost/loopback WeChat native bridge URLs from explicit
+    `--bridge-url`, env/default registry paths, and supplied registry paths
+  - performs WeChat native bridge dry-run first
+  - requires explicit `--allow-send` before calling `/v1/wechat/send`
+  - never falls back to foreground keyboard, mouse, clipboard, SendInput, or
+    UIA mutation
+  - emits a wrapper report with nested `send_report` accepted by the readiness
+    matrix
+- regression coverage:
+  - no `--allow-send` calls only capabilities endpoints, send/native attempts
+    remain zero
+  - ready local fixture with `--allow-send` performs one native call, one send,
+    zero window/keyboard/clipboard attempts, and marker readback
+  - wrapper report fed into readiness matrix promotes WeChat to
+    `background_execute_verified` only through the nested real
+    `wechat-native-bridge-send` report
+  - bridge endpoint with `send_action_ready=false` never calls `/v1/wechat/send`
+- current-machine dry-run:
+  - artifact:
+    `logs/runtime/wechat-native-real-r280/dry_run.json`
+  - result:
+    - `decision=wechat_native_bridge_url_missing`
+    - `discovered_urls=[]`
+    - `send_attempts=0`
+    - `native_call_attempts=0`
+    - `window_input_attempts=0`
+    - `keyboard_input_attempts=0`
+    - `clipboard_write_attempts=0`
+  - conclusion:
+    no send-capable WeChat native bridge URL is registered on this machine
+- UIA read-only check:
+  - artifact:
+    `logs/runtime/wechat-native-real-r280/accessibility_probe.json`
+  - personal WeChat remains `structure_only`
+  - `input_candidate_count=0`
+  - `semantic_input_count=0`
+  - `semantic_action_count=0`
+  - conclusion:
+    UIA is not a safe background write backend for WeChat on this machine
+- reusable learning:
+  - updated global skill:
+    `C:/Users/Zhangjinqian/.codex/skills/desktop-background-control-testing/SKILL.md`
+  - added pattern:
+    read-only bridge evidence must not masquerade as native send; discovery,
+    dry-run, and real send/readback must stay separate
+- validation:
+  - `python -m unittest tests.test_wechat_native_bridge_real_send_probe`
+    ran `4` tests OK
+  - `python -m unittest tests.test_wechat_native_bridge
+    tests.test_wechat_native_bridge_fixture_smoke
+    tests.test_wechat_native_endpoint_publisher
+    tests.test_wechat_native_fabric_binding
+    tests.test_wechat_native_bridge_real_send_probe
+    tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report`
+    ran `41` tests OK
+  - `python -m py_compile` on the new probe/test and WeChat bridge modules
+    passed
+  - `git diff --check` reported only existing CRLF normalization warnings
+- next concrete action:
+  - implement or install a send-capable WeChat native bridge backend serving
+    `/v1/wechat/capabilities` and `/v1/wechat/send`, then rerun
+    `wechat_native_bridge_real_send_probe --allow-send`
+
+## 2026-06-28 R281 - WeChat external-command native bridge backend boundary
+
+- added an opt-in external-command backend for the local WeChat native endpoint:
+  - `src/openwukong/control/wechat_native_endpoint_publisher.py`
+  - backend name: `external-command`
+  - CLI argument:
+    `--external-command-json '["path-to-command", "arg1"]'`
+  - env fallback:
+    `OPENWUKONG_WECHAT_NATIVE_EXTERNAL_COMMAND_JSON`
+- behavior:
+  - the publisher still serves the existing `/v1/wechat/capabilities` and
+    `/v1/wechat/send` contract
+  - the backend delegates to one explicit local command via JSON stdin/stdout
+  - it uses `subprocess.run(..., shell=False)` and waits for completion, so it
+    does not create a detached helper process
+  - it never uses keyboard, mouse, clipboard, window input, SendInput, UIA
+    mutation, or foreground focus takeover
+  - it remains blocked when no command is configured
+  - successful capability responses must explicitly declare background safety
+    and all foreground/window/keyboard/mouse/clipboard requirements as false
+  - successful send responses must explicitly declare foreground stability and
+    zero control/window/keyboard/clipboard attempts
+- regression coverage:
+  - no external command configured is not send-ready and reports zero input
+    attempts
+  - a fixture external command can complete `/capabilities -> /send` through the
+    native bridge sender and produce marker readback with one native call and
+    zero window/keyboard/clipboard attempts
+  - a failing external command is blocked and keeps input counters at zero
+  - an underspecified external command that omits safety declarations is blocked
+  - `main(... --backend external-command --external-command-json ... --serve-once)`
+    accepts JSON argv and publishes the dynamic registry URL
+- validation:
+  - `python -m py_compile
+    src\openwukong\control\wechat_native_endpoint_publisher.py
+    tests\test_wechat_native_endpoint_publisher.py`
+    passed
+  - `python -m unittest tests.test_wechat_native_endpoint_publisher`
+    ran `15` tests OK
+  - `python -m unittest tests.test_wechat_native_bridge
+    tests.test_wechat_native_bridge_fixture_smoke
+    tests.test_wechat_native_endpoint_publisher
+    tests.test_wechat_native_fabric_binding
+    tests.test_wechat_native_bridge_real_send_probe
+    tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report`
+    ran `46` tests OK
+  - `git diff --check` reported only existing CRLF normalization warnings
+- current-machine conclusion:
+  - this implements the safe adapter boundary for a send-capable local backend
+  - it does not by itself prove live WeChat background send/readback, because no
+    real WeChat external command/SDK backend has been configured yet
+- next concrete action:
+  - implement the concrete WeChat external command adapter against a real local
+    native mechanism, then run the endpoint publisher with `--backend
+    external-command` and rerun `wechat_native_bridge_real_send_probe
+    --allow-send`
+
+## 2026-06-28 R282 - WeChat native transport discovery probe
+
+- added a read-only WeChat native transport discovery probe:
+  - `src/openwukong/evaluation/wechat_native_transport_discovery.py`
+  - test:
+    `tests/test_wechat_native_transport_discovery.py`
+- behavior:
+  - enumerates personal WeChat processes with `psutil`
+  - enumerates loopback listening TCP ports owned by personal WeChat processes
+  - probes lightweight HTTP/CDP fingerprints by GET only
+  - optionally probes the existing read-only `/v1/wechat/capabilities` native
+    bridge contract
+  - enumerates candidate named pipes with email-like pipe prefixes redacted
+  - never calls `/v1/wechat/send`
+  - keeps `native_call_attempts=0`, `send_attempts=0`,
+    `window_input_attempts=0`, `keyboard_input_attempts=0`, and
+    `clipboard_write_attempts=0`
+- regression coverage:
+  - unknown TCP loopback ports remain `tcp-unknown` and do not become ready
+  - CDP-like ports are classified as debug transports, not WeChat send bridges
+  - send-capable bridge detection only uses `/v1/wechat/capabilities` and does
+    not call `/v1/wechat/send`
+  - CLI writes a JSON report with zero send attempts
+- current-machine discovery:
+  - artifact:
+    `logs/runtime/wechat-native-transport-r282/discovery.json`
+  - result:
+    - `decision=wechat_loopback_ports_unknown_protocol`
+    - `ok=false`
+    - personal WeChat loopback ports:
+      `14013`, `14016`, `14019`, `14022`, `14023`
+    - all probed ports classified as `tcp-unknown`
+    - `send_attempts=0`
+    - `native_call_attempts=0`
+    - `window_input_attempts=0`
+    - `keyboard_input_attempts=0`
+    - `clipboard_write_attempts=0`
+  - conclusion:
+    the live Weixin loopback ports are not HTTP, Chrome DevTools Protocol, or
+    the OpenWukong `/v1/wechat/capabilities` bridge contract
+- validation:
+  - `python -m py_compile
+    src\openwukong\evaluation\wechat_native_transport_discovery.py
+    tests\test_wechat_native_transport_discovery.py`
+    passed
+  - `python -m unittest tests.test_wechat_native_transport_discovery`
+    ran `4` tests OK
+  - `python -m unittest tests.test_wechat_native_transport_discovery
+    tests.test_wechat_native_bridge_real_send_probe
+    tests.test_wechat_native_endpoint_publisher
+    tests.test_wechat_native_bridge
+    tests.test_wechat_native_fabric_binding
+    tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report`
+    ran `48` tests OK
+  - `git diff --check` reported only existing CRLF normalization warnings
+- next concrete action:
+  - decide whether to build a supported local helper around a documented SDK
+    surface or reverse-engineer Weixin's internal Mojo/ilink IPC separately;
+    do not treat the discovered TCP ports as send-capable without protocol-level
+    evidence and marker readback
+
+## 2026-06-29 R283 - WeChat native static IPC/helper discovery probe
+
+- added a read-only WeChat native static discovery probe:
+  - `src/openwukong/evaluation/wechat_native_static_discovery.py`
+  - test:
+    `tests/test_wechat_native_static_discovery.py`
+- behavior:
+  - discovers Weixin install directories from explicit input, environment, and
+    running personal WeChat process evidence
+  - scans bounded `.dll` and `.exe` candidates without launching, injecting,
+    attaching, sending, or calling internal IPC
+  - parses PE export tables using the Microsoft PE/COFF RVA/export directory
+    layout and records only bounded export samples
+  - records keyword hit counts for static IPC/send/helper signals such as
+    `ilink`, `mojo`, `ipc`, `pipe`, `localhost`, and send/message terms
+  - reads only explicit OpenWukong helper manifests if present
+  - keeps `native_call_attempts=0`, `send_attempts=0`,
+    `window_input_attempts=0`, `keyboard_input_attempts=0`, and
+    `clipboard_write_attempts=0`
+- regression coverage:
+  - ASCII and UTF-16LE keyword signals are counted without leaking surrounding
+    binary context
+  - a synthetic PE64 export table is parsed and exposes send/mojo-like exports
+  - static ilink/mojo/IPC evidence does not become send-ready without a helper
+    contract
+  - a documented helper manifest is represented as static contract evidence,
+    still with zero send/native/window attempts during discovery
+  - CLI writes a JSON report with zero control attempts
+- current-machine discovery:
+  - artifact:
+    `logs/runtime/wechat-native-static-r283/discovery.json`
+  - result:
+    - `decision=weixin_static_surfaces_found_without_send_contract`
+    - `ok=false`
+    - scanned files: `24`
+    - helper manifests: `0`
+    - static signal summary includes:
+      `name:ilink=3`, `name:mojo=1`, `keyword:ilink=9`,
+      `keyword:mojo=6`, `keyword:ipc=13`, `keyword:pipe=20`,
+      `keyword:localhost=6`, `keyword:127.0.0.1=1`,
+      `export:send-like=7`, `export:conversation-like=7`
+    - `send_attempts=0`
+    - `native_call_attempts=0`
+    - `window_input_attempts=0`
+    - `keyboard_input_attempts=0`
+    - `clipboard_write_attempts=0`
+  - conclusion:
+    current Weixin binaries contain useful ilink/mojo/IPC clues, but there is
+    no OpenWukong-consumable helper contract or proven send protocol yet
+- validation:
+  - `python -m py_compile
+    src\openwukong\evaluation\wechat_native_static_discovery.py
+    tests\test_wechat_native_static_discovery.py`
+    passed
+  - `python -m unittest tests.test_wechat_native_static_discovery`
+    ran `5` tests OK
+  - `python -m unittest tests.test_wechat_native_static_discovery
+    tests.test_wechat_native_transport_discovery
+    tests.test_wechat_native_bridge_real_send_probe
+    tests.test_wechat_native_endpoint_publisher
+    tests.test_wechat_native_bridge
+    tests.test_wechat_native_fabric_binding
+    tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report`
+    ran `53` tests OK
+  - final `python -m py_compile` on the new static discovery module/test and
+    adjacent WeChat native discovery/probe modules passed
+  - `git diff --check` reported only existing CRLF normalization warnings
+- next concrete action:
+  - build a concrete helper/adapter only after one of these is available:
+    a documented helper contract, a supported SDK surface, or a separately
+    gated protocol implementation for the observed ilink/mojo IPC; static
+    binary evidence alone must not promote WeChat to background execution
+
+## 2026-06-29 R284 - OpenClaw-Weixin bot-channel readiness probe
+
+- investigated Tencent's OpenClaw Weixin channel as a separate breakthrough
+  path:
+  - source inspected from:
+    `https://github.com/Tencent/openclaw-weixin`
+  - local source snapshot:
+    `logs/runtime/openclaw-weixin-r284/openclaw-weixin`
+  - package:
+    `@tencent-weixin/openclaw-weixin`
+  - plugin version from source:
+    `2.4.6`
+  - plugin channel id:
+    `openclaw-weixin`
+  - protocol:
+    iLink bot HTTP JSON APIs including `getupdates`, `sendmessage`,
+    `getuploadurl`, `getconfig`, and `sendtyping`
+- important capability boundary:
+  - OpenClaw-Weixin is a background Weixin bot-channel candidate
+  - it is not personal desktop WeChat control
+  - it does not prove File Transfer Assistant send/readback
+  - it must be represented as `wechat-openclaw-bot-channel`, not as the
+    desktop `wechat` surface
+- added a read-only readiness probe:
+  - `src/openwukong/evaluation/wechat_openclaw_readiness.py`
+  - test:
+    `tests/test_wechat_openclaw_readiness.py`
+- behavior:
+  - checks `openclaw` CLI and Node version without shell execution
+  - avoids running `.cmd` shims through `shell=True`; if a Windows shim must be
+    executed and Node is new enough, it resolves the adjacent `openclaw.mjs`
+    path and runs it through `node` directly
+  - reads `~/.openclaw/openclaw.json` without emitting secret values
+  - reads OpenClaw-Weixin account metadata from
+    `~/.openclaw/openclaw-weixin/accounts.json` and account files, redacting
+    account IDs, user IDs, and tokens to hash/length metadata
+  - optionally records public plugin source metadata
+  - never starts the OpenClaw gateway, never performs QR login, never calls
+    `sendmessage`, and keeps all desktop/native/send counters at zero
+- regression coverage:
+  - Node runtime too old blocks readiness before plugin state is promoted
+  - disabled plugin is reported without leaking token values
+  - configured account without explicit `@im.wechat` target is channel-ready
+    but not send-ready
+  - configured account plus explicit iLink target becomes bot-channel
+    send-ready in report semantics while still making zero send attempts
+  - plugin source summary reads public package/manifest/README contract
+  - CLI writes a JSON report with zero control attempts
+- current-machine discovery:
+  - artifact:
+    `logs/runtime/openclaw-weixin-r284/readiness.json`
+  - result:
+    - `decision=openclaw_cli_node_runtime_too_old`
+    - `ok=false`
+    - `node_version=22.17.1`
+    - `node_min_required=22.19.0`
+    - `config_present=true`
+    - `plugin_present=false`
+    - `plugin_enabled=false`
+    - `account_count=0`
+    - `bot_channel_ready=false`
+    - `send_action_ready=false`
+    - `desktop_wechat_control_verified=false`
+    - `send_attempts=0`
+  - current OpenClaw package evidence:
+    `npm view openclaw` reports version `2026.6.10` and engine
+    `node >=22.19.0`
+- validation:
+  - `python -m py_compile
+    src\openwukong\evaluation\wechat_openclaw_readiness.py
+    tests\test_wechat_openclaw_readiness.py`
+    passed
+  - `python -m unittest tests.test_wechat_openclaw_readiness`
+    ran `6` tests OK
+  - `python -m unittest tests.test_wechat_openclaw_readiness
+    tests.test_wechat_native_static_discovery
+    tests.test_wechat_native_transport_discovery
+    tests.test_wechat_native_bridge_real_send_probe
+    tests.test_wechat_native_endpoint_publisher
+    tests.test_wechat_native_bridge
+    tests.test_wechat_native_fabric_binding
+    tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report`
+    ran `59` tests OK
+- next concrete action:
+  - if Weixin bot-channel is acceptable, prepare a no-send setup gate for
+    upgrading Node to `>=22.19.0`, installing/enabling
+    `@tencent-weixin/openclaw-weixin`, running QR login, and then performing a
+    real explicit target `@im.wechat` marker send/readback through the bot
+    channel
+  - keep desktop WeChat File Transfer Assistant background control blocked
+    until a separate native desktop helper/protocol proves real send/readback
+
+## 2026-06-29 R285 - OpenClaw-Weixin no-send setup gate
+
+- added a no-send setup gate for the Tencent OpenClaw-Weixin bot-channel route:
+  - `src/openwukong/evaluation/wechat_openclaw_setup_gate.py`
+  - test:
+    `tests/test_wechat_openclaw_setup_gate.py`
+- behavior:
+  - consumes the R284 readiness shape or runs the readiness probe directly
+  - emits structured blockers for Node, OpenClaw CLI, plugin, login account,
+    gateway/setup state, and explicit target readiness
+  - emits proposed setup steps with `executed=false`, including:
+    - verify Node and OpenClaw versions
+    - install or activate Node `>=22.19.0` or Node 24
+    - install `@tencent-weixin/openclaw-weixin`
+    - enable `plugins.entries.openclaw-weixin.enabled`
+    - run QR login for `openclaw-weixin`
+    - restart the OpenClaw gateway
+    - provide an explicit `@im.wechat` target
+    - rerun the no-send setup gate before any send probe
+  - keeps `install_attempts=0`, `login_attempts=0`,
+    `gateway_start_attempts=0`, `send_attempts=0`,
+    `native_call_attempts=0`, and all window/keyboard/clipboard counters at
+    zero
+  - even when all prerequisites are satisfied, the gate can only report
+    `ready_for_send_probe=true`; a separate explicit real send/readback probe
+    is still required
+- current-machine setup gate:
+  - artifact:
+    `logs/runtime/openclaw-weixin-r285/setup_gate.json`
+  - result:
+    - `decision=openclaw_weixin_setup_blocked_node_runtime`
+    - `ok=false`
+    - `ready_for_send_probe=false`
+    - blocker:
+      Node `22.17.1` is older than required `22.19.0`
+    - blocker:
+      OpenClaw-Weixin plugin is not installed/configured
+    - blocker:
+      no logged-in OpenClaw-Weixin account is configured
+    - blocker:
+      no explicit `@im.wechat` target is provided
+    - all setup/login/send/input attempts stayed zero
+- validation:
+  - `python -m py_compile
+    src\openwukong\evaluation\wechat_openclaw_setup_gate.py
+    tests\test_wechat_openclaw_setup_gate.py
+    src\openwukong\evaluation\wechat_openclaw_readiness.py
+    tests\test_wechat_openclaw_readiness.py`
+    passed
+  - `python -m unittest tests.test_wechat_openclaw_setup_gate`
+    ran `6` tests OK
+  - `python -m unittest tests.test_wechat_openclaw_setup_gate
+    tests.test_wechat_openclaw_readiness
+    tests.test_wechat_native_static_discovery
+    tests.test_wechat_native_transport_discovery
+    tests.test_wechat_native_bridge_real_send_probe
+    tests.test_wechat_native_endpoint_publisher
+    tests.test_wechat_native_bridge
+    tests.test_wechat_native_fabric_binding
+    tests.test_computer_operation_readiness_matrix
+    tests.test_computer_operation_status_report`
+    ran `65` tests OK
+  - `git diff --check` reported only existing CRLF normalization warnings
+  - secret-pattern scan on the R285 artifact and new setup gate module/test
+    found no matches
+- reusable learning:
+  - added `Setup Plan Masquerades As Executed Capability` to
+    `C:/Users/Zhangjinqian/.codex/skills/desktop-background-control-testing/SKILL.md`
+- next concrete action:
+  - if pursuing OpenClaw-Weixin, execute the R285 setup plan outside the
+    no-send gate: activate Node `>=22.19.0`, install/enable the plugin, scan
+    QR login, provide a real explicit `@im.wechat` target, rerun the setup
+    gate, then run a separate opt-in marker send/readback
+  - keep desktop WeChat File Transfer Assistant background control blocked
+    until a separate native desktop helper/protocol proves real send/readback
+
+## 2026-06-29 R286 - OpenClaw-Weixin environment setup and QR login gate
+
+- executed the non-send setup portion of the R285 OpenClaw-Weixin plan:
+  - downloaded official Node.js Windows x64 zip for `v24.18.0`
+  - verified the zip against official `SHASUMS256.txt`
+  - installed the portable runtime at:
+    `E:\codeenvir\node-v24.18.0-win-x64`
+  - installed OpenClaw under that portable Node prefix:
+    `OpenClaw 2026.6.10 (aa69b12)`
+  - did not change the system PATH; commands in this run used a process-local
+    PATH with the portable Node directory first
+- modified local OpenClaw state/config:
+  - backed up existing config to:
+    `C:\Users\Zhangjinqian\.openclaw\openclaw.json.openwukong-r286-backup-20260629124101`
+  - installed `@tencent-weixin/openclaw-weixin`
+  - enabled:
+    `plugins.entries.openclaw-weixin.enabled=true`
+  - set:
+    `session.dmScope=per-account-channel-peer`
+- current no-send setup-gate artifacts:
+  - after plugin install:
+    `logs/runtime/openclaw-weixin-r286/setup_gate_after_plugin.json`
+  - after QR login timeout:
+    `logs/runtime/openclaw-weixin-r286/setup_gate_after_login_timeout.json`
+  - login attempt summary:
+    `logs/runtime/openclaw-weixin-r286/login_attempt_summary.json`
+- current-machine result:
+  - Node blocker cleared:
+    `node_version=24.18.0`
+  - OpenClaw blocker cleared:
+    `openclaw_version=2026.6.10`
+  - plugin blocker cleared:
+    `plugin_present=true`, `plugin_enabled=true`
+  - remaining blockers:
+    - `openclaw_weixin_account_not_logged_in`
+    - `openclaw_weixin_target_user_id_missing`
+  - gate decision:
+    `openclaw_weixin_setup_blocked_login`
+  - `send_attempts=0`
+  - `window_input_attempts=0`
+  - `keyboard_input_attempts=0`
+  - `clipboard_write_attempts=0`
+- QR login attempt:
+  - command:
+    `openclaw channels login --channel openclaw-weixin`
+  - the command generated QR codes, but no phone confirmation arrived before
+    the QR refresh limit
+  - final result:
+    `openclaw_weixin_qr_login_not_completed`
+  - no QR URL was stored in artifacts or memory
+- cleanup/validation:
+  - `python -m unittest tests.test_wechat_openclaw_setup_gate
+    tests.test_wechat_openclaw_readiness`
+    ran `12` tests OK
+  - process scan found no lingering Node/OpenClaw/OpenClaw-Weixin process after
+    the failed QR login; only the scan command itself matched
+  - secret-pattern scan on `logs/runtime/openclaw-weixin-r286` found no QR URL,
+    token, cookie, password, or session-id matches
+- next concrete action:
+  - rerun QR login when the user is ready to scan and confirm immediately
+  - after login succeeds, rerun the no-send setup gate with an explicit
+    `@im.wechat` target
+  - only then restart the OpenClaw gateway and run a separate opt-in marker
+    send/readback through the bot channel
+  - keep desktop WeChat File Transfer Assistant background control blocked
+    until a separate native desktop helper/protocol proves real send/readback
+
+## 2026-06-29 R287 - OpenClaw-Weixin QR retry blocked by missing bot auth
+
+- user clarified that desktop WeChat was already logged in
+- important correction:
+  - desktop WeChat login is not the same state as OpenClaw-Weixin bot-channel
+    authorization
+  - OpenClaw-Weixin still needs its own account credential under the
+    OpenClaw-Weixin state/account store
+  - a visible logged-in desktop WeChat window does not populate that bot
+    credential store
+- pre-retry no-send gate:
+  - artifact:
+    `logs/runtime/openclaw-weixin-r287/setup_gate_before_qr_retry.json`
+  - result:
+    `decision=openclaw_weixin_setup_blocked_login`
+  - Node/OpenClaw/plugin remained ready:
+    `node_version=24.18.0`, `openclaw_version=2026.6.10`,
+    `plugin_present=true`, `plugin_enabled=true`
+  - remaining blockers:
+    `openclaw_weixin_account_not_logged_in` and
+    `openclaw_weixin_target_user_id_missing`
+- QR retry:
+  - command:
+    `openclaw channels login --channel openclaw-weixin`
+  - generated QR codes and one-use links, but no phone-side confirmation
+    arrived before the refresh limit
+  - final result:
+    `Channel login failed: Error: 二维码多次失效，连接流程已停止。请稍后再试。`
+  - summary artifact:
+    `logs/runtime/openclaw-weixin-r287/login_retry_summary.json`
+  - no QR URL was stored in artifacts or memory
+- post-retry no-send gate:
+  - artifact:
+    `logs/runtime/openclaw-weixin-r287/setup_gate_after_qr_retry_timeout.json`
+  - result:
+    `decision=openclaw_weixin_setup_blocked_login`
+  - `accounts=[]`
+  - `send_attempts=0`
+  - `window_input_attempts=0`
+  - `keyboard_input_attempts=0`
+  - `clipboard_write_attempts=0`
+- validation:
+  - `python -m unittest tests.test_wechat_openclaw_setup_gate
+    tests.test_wechat_openclaw_readiness`
+    ran `12` tests OK
+  - process scan found no lingering OpenClaw/Node process after the failed QR
+    retry; only scan commands matched
+  - secret-pattern scan on `logs/runtime/openclaw-weixin-r287` found no QR URL,
+    token, cookie, password, or session-id matches
+- reusable learning:
+  - added `Desktop Login Masquerades As Bot Channel Auth` to
+    `C:/Users/Zhangjinqian/.codex/skills/desktop-background-control-testing/SKILL.md`
+- why the previous two QR attempts did not solve it:
+  - R286 and R287 both reached the OpenClaw-Weixin auth flow and generated
+    QR codes
+  - neither run observed phone-side confirmation before QR expiry
+  - no account files were created, so the no-send gate correctly stayed at
+    `openclaw_weixin_account_not_logged_in`
+  - desktop WeChat being logged in cannot satisfy this state because OpenClaw
+    needs a separate bot-channel credential
+- next concrete action:
+  - do not run a third blind QR retry
+  - first change the method: verify phone-side scan/confirmation, use the QR
+    link directly on the phone if scanning fails, inspect sanitized
+    OpenClaw-Weixin auth logs, and check network/proxy reachability to the
+    iLink auth endpoint
+  - after account credentials exist, rerun the no-send gate with an explicit
+    `@im.wechat` target, then restart gateway and run a separate opt-in
+    marker send/readback
+
+## 2026-06-29 R288 - WeChat route decision: foreground implementation
+
+- user decision:
+  - WeChat is temporarily classified as an explicit foreground implementation
+  - do not continue forcing OpenClaw-Weixin as the desktop WeChat control route
+- active WeChat capability:
+  - preserve the R279 verified foreground desktop WeChat File Transfer
+    Assistant send/readback path
+  - accepted proof remains:
+    `logs/runtime/wechat-real-send-r279/real_send/report.json`
+  - marker readback was verified through Python WinRT OCR in R279
+  - this capability remains `foreground_required`, not
+    `background_execute`
+- routes paused or blocked:
+  - OpenClaw-Weixin is paused/deprioritized as a desktop-control route because
+    it is a separate iLink bot/API channel, not personal desktop WeChat window
+    control
+  - OpenClaw-Weixin may be revived only as a separate bot-channel messaging
+    surface if needed
+  - desktop WeChat background-native send/readback remains blocked until a
+    concrete native helper, supported SDK, or proven protocol adapter performs
+    a real opt-in send/readback with zero window/keyboard/clipboard attempts
+- no action taken in R288:
+  - no new WeChat send
+  - no QR login retry
+  - no OpenClaw gateway start
+  - no GUI control attempt
+- next concrete action:
+  - productize the WeChat foreground path with explicit foreground permission,
+    exact personal-WeChat target verification, clipboard backup/restore, focus
+    restore, Python WinRT OCR readback, and final reporting that marks the
+    surface as `foreground_required`
+  - keep WeChat out of `background_execute` readiness until a separate native
+    desktop proof exists
+  - continue background/no-foreground work on stronger connector surfaces such
+    as Browser, Codex app-server, Terminal/Git, Office object model, IDE
+    bridges, or sandbox GUI/Cua if universal human-like desktop operation is
+    still desired
+
+## 2026-09-09 R289 - Computer operation capability audit
+
+- capability conclusion:
+  - OpenWuKong is currently a connector-first, controlled desktop copilot,
+    not an unrestricted universal computer-use agent
+  - explicit evidence matrix: `5` background-execute surfaces, `1`
+    background draft surface, `1` foreground-required surface, `1` read-only
+    generic desktop surface, and `2` blocked surfaces
+  - current default report without injected historical Codex/WeChat evidence:
+    `4` background, `1` read-only, and `4` blocked
+- verified or ready routes:
+  - Codex app-server WebSocket, owned Browser DevTools, IDE extension bridge,
+    managed Terminal, and workspace-bound Git
+  - Cursor draft injection is background-safe; full Agent submit/readback is
+    still blocked
+  - WeChat File Transfer Assistant send/readback is verified only through an
+    explicit foreground takeover; native background send remains unverified
+- current live probe:
+  - read-only Windows scan observed `16` windows and `579` UI elements
+  - Edge, ChatGPT, and Clash exposed semantic UIA capabilities; Weixin exposed
+    structure-only evidence, confirming app-specific route limits
+- validation caveat:
+  - targeted regression ran `109` tests with `107` passing and `2` failing
+  - both failures retain the old expectation that `generic_desktop` is
+    `foreground_required`, while current implementation classifies the
+    synthetic structural-read surface as `read_only`; no implementation fix
+    was made in this audit
+- next actions:
+  - build Cursor native submit/readback evidence, add an Office object-model
+    connector, and pursue a concrete WeChat native adapter before claiming
+    broader background control

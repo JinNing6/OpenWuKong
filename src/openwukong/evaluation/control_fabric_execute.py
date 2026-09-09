@@ -26,6 +26,7 @@ def main(
         description="Run an explicit Control Fabric execution behind route gates."
     )
     parser.add_argument("--process-name", default="")
+    parser.add_argument("--pid", type=int, default=0)
     parser.add_argument("--window-title", default="")
     parser.add_argument("--resource-url", default="")
     parser.add_argument("--debugger-url", default="")
@@ -42,12 +43,34 @@ def main(
     parser.add_argument("--url", default="")
     parser.add_argument("--selector", default="")
     parser.add_argument("--value", default="")
+    parser.add_argument(
+        "--parameters-json",
+        default="{}",
+        help="JSON object containing typed connector parameters such as automation_id or coordinates.",
+    )
     parser.add_argument("--allow-control", action="store_true")
+    parser.add_argument("--allow-foreground-interaction", action="store_true")
+    parser.add_argument(
+        "--foreground-approval-file",
+        default="",
+        help="Path to an approved foreground-takeover-request JSON object.",
+    )
     parser.add_argument("--output", default="")
+    parser.add_argument("--trajectory-root", default="")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
+    try:
+        parameters = _json_object(args.parameters_json, source="--parameters-json")
+        foreground_approval = _foreground_approval_object(
+            args.foreground_approval_file,
+            source="--foreground-approval-file",
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+
     target = ConnectorTarget(
+        pid=max(0, int(args.pid or 0)),
         process_name=args.process_name,
         window_title=args.window_title,
         resource_url=args.resource_url,
@@ -68,6 +91,8 @@ def main(
         url=args.url,
         selector=args.selector,
         value=args.value,
+        allow_foreground_interaction=bool(args.allow_foreground_interaction),
+        parameters=parameters,
     )
     ownership_paths = _manifest_paths_from_args(
         tuple(args.readiness_manifest or ()),
@@ -83,6 +108,9 @@ def main(
         intent,
         allow_control=args.allow_control,
         browser_action_runner=browser_action_runner,
+        foreground_takeover_approval=foreground_approval or None,
+        trajectory_root=args.trajectory_root,
+        trajectory_metadata={"entrypoint": "control_fabric_execute"},
     )
     data = report.to_dict()
     if args.output:
@@ -160,6 +188,36 @@ def _write_stdout(text: str) -> None:
         flush = getattr(buffer, "flush", None)
         if callable(flush):
             flush()
+
+
+def _json_object(value: str, *, source: str) -> dict:
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{source} must contain valid JSON: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{source} must contain a JSON object")
+    return parsed
+
+
+def _json_file_object(value: str, *, source: str) -> dict:
+    path_text = str(value or "").strip()
+    if not path_text:
+        return {}
+    path = Path(path_text)
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"{source} could not be read: {exc}") from exc
+    return _json_object(content, source=source)
+
+
+def _foreground_approval_object(value: str, *, source: str) -> dict:
+    payload = _json_file_object(value, source=source)
+    nested = payload.get("foreground_takeover_request")
+    if isinstance(nested, dict):
+        return dict(nested)
+    return payload
 
 
 if __name__ == "__main__":

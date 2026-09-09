@@ -6,10 +6,17 @@ from __future__ import annotations
 import dataclasses
 import time
 import uuid
+from pathlib import Path
 
 from openwukong.connectors import ConnectorTarget
 from openwukong.connectors.browser import BrowserDevToolsClient, BrowserDevToolsTarget
 from openwukong.connectors.ide_extension import IDEExtensionBridgeClient
+from openwukong.control.app_resolution import (
+    AppResolutionCandidate,
+    claude_candidate_surface_kind,
+    codex_candidate_surface_kind,
+    cursor_candidate_surface_kind,
+)
 from openwukong.control.agent_native_bridge import (
     AgentNativeBridgeSenderAdapter,
     SEND_ACTION as AGENT_NATIVE_SEND_ACTION,
@@ -18,6 +25,17 @@ from openwukong.control.agent_native_bridge import (
 
 
 BRIDGE_SCHEMA_VERSION = "agent-app-bridge-v1"
+_READBACK_CAPABILITY_NAMES = {
+    "agent_app_conversation.read_transcript",
+    "agent_app_conversation.readback",
+    "agent_app_conversation.verify_readback",
+    "agent.chat.read_transcript",
+    "agent.chat.readback",
+    "conversation.read",
+    "conversation.read_transcript",
+    "read_transcript",
+    "readback",
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -75,8 +93,20 @@ class AgentAppBridgeRequest:
         return bool(self.app_uia_probe.get("background_screenshot_focus_stable", False))
 
     @property
+    def acceptance_readback_ready(self) -> bool:
+        if not self.required_markers:
+            return True
+        return _endpoint_acceptance_readback_ready(self.endpoint)
+
+    @property
     def ready(self) -> bool:
-        return bool(self.message and self.target_ready and self.native_endpoint_ready and self.visual_focus_stable)
+        return bool(
+            self.message
+            and self.target_ready
+            and self.native_endpoint_ready
+            and self.visual_focus_stable
+            and self.acceptance_readback_ready
+        )
 
     @property
     def target(self) -> dict:
@@ -132,6 +162,7 @@ class AgentAppBridgeRequest:
             "target_ready": self.target_ready,
             "native_endpoint_ready": self.native_endpoint_ready,
             "visual_focus_stable": self.visual_focus_stable,
+            "acceptance_readback_ready": self.acceptance_readback_ready,
             "agent": self.agent,
             "agent_id": self.agent_id,
             "project_name": self.project_name,
@@ -190,6 +221,8 @@ class AgentAppBridgeDryRunReport:
             return "app_bridge_native_connector_not_ready"
         if not self.request.visual_focus_stable:
             return "app_bridge_visual_focus_not_stable"
+        if not self.request.acceptance_readback_ready:
+            return "app_bridge_readback_not_ready"
         if self.validation_errors:
             return "app_bridge_request_invalid"
         return "app_bridge_dry_run_ready"
@@ -270,6 +303,20 @@ class AgentAppBridgeSendReport:
         )
 
     @property
+    def probe_readback_text(self) -> str:
+        action_result = self.composer_probe_report.get("action_result", {})
+        if not isinstance(action_result, dict):
+            return ""
+        return _first_text(
+            action_result,
+            "readbackText",
+            "readback_text",
+            "pageText",
+            "page_text",
+            "text",
+        )
+
+    @property
     def missing_required_markers(self) -> tuple[str, ...]:
         text = self.readback_text
         return tuple(marker for marker in self.request.required_markers if marker not in text)
@@ -278,6 +325,13 @@ class AgentAppBridgeSendReport:
     def present_forbidden_markers(self) -> tuple[str, ...]:
         text = self.readback_text
         return tuple(marker for marker in self.request.forbidden_markers if marker in text)
+
+    @property
+    def auth_required(self) -> bool:
+        return bool(
+            _agent_app_auth_required_text(self.readback_text)
+            or _agent_app_auth_required_text(self.probe_readback_text)
+        )
 
     @property
     def accepted(self) -> bool:
@@ -296,6 +350,8 @@ class AgentAppBridgeSendReport:
                 self.composer_probe_report.get("decision", "")
                 or "app_bridge_composer_not_ready"
             )
+        if self.auth_required:
+            return "app_bridge_auth_required"
         if self.error:
             return "app_bridge_send_failed"
         if self.target is None:
@@ -327,6 +383,7 @@ class AgentAppBridgeSendReport:
             "bridge_send_attempts": self.bridge_send_attempts,
             "native_probe_attempts": int(self.native_probe_attempts or 0),
             "native_call_attempts": int(self.native_call_attempts or 0),
+            "auth_required": self.auth_required,
             "missing_required_markers": list(self.missing_required_markers),
             "present_forbidden_markers": list(self.present_forbidden_markers),
             "target": _devtools_target_to_dict(self.target),
@@ -949,6 +1006,8 @@ def _validate_request(request: AgentAppBridgeRequest) -> tuple[str, ...]:
         errors.append("native_endpoint_not_ready")
     if not request.visual_focus_stable:
         errors.append("visual_focus_not_stable")
+    if not request.acceptance_readback_ready:
+        errors.append("acceptance_readback_not_ready")
     return tuple(errors)
 
 
@@ -1313,6 +1372,50 @@ def _endpoint_is_devtools(endpoint: dict) -> bool:
     return str(endpoint.get("endpoint_type", "") or "devtools").strip() == "devtools"
 
 
+def _endpoint_acceptance_readback_ready(endpoint: dict) -> bool:
+    if not endpoint:
+        return False
+    if _endpoint_is_devtools(endpoint):
+        return True
+    metadata = endpoint.get("metadata")
+    metadata_dict = dict(metadata) if isinstance(metadata, dict) else {}
+    for source in (endpoint, metadata_dict):
+        for key in (
+            "readback_action_ready",
+            "readback_ready",
+            "can_readback",
+            "can_read_transcript",
+            "transcript_readback_ready",
+        ):
+            if key in source:
+                return bool(source.get(key, False))
+    capabilities: list[object] = []
+    for source in (endpoint, metadata_dict):
+        value = source.get("capabilities")
+        if isinstance(value, list):
+            capabilities.extend(value)
+    values = {_normalize(item) for item in capabilities}
+    if values & {_normalize(item) for item in _READBACK_CAPABILITY_NAMES}:
+        return True
+    for source in (endpoint, metadata_dict):
+        actions = source.get("actions")
+        if not isinstance(actions, list):
+            continue
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            if action.get("available", True) is False:
+                continue
+            value = _normalize(
+                action.get("action", "")
+                or action.get("id", "")
+                or action.get("name", "")
+            )
+            if value in {_normalize(item) for item in _READBACK_CAPABILITY_NAMES}:
+                return True
+    return False
+
+
 def _endpoint_supports_ide_chat(endpoint: dict, agent_id: str = "") -> bool:
     if not _endpoint_is_ide_bridge(endpoint):
         return False
@@ -1407,6 +1510,9 @@ def _endpoint_agent_native_app_binding_matches(metadata: dict, agent_id: str) ->
     binding = metadata.get("app_binding")
     if not isinstance(binding, dict) or not binding:
         return False
+    binding_surface = _binding_surface_kind(agent_id, binding)
+    if binding_surface == "cli":
+        return False
     expected_names = {
         _normalize_process_name(name)
         for name in _agent_process_names(agent_id)
@@ -1414,6 +1520,8 @@ def _endpoint_agent_native_app_binding_matches(metadata: dict, agent_id: str) ->
     }
     actual_name = _binding_process_name(binding)
     if expected_names and actual_name not in expected_names:
+        return False
+    if binding_surface != "desktop":
         return False
     return bool(
         actual_name
@@ -1433,7 +1541,14 @@ def _endpoint_matches_project(endpoint: dict, project_name: str) -> bool:
     if not isinstance(metadata, dict):
         return False
     haystack: list[str] = []
-    for key in ("project_name", "project", "workspace", "workspace_path"):
+    for key in (
+        "project_name",
+        "project",
+        "workspace",
+        "workspace_path",
+        "requested_workspace_path",
+        "requested_workspace_name",
+    ):
         haystack.append(str(metadata.get(key, "") or ""))
     for collection_key in ("projects", "workspaces", "workspaceFolders"):
         items = metadata.get(collection_key)
@@ -1664,6 +1779,25 @@ def _first_text(data: dict, *keys: str) -> str:
     return ""
 
 
+def _agent_app_auth_required_text(text: str) -> bool:
+    normalized = str(text or "").casefold()
+    if not normalized:
+        return False
+    direct_markers = (
+        "not logged in",
+        "please run /login",
+        "requires you to be logged in",
+        "ai features require you to be logged in",
+    )
+    if any(marker in normalized for marker in direct_markers):
+        return True
+    return bool(
+        "log in" in normalized
+        and "sign up" in normalized
+        and ("cursor" in normalized or "claude" in normalized or "codex" in normalized)
+    )
+
+
 def _int_value(data: dict, key: str) -> int:
     try:
         return int(data.get(key, 0) or 0)
@@ -1704,6 +1838,135 @@ def _binding_process_name(binding: dict) -> str:
     return ""
 
 
+def _binding_surface_kind(agent_id: str, binding: dict) -> str:
+    if not binding:
+        return ""
+    candidate = AppResolutionCandidate(
+        source="agent-app-bridge-binding",
+        display_name=str(
+            binding.get("window_title", "")
+            or binding.get("windowTitle", "")
+            or binding.get("title", "")
+            or binding.get("process_name", "")
+            or binding.get("processName", "")
+            or ""
+        ),
+        path=_binding_raw_path(binding),
+        executable_name=_binding_raw_executable_name(binding),
+        process_name=_binding_raw_process_name(binding),
+        pid=_int_value(binding, "pid"),
+        metadata={"command_line": _binding_raw_command_line(binding)},
+    )
+    normalized = _normalize(agent_id)
+    if normalized == "claude":
+        return claude_candidate_surface_kind(candidate) or _binding_surface_kind_from_text(
+            normalized,
+            binding,
+        )
+    if normalized == "codex":
+        return codex_candidate_surface_kind(candidate) or _binding_surface_kind_from_text(
+            normalized,
+            binding,
+        )
+    if normalized == "cursor":
+        return cursor_candidate_surface_kind(candidate) or _binding_surface_kind_from_text(
+            normalized,
+            binding,
+        )
+    return ""
+
+
+def _binding_surface_kind_from_text(agent_id: str, binding: dict) -> str:
+    text = "\n".join(
+        (
+            _binding_raw_process_name(binding),
+            _binding_raw_path(binding),
+            _binding_raw_command_line(binding),
+        )
+    ).replace("\\", "/").casefold()
+    if agent_id == "claude":
+        if any(
+            fragment in text
+            for fragment in (
+                "/.local/bin/",
+                "/appdata/roaming/npm/",
+                "/appdata/roaming/claude/claude-code/",
+                "/node_modules/@anthropic-ai/claude-code/",
+                "/.claude-code",
+            )
+        ):
+            return "cli"
+        if any(
+            fragment in text
+            for fragment in (
+                "/program files/windowsapps/claude_",
+                "/programs/claude/",
+                "/anthropic/",
+                "/anthropicclaude/",
+            )
+        ):
+            return "desktop"
+    if agent_id == "codex":
+        if any(
+            fragment in text
+            for fragment in (
+                "/.local/bin/",
+                "/appdata/local/openai/codex/bin/",
+                "/appdata/roaming/npm/",
+            )
+        ):
+            return "cli"
+        if (
+            "/program files/windowsapps/openai.codex" in text
+            or text.endswith("/app/codex.exe")
+        ):
+            return "desktop"
+    if agent_id == "cursor":
+        if "cursor-agent" in text:
+            return "cli"
+        if "cursor.exe" in text:
+            return "desktop"
+    return ""
+
+
+def _binding_raw_process_name(binding: dict) -> str:
+    for key in ("process_name", "processName", "executable_name", "executableName"):
+        value = str(binding.get(key, "") or "").strip()
+        if value:
+            return value
+    path = _binding_raw_path(binding)
+    return Path(path).name if path else ""
+
+
+def _binding_raw_executable_name(binding: dict) -> str:
+    for key in ("executable_name", "executableName"):
+        value = str(binding.get(key, "") or "").strip()
+        if value:
+            return value
+    path = _binding_raw_path(binding)
+    return Path(path).name if path else _binding_raw_process_name(binding)
+
+
+def _binding_raw_path(binding: dict) -> str:
+    for key in ("executable_path", "executablePath", "path"):
+        value = str(binding.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _binding_raw_command_line(binding: dict) -> str:
+    for key in ("command_line", "commandLine", "cmdline", "argv"):
+        value = binding.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, list):
+            parts = [str(item or "").strip() for item in value if str(item or "").strip()]
+            if parts:
+                return " ".join(parts)
+    return ""
+
+
 def _normalize_process_name(value: object) -> str:
     text = str(value or "").strip().casefold().replace("\\", "/")
     if "/" in text:
@@ -1713,6 +1976,10 @@ def _normalize_process_name(value: object) -> str:
 
 def _normalize_surface_kind(value: object) -> str:
     return str(value or "").strip().casefold().replace("-", "_").replace(" ", "_")
+
+
+def _normalize(value: object) -> str:
+    return str(value or "").strip().casefold()
 
 
 def json_dumps_ascii(value: str) -> str:

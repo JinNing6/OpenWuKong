@@ -1,7 +1,9 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from openwukong.evaluation.accessibility_probe import (
     AccessibilityElementSnapshot,
@@ -9,6 +11,10 @@ from openwukong.evaluation.accessibility_probe import (
     StaticAccessibilityObserver,
 )
 from openwukong.evaluation.primary_real_no_loss import (
+    PrimaryRealNoLossCase,
+    PrimaryRealNoLossReport,
+    _codex_case,
+    _write_case_artifact,
     _resolve_installed_browser_executable,
     _resolve_background_screenshot_dir,
     run_primary_real_no_loss,
@@ -68,6 +74,22 @@ class _FakeBackgroundCaptureProvider:
         )
 
 
+def _clear_system_dialog_preflight():
+    return {
+        "mode": "desktop-system-dialog-preflight",
+        "safety_mode": "read_only_desktop_scan",
+        "ok": True,
+        "decision": "system_dialog_clear",
+        "control_allowed": False,
+        "control_attempts": 0,
+        "window_input_attempts": 0,
+        "native_call_attempts": 0,
+        "system_dialog_detected": False,
+        "system_dialog_count": 0,
+        "system_dialog_snapshots": [],
+    }
+
+
 def _element(control_type: str, *, name: str = "", patterns=()):
     return AccessibilityElementSnapshot(
         control_type=control_type,
@@ -79,6 +101,121 @@ def _element(control_type: str, *, name: str = "", patterns=()):
 
 
 class PrimaryRealNoLossTests(unittest.TestCase):
+    def test_case_artifact_writes_primary_trajectory_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            screenshot = root / "background.png"
+            screenshot.write_bytes(b"fake background screenshot")
+            case = PrimaryRealNoLossCase(
+                case_id="browser_collect_sources",
+                scenario_id="browser.research.collect_sources",
+                status="verified",
+                passed=True,
+                real_verified=True,
+                real_probe_kind="browser-devtools-owned-helper",
+                details={
+                    "source_count": 1,
+                    "background_screenshots": [
+                        {
+                            "ok": True,
+                            "output_path": str(screenshot),
+                        }
+                    ],
+                },
+            )
+
+            written = _write_case_artifact(root, case)
+            artifact = json.loads(Path(written.artifact_path).read_text(encoding="utf-8"))
+            trajectory_path = Path(written.details["trajectory_path"])
+            trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
+            trajectory_artifacts = {
+                item["role"]: item
+                for item in trajectory["steps"][0]["artifacts"]
+            }
+
+        self.assertEqual(artifact["details"]["trajectory_path"], str(trajectory_path))
+        self.assertEqual(trajectory["mode"], "control-trajectory")
+        self.assertEqual(trajectory["scenario"], "browser.research.collect_sources")
+        self.assertEqual(trajectory["target_id"], "browser_collect_sources")
+        self.assertEqual(trajectory["metadata"]["runner"], "primary-real-no-loss")
+        self.assertEqual(trajectory["step_count"], 1)
+        self.assertEqual(trajectory["steps"][0]["phase"], "case_report")
+        self.assertEqual(
+            set(trajectory_artifacts),
+            {"case_artifact", "background_screenshots_output_path"},
+        )
+        self.assertEqual(
+            trajectory_artifacts["background_screenshots_output_path"]["media_type"],
+            "image/png",
+        )
+        self.assertEqual(
+            len(trajectory_artifacts["background_screenshots_output_path"]["sha256"]),
+            64,
+        )
+
+    def test_primary_focus_stability_ignores_external_background_screenshot_change(self):
+        report = PrimaryRealNoLossReport(
+            suite="focus-classification",
+            output_root="",
+            cases=(
+                PrimaryRealNoLossCase(
+                    case_id="wechat",
+                    scenario_id="wechat.chat.draft_reply",
+                    status="blocked",
+                    passed=True,
+                    real_verified=True,
+                    real_probe_kind="background-screenshot",
+                    details={
+                        "background_screenshots": [
+                            BackgroundWindowCaptureReport(
+                                hwnd=7001,
+                                output_path="window.png",
+                                ok=True,
+                                foreground_hwnd_before=9001,
+                                foreground_hwnd_after=9002,
+                            ).to_dict()
+                        ],
+                    },
+                ),
+            ),
+        )
+
+        screenshot = report.cases[0].details["background_screenshots"][0]
+        self.assertTrue(screenshot["foreground_changed"])
+        self.assertFalse(screenshot["foreground_focus_risk"])
+        self.assertTrue(report.background_screenshot_focus_stable)
+
+    def test_primary_focus_stability_flags_target_activation_as_risk(self):
+        report = PrimaryRealNoLossReport(
+            suite="focus-classification",
+            output_root="",
+            cases=(
+                PrimaryRealNoLossCase(
+                    case_id="wechat",
+                    scenario_id="wechat.chat.draft_reply",
+                    status="blocked",
+                    passed=True,
+                    real_verified=True,
+                    real_probe_kind="background-screenshot",
+                    details={
+                        "background_screenshots": [
+                            BackgroundWindowCaptureReport(
+                                hwnd=7001,
+                                output_path="window.png",
+                                ok=True,
+                                foreground_hwnd_before=9001,
+                                foreground_hwnd_after=7001,
+                            ).to_dict()
+                        ],
+                    },
+                ),
+            ),
+        )
+
+        screenshot = report.cases[0].details["background_screenshots"][0]
+        self.assertTrue(screenshot["foreground_focus_risk"])
+        self.assertFalse(report.background_screenshot_focus_stable)
+
     def test_browser_executable_resolution_prefers_installed_exe_over_path_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             chrome = Path(tmp) / "chrome.exe"
@@ -140,6 +277,107 @@ class PrimaryRealNoLossTests(unittest.TestCase):
         self.assertFalse(_is_wechat_window("WXWork.exe", "企业微信"))
         self.assertFalse(_is_wechat_window("WXWork.exe", "WeCom"))
 
+    def test_codex_primary_case_does_not_probe_default_fixed_ide_bridge_url(self):
+        calls: list[str] = []
+
+        def _probe(url: str) -> dict:
+            calls.append(url)
+            return {"ok": True, "bridge_url": url}
+
+        case = _codex_case(
+            {
+                "case_id": "codex-no-default-bridge",
+                "plan": {
+                    "draft_action": {
+                        "intent": {"workspace": "E:/ideaProjects/agent/openwukong"}
+                    }
+                },
+            },
+            Path("logs/runtime/test-codex-no-default-bridge").resolve(),
+            (),
+            _probe,
+        )
+
+        self.assertEqual(calls, [])
+        self.assertEqual(case.status, "unavailable")
+        self.assertEqual(case.details["probed_bridge_urls"], [])
+
+    def test_runner_stops_before_scenario_work_when_system_dialog_preflight_fails(self):
+        fixture = load_simulation_fixture(
+            Path("tests/fixtures/evaluation/l1_primary_user_scenarios.json")
+        )
+        preflight_calls = []
+        harness_calls = []
+
+        class FailingHarness:
+            def run_suite(self, _fixture):
+                harness_calls.append(True)
+                raise AssertionError("L1 replay must not run after preflight failure")
+
+        def _preflight_runner():
+            preflight_calls.append(True)
+            return {
+                "mode": "desktop-system-dialog-preflight",
+                "safety_mode": "read_only_desktop_scan",
+                "ok": False,
+                "decision": "system_dialog_detected",
+                "control_allowed": False,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "native_call_attempts": 0,
+                "system_dialog_detected": True,
+                "system_dialog_count": 1,
+                "system_dialog_snapshots": [
+                    {
+                        "hwnd": 301,
+                        "title": "Error",
+                        "process_name": "Codex.exe",
+                        "text": (
+                            "Error launching app\n"
+                            "Unable to find Electron app at "
+                            "C:/Program Files/WindowsApps/OpenAI.Codex_26.527/"
+                            "?type=click&tag=11634605478613629973"
+                        ),
+                    }
+                ],
+            }
+
+        def _should_not_run(*_args, **_kwargs):
+            raise AssertionError("subrunner must not run after preflight failure")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report = run_primary_real_no_loss(
+                fixture,
+                output_root=tmp,
+                harness=FailingHarness(),
+                allow_owned_browser_helper_launch=True,
+                owned_browser_helper_launcher=_FakeReadinessLauncher(),
+                owned_browser_helper_readiness_probe=_should_not_run,
+                owned_browser_helper_action_runner=_should_not_run,
+                ide_bridge_probe=_should_not_run,
+                word_background_probe_runner=_should_not_run,
+                computer_use_probe_runner=_should_not_run,
+                system_dialog_preflight_runner=_preflight_runner,
+            )
+        data = report.to_dict()
+        summary = summarize_report(report)
+
+        self.assertEqual(preflight_calls, [True])
+        self.assertEqual(harness_calls, [])
+        self.assertTrue(data["system_dialog_preflight_failed"])
+        self.assertEqual(
+            data["system_dialog_preflight"]["decision"],
+            "system_dialog_detected",
+        )
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(data["external_communication_attempts"], 0)
+        self.assertEqual(data["owned_app_launch_attempts"], 0)
+        self.assertEqual(data["total_cases"], 1)
+        self.assertEqual(data["failed_cases"], 1)
+        self.assertEqual(data["cases"], [])
+        self.assertTrue(summary["system_dialog_preflight_failed"])
+
     def test_runner_converts_primary_scenarios_to_real_no_loss_probes(self):
         fixture = load_simulation_fixture(
             Path("tests/fixtures/evaluation/l1_primary_user_scenarios.json")
@@ -164,6 +402,7 @@ class PrimaryRealNoLossTests(unittest.TestCase):
         bridge_calls: list[str] = []
         word_calls: list[dict] = []
         browser_resolver_calls: list[str] = []
+        computer_use_calls: list[bool] = []
 
         def _fake_readiness_probe(debugger_url: str) -> dict:
             readiness_calls.append(debugger_url)
@@ -256,6 +495,23 @@ class PrimaryRealNoLossTests(unittest.TestCase):
                 "control_allowed": True,
                 "control_attempts": 0,
                 "window_input_attempts": 0,
+                "foreground_hwnd_before": 1001,
+                "foreground_hwnd_after": 1001,
+                "foreground_focus_stable": True,
+                "foreground_snapshot_before": {
+                    "hwnd": 1001,
+                    "pid": 11,
+                    "process_name": "Weixin.exe",
+                    "window_title": "WeChat",
+                },
+                "foreground_snapshot_after": {
+                    "hwnd": 1001,
+                    "pid": 11,
+                    "process_name": "Weixin.exe",
+                    "window_title": "WeChat",
+                },
+                "foreground_change_classification": "stable",
+                "foreground_no_steal_verified": True,
                 "office_com_attempts": 1,
                 "error": "",
             }
@@ -264,11 +520,33 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             browser_resolver_calls.append(requested)
             return "C:/Program Files/Google/Chrome/Application/chrome.exe"
 
+        def _fake_computer_use_probe() -> dict:
+            computer_use_calls.append(True)
+            return {
+                "mode": "computer-use-runtime-probe",
+                "safety_mode": "read_only",
+                "ready": True,
+                "native_pipe_ready": True,
+                "window_state_ready": True,
+                "background_snapshot_ready": True,
+                "accessibility_tree_available": False,
+                "input_actions_activate_window": True,
+                "computer_use_attempts": 2,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "foreground_activation_attempts": 0,
+                "observed_window_count": 16,
+                "screenshot_count": 1,
+                "decision": "computer_use_read_only_ready",
+            }
+
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
             launcher = _FakeReadinessLauncher()
+            capture = _FakeBackgroundCaptureProvider()
             report = run_primary_real_no_loss(
                 fixture,
-                output_root=tmp,
+                output_root=root,
                 allow_owned_browser_helper_launch=True,
                 owned_browser_helper_launcher=launcher,
                 owned_browser_helper_terminator=_FakeReadinessTerminator(),
@@ -298,9 +576,18 @@ class PrimaryRealNoLossTests(unittest.TestCase):
                 ide_bridge_urls=("http://127.0.0.1:8787",),
                 ide_bridge_probe=_fake_ide_bridge_probe,
                 word_background_probe_runner=_fake_word_background_probe,
+                computer_use_probe_runner=_fake_computer_use_probe,
+                background_screenshot_dir=root / "background-screenshots",
+                window_capture_provider=capture,
+                system_dialog_preflight_runner=_clear_system_dialog_preflight,
             )
             data = report.to_dict()
-            output_root = Path(tmp).resolve()
+            output_root = root.resolve()
+            progress = json.loads(
+                (output_root / "primary-real-no-loss-progress.json").read_text(
+                    encoding="utf-8"
+                )
+            )
 
             self.assertEqual(data["mode"], "primary-scenario-real-no-loss")
             self.assertEqual(data["safety_mode"], "real_no_loss")
@@ -311,11 +598,40 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             self.assertEqual(data["uia_semantic_action_ready_cases"], 1)
             self.assertEqual(data["uia_value_set_attempts"], 0)
             self.assertEqual(data["uia_invoke_attempts"], 0)
+            self.assertEqual(data["computer_use_read_only_cases"], 1)
+            self.assertEqual(data["computer_use_attempts"], 2)
+            self.assertEqual(data["computer_use_window_input_attempts"], 0)
+            self.assertFalse(data["transport_matrix"]["goal_complete"])
+            self.assertEqual(
+                data["transport_matrix"]["summary"]["scenario_count"],
+                5,
+            )
+            self.assertEqual(
+                data["transport_matrix"]["summary"]["background_execute_ready_cases"],
+                5,
+            )
+            self.assertEqual(
+                data["transport_matrix"]["summary"]["background_write_ready_cases"],
+                1,
+            )
+            self.assertEqual(
+                data["transport_matrix"]["summary"]["write_blocked_cases"],
+                2,
+            )
             self.assertEqual(data["real_user_filesystem_scan_attempts"], 0)
             self.assertEqual(data["user_file_modification_attempts"], 0)
             self.assertEqual(data["owned_app_launch_attempts"], 1)
             self.assertEqual(data["passed_cases"], 5)
             self.assertEqual(data["real_verified_cases"], 5)
+            progress_stages = [
+                (item["stage_name"], item["status"])
+                for item in progress["stages"]
+            ]
+            self.assertIn(("system_dialog_preflight", "completed"), progress_stages)
+            self.assertIn(("l1_replay", "completed"), progress_stages)
+            self.assertIn(("browser_smoke_cases", "completed"), progress_stages)
+            self.assertIn(("wechat.chat.draft_reply", "started"), progress_stages)
+            self.assertIn(("word.document.create_background", "completed"), progress_stages)
 
             cases = {case["scenario_id"]: case for case in data["cases"]}
             self.assertEqual(cases["wechat.chat.draft_reply"]["status"], "verified")
@@ -341,6 +657,16 @@ class PrimaryRealNoLossTests(unittest.TestCase):
                 cases["wechat.chat.draft_reply"]["details"]["locator"]["windows"][0]["win32_child_window_count"],
                 1,
             )
+            self.assertTrue(
+                cases["wechat.chat.draft_reply"]["details"]["computer_use_read_only_ready"]
+            )
+            self.assertFalse(
+                cases["wechat.chat.draft_reply"]["details"]["computer_use_write_control_ready"]
+            )
+            self.assertEqual(
+                cases["wechat.chat.draft_reply"]["details"]["computer_use_probe"]["decision"],
+                "computer_use_read_only_ready",
+            )
             dry_run = cases["wechat.chat.draft_reply"]["details"]["uia_semantic_action_dry_run"]
             self.assertTrue(cases["wechat.chat.draft_reply"]["details"]["uia_semantic_action_ready"])
             self.assertEqual(dry_run["decision"], "wechat_uia_semantic_action_dry_run_ready")
@@ -351,6 +677,8 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             self.assertTrue(dry_run["request"]["target_ready"])
             self.assertTrue(dry_run["request"]["uia_value_pattern_ready"])
             self.assertTrue(dry_run["request"]["uia_invoke_pattern_ready"])
+            self.assertTrue(dry_run["request"]["background_screenshot_verified"])
+            self.assertEqual(dry_run["request"]["background_screenshot_success_count"], 1)
 
             self.assertEqual(cases["browser.research.collect_sources"]["status"], "verified")
             self.assertEqual(
@@ -368,6 +696,7 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             self.assertEqual(action_calls[0]["debugger_url"], "http://127.0.0.1:9451")
             self.assertEqual(readiness_calls, ["http://127.0.0.1:9451"])
             self.assertEqual(browser_resolver_calls, ["chrome.exe"])
+            self.assertEqual(computer_use_calls, [True])
             self.assertEqual(
                 launcher.calls[0]["argv"][0],
                 "C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -406,6 +735,13 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             self.assertEqual(word_details["office_com_attempts"], 1)
             self.assertEqual(word_details["control_attempts"], 0)
             self.assertEqual(word_details["window_input_attempts"], 0)
+            self.assertTrue(word_details["foreground_no_steal_verified"])
+            self.assertTrue(word_details["foreground_focus_stable"])
+            self.assertEqual(word_details["foreground_change_classification"], "stable")
+            self.assertEqual(
+                word_details["foreground_snapshot_before"]["process_name"],
+                "Weixin.exe",
+            )
             self.assertTrue(Path(word_details["document_path"]).resolve().is_file())
             self.assertTrue(
                 str(Path(word_details["document_path"]).resolve()).startswith(str(output_root))
@@ -437,6 +773,18 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             self.assertEqual(summary["uia_semantic_action_ready_cases"], 1)
             self.assertEqual(summary["uia_value_set_attempts"], 0)
             self.assertEqual(summary["uia_invoke_attempts"], 0)
+            self.assertEqual(summary["computer_use_read_only_cases"], 1)
+            self.assertEqual(summary["computer_use_attempts"], 2)
+            self.assertEqual(summary["computer_use_window_input_attempts"], 0)
+            self.assertFalse(summary["transport_matrix_summary"]["goal_complete"])
+            self.assertEqual(
+                summary["transport_matrix_summary"]["background_write_ready_cases"],
+                1,
+            )
+            self.assertEqual(
+                summary["transport_matrix_summary"]["write_blocked_cases"],
+                2,
+            )
             self.assertNotIn("details", summary["scenarios"][0])
 
     def test_runner_can_attach_no_focus_background_screenshots_to_wechat_case(self):
@@ -549,6 +897,7 @@ class PrimaryRealNoLossTests(unittest.TestCase):
                 word_background_probe_runner=_fake_word_background_probe,
                 background_screenshot_dir=root / "background-screenshots",
                 window_capture_provider=capture,
+                system_dialog_preflight_runner=_clear_system_dialog_preflight,
             )
             data = report.to_dict()
             cases = {case["scenario_id"]: case for case in data["cases"]}
@@ -672,9 +1021,11 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             }
 
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = _FakeBackgroundCaptureProvider()
             report = run_primary_real_no_loss(
                 fixture,
-                output_root=tmp,
+                output_root=root,
                 allow_owned_browser_helper_launch=True,
                 owned_browser_helper_launcher=_FakeReadinessLauncher(),
                 owned_browser_helper_terminator=_FakeReadinessTerminator(),
@@ -692,6 +1043,9 @@ class PrimaryRealNoLossTests(unittest.TestCase):
                 wechat_uia_message="OPENWUKONG_WECHAT_UIA_ACCEPTANCE: PASS",
                 wechat_uia_required_markers=("OPENWUKONG_WECHAT_UIA_ACCEPTANCE: PASS",),
                 wechat_uia_sender=FakeWeChatUiaSender(),
+                background_screenshot_dir=root / "background-screenshots",
+                window_capture_provider=capture,
+                system_dialog_preflight_runner=_clear_system_dialog_preflight,
             )
             data = report.to_dict()
 
@@ -828,9 +1182,11 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             }
 
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            capture = _FakeBackgroundCaptureProvider()
             report = run_primary_real_no_loss(
                 fixture,
-                output_root=tmp,
+                output_root=root,
                 allow_owned_browser_helper_launch=True,
                 owned_browser_helper_launcher=_FakeReadinessLauncher(),
                 owned_browser_helper_terminator=_FakeReadinessTerminator(),
@@ -852,10 +1208,14 @@ class PrimaryRealNoLossTests(unittest.TestCase):
                 ),
                 wechat_native_bridge_dry_run_adapter=FakeWeChatNativeBridgeDryRun(),
                 wechat_native_bridge_sender=FakeWeChatNativeBridgeSender(),
+                background_screenshot_dir=root / "background-screenshots",
+                window_capture_provider=capture,
+                system_dialog_preflight_runner=_clear_system_dialog_preflight,
             )
             data = report.to_dict()
 
         self.assertEqual(len(bridge_requests), 1)
+        self.assertTrue(bridge_requests[0].background_screenshot_verified)
         self.assertEqual(len(send_requests), 1)
         self.assertEqual(
             send_requests[0].message,
@@ -875,6 +1235,90 @@ class PrimaryRealNoLossTests(unittest.TestCase):
             wechat["details"]["wechat_native_bridge_send_report"]["decision"],
             "wechat_native_bridge_send_accepted",
         )
+
+    def test_runner_discovers_wechat_native_bridge_url_from_registry_file(self):
+        fixture = load_simulation_fixture(
+            Path("tests/fixtures/evaluation/l1_primary_user_scenarios.json")
+        )
+        fixture = {"suite": fixture["suite"], "cases": [fixture["cases"][0]]}
+        observer = StaticAccessibilityObserver(
+            [
+                AccessibilityWindowSnapshot(
+                    pid=7001,
+                    process_name="Weixin.exe",
+                    window_title="WeChat",
+                    hwnd=7001,
+                    elements=(
+                        _element("Text", name="File Transfer Assistant"),
+                    ),
+                )
+            ]
+        )
+        bridge_requests = []
+
+        class FakeWeChatNativeBridgeDryRun:
+            def prepare(self, request):
+                bridge_requests.append(request)
+                return {
+                    "mode": "wechat-native-bridge-dry-run",
+                    "safety_mode": "dry_run",
+                    "ok": True,
+                    "decision": "wechat_native_bridge_dry_run_ready",
+                    "control_attempts": 0,
+                    "send_attempts": 0,
+                    "window_input_attempts": 0,
+                    "capability_probe_attempts": 1,
+                    "request": request.to_dict(),
+                }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "wechat-native-bridges.json"
+            registry.write_text(
+                json.dumps(
+                    {
+                        "wechat_native_bridges": [
+                            {"bridge_url": "http://127.0.0.1:18190"}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "OPENWUKONG_WECHAT_NATIVE_BRIDGE_URLS": "",
+                    "OPENWUKONG_WECHAT_NATIVE_BRIDGE_REGISTRY_PATHS": "",
+                },
+                clear=False,
+            ):
+                report = run_primary_real_no_loss(
+                    fixture,
+                    output_root=root,
+                    accessibility_observer=observer,
+                    wechat_win32_observer=StaticWin32WindowObserver({7001: ()}),
+                    wechat_native_bridge_registry_paths=(registry,),
+                    wechat_native_bridge_message="OPENWUKONG_WECHAT_REGISTRY: PASS",
+                    wechat_native_bridge_required_markers=(
+                        "OPENWUKONG_WECHAT_REGISTRY: PASS",
+                    ),
+                    wechat_native_bridge_dry_run_adapter=FakeWeChatNativeBridgeDryRun(),
+                    background_screenshot_dir=root / "background-screenshots",
+                    window_capture_provider=_FakeBackgroundCaptureProvider(),
+                    system_dialog_preflight_runner=_clear_system_dialog_preflight,
+                )
+            data = report.to_dict()
+
+        self.assertEqual(len(bridge_requests), 1)
+        self.assertEqual(bridge_requests[0].bridge_url, "http://127.0.0.1:18190")
+        self.assertEqual(data["external_communication_attempts"], 0)
+        cases = {case["scenario_id"]: case for case in data["cases"]}
+        wechat = cases["wechat.chat.draft_reply"]
+        self.assertEqual(
+            wechat["details"]["wechat_native_bridge_urls"],
+            ["http://127.0.0.1:18190"],
+        )
+        self.assertTrue(wechat["details"]["wechat_native_bridge_ready"])
 
 
 if __name__ == "__main__":

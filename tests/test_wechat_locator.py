@@ -170,6 +170,54 @@ class WeChatLocatorTests(unittest.TestCase):
         self.assertFalse(window["write_control_ready"])
         self.assertIn("msaa-read-only", window["recommended_routes"])
 
+    def test_attaches_computer_use_fallback_without_promoting_write_control(self):
+        windows = (
+            AccessibilityWindowSnapshot(
+                pid=7301,
+                process_name="Weixin.exe",
+                window_title="File Transfer Assistant - WeChat",
+                class_name="Qt51514QWindowIcon",
+                hwnd=3001,
+                elements=(_element("Pane", name="WeChat"),),
+            ),
+        )
+        computer_use_probe = {
+            "mode": "computer-use-runtime-probe",
+            "safety_mode": "read_only",
+            "ready": True,
+            "native_pipe_ready": True,
+            "window_state_ready": True,
+            "background_snapshot_ready": True,
+            "accessibility_tree_available": False,
+            "input_actions_activate_window": True,
+            "computer_use_attempts": 2,
+            "control_attempts": 0,
+            "window_input_attempts": 0,
+            "foreground_activation_attempts": 0,
+            "observed_window_count": 12,
+            "screenshot_count": 1,
+            "decision": "computer_use_read_only_ready",
+        }
+
+        report = build_wechat_locator_report(
+            windows,
+            win32_observer=StaticWin32WindowObserver({3001: ()}),
+            computer_use_probe=computer_use_probe,
+        )
+        data = report.to_dict()
+
+        self.assertTrue(data["computer_use_read_only_ready"])
+        self.assertFalse(data["computer_use_write_control_ready"])
+        self.assertEqual(
+            data["computer_use_probe"]["decision"],
+            "computer_use_read_only_ready",
+        )
+        self.assertEqual(data["computer_use_probe"]["computer_use_attempts"], 2)
+        self.assertEqual(data["computer_use_probe"]["window_input_attempts"], 0)
+        self.assertIn("computer-use-read-only", data["recommended_routes"])
+        self.assertEqual(data["control_decision"], "read_only_verified_write_blocked")
+        self.assertFalse(data["write_control_ready"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,9 +9,12 @@ dispatch plan before any control primitive is allowed to run.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 import os
 import time
-from typing import Iterable, Optional
+from pathlib import Path
+from typing import Iterable, Mapping, Optional
 
 from openwukong.connectors.base import ConnectorTarget, SessionConnector
 from openwukong.connectors.registry import ConnectorManager
@@ -25,9 +28,14 @@ from openwukong.control.command_planner import (
     CommandPlanner,
 )
 from openwukong.control.command_runner import CommandRunner
+from openwukong.control.execution_contract import (
+    build_no_foreground_contract,
+    validate_no_foreground_contract,
+)
 from openwukong.control.foreground_takeover import (
     ForegroundTakeoverRequest,
     build_foreground_takeover_request,
+    validate_foreground_takeover_request,
 )
 from openwukong.control.side_effects import (
     SideEffectGateReport,
@@ -38,26 +46,71 @@ from openwukong.control.transport_capability import (
     TransportCapabilityReport,
     build_transport_capability,
 )
+from openwukong.control.trajectory import (
+    ControlTrajectoryRecorder,
+    extract_trajectory_artifacts,
+)
 
 
 _CONNECTOR_ROUTE_IDS = {
+    "app-native-bridge-required",
     "browser-devtools-or-extension",
+    "desktop-app-launch",
     "git-cli",
     "ide-extension-connector",
     "office-object-model-or-addin",
     "terminal-native-session",
 }
 _ROUTE_CONNECTOR_IDS = {
+    "app-native-bridge-required": ("agent-native-bridge", "wechat-native-bridge"),
     "browser-devtools-or-extension": ("browser",),
+    "desktop-app-launch": ("desktop-uia",),
     "git-cli": ("git",),
     "ide-extension-connector": ("ide-extension",),
     "office-object-model-or-addin": ("office",),
     "terminal-native-session": ("terminal",),
 }
+_UIA_CONNECTOR_ROUTE_IDS = {
+    "uia-semantic",
+    "uia-structural",
+    "uia-structural-observe",
+    "uia-window-observe",
+}
+_UIA_GENERAL_ACTIONS = {
+    "click",
+    "click_coordinates",
+    "click_semantic",
+    "double_click",
+    "drag",
+    "focus",
+    "get_controls",
+    "inspect",
+    "inspect_controls",
+    "invoke",
+    "key_press",
+    "read",
+    "read_text",
+    "screenshot",
+    "screenshot_window",
+    "scroll",
+    "select",
+    "set_edit_text",
+    "set_value",
+    "toggle",
+    "type_keys",
+    "type_text",
+    "wait",
+    "wait_for_element",
+    "write_text",
+}
 _FOREGROUND_UIA_ROUTES = {
     "app-native-bridge-required",
     "uia-structural",
     "uia-structural-observe",
+}
+_COMMAND_EXECUTION_ROUTES = {
+    "git-cli",
+    "terminal-native-session",
 }
 
 
@@ -78,6 +131,7 @@ class ControlIntent:
     side_effect_policy: dict = dataclasses.field(default_factory=dict)
     preferred_connector_id: str = ""
     preferred_route_id: str = ""
+    parameters: dict = dataclasses.field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -94,6 +148,7 @@ class ControlIntent:
             "side_effect_policy_present": bool(self.side_effect_policy),
             "preferred_connector_id": self.preferred_connector_id,
             "preferred_route_id": self.preferred_route_id,
+            "parameters": _intent_parameters_to_dict(self.parameters),
         }
 
 
@@ -145,6 +200,12 @@ class ControlDispatchReport:
             self.intent,
             selected_route=self.selected_route,
         )
+        no_foreground_contract = build_no_foreground_contract(
+            self.route_plan,
+            self.intent,
+            transport=transport,
+            selected_route=self.selected_route,
+        )
         return {
             "mode": self.mode,
             "safety_mode": self.safety_mode,
@@ -164,6 +225,7 @@ class ControlDispatchReport:
             "background_safe": self.background_safe,
             "foreground_required": self.foreground_required,
             "transport_capability": transport.to_dict(),
+            "no_foreground_contract": no_foreground_contract.to_dict(),
             "transport_capability_level": transport.capability_level,
             "selected_transport": transport.selected_transport,
             "can_execute_without_focus": transport.can_execute_without_focus,
@@ -198,6 +260,9 @@ class ControlExecutionReport:
     foreground_takeover_request: ForegroundTakeoverRequest | None = None
     action_report: dict | None = None
     error: str = ""
+    trajectory_id: str = ""
+    trajectory_path: str = ""
+    trajectory_error: str = ""
     elapsed_ms: float = 0.0
 
     @property
@@ -231,6 +296,21 @@ class ControlExecutionReport:
         return self.dispatch_report.ownership
 
     def to_dict(self) -> dict:
+        transport = self.dispatch_report.transport_capability or build_transport_capability(
+            self.dispatch_report.route_plan,
+            self.dispatch_report.intent,
+            selected_route=self.dispatch_report.selected_route,
+        )
+        no_foreground_contract = build_no_foreground_contract(
+            self.dispatch_report.route_plan,
+            self.dispatch_report.intent,
+            transport=transport,
+            selected_route=self.dispatch_report.selected_route,
+        )
+        no_foreground_validation = validate_no_foreground_contract(
+            no_foreground_contract,
+            self.action_report,
+        )
         return {
             "mode": self.mode,
             "safety_mode": self.safety_mode,
@@ -249,9 +329,14 @@ class ControlExecutionReport:
             ),
             "selected_route": self.selected_route,
             "selected_connector_id": self.selected_connector_id,
+            "no_foreground_contract": no_foreground_contract.to_dict(),
+            "no_foreground_validation": no_foreground_validation.to_dict(),
             "dispatch_report": self.dispatch_report.to_dict(),
             "action_report": dict(self.action_report or {}),
             "error": self.error,
+            "trajectory_id": self.trajectory_id,
+            "trajectory_path": self.trajectory_path,
+            "trajectory_error": self.trajectory_error,
             "elapsed_ms": round(self.elapsed_ms, 3),
         }
 
@@ -326,6 +411,7 @@ class _TransportExecutionGate:
     allowed: bool
     decision: str = "allow"
     error: str = ""
+    takeover_request: ForegroundTakeoverRequest | None = None
 
 
 class ControlFabric:
@@ -360,8 +446,9 @@ class ControlFabric:
 
     def dispatch(self, target_or_window: object, intent: ControlIntent) -> ControlDispatchReport:
         started = time.perf_counter()
-        route_plan = build_control_route_plan(target_or_window)
         target = _connector_target_from(target_or_window)
+        route_source = self._uia_route_source(target_or_window, target, intent)
+        route_plan = build_control_route_plan(route_source)
         selected_route = _preferred_route(intent, route_plan)
         session_discovery = _session_discovery_dict(target_or_window)
         ownership = self._ownership_for_target(target_or_window, target)
@@ -383,6 +470,42 @@ class ControlFabric:
         )
         return report
 
+    def _uia_route_source(
+        self,
+        target_or_window: object,
+        target: ConnectorTarget,
+        intent: ControlIntent,
+    ) -> object:
+        """Hydrate a raw target with a read-only UIA snapshot before routing."""
+        if int(target.pid or 0) <= 0 or hasattr(target_or_window, "elements"):
+            return target_or_window
+        action = str(intent.action or "").strip().lower()
+        preferred_route = str(intent.preferred_route_id or "").strip()
+        initial_plan = build_control_route_plan(target_or_window)
+        should_probe = (
+            preferred_route in _UIA_CONNECTOR_ROUTE_IDS
+            or (
+                initial_plan.app_family == "generic-desktop"
+                and action in _UIA_GENERAL_ACTIONS
+            )
+        )
+        if not should_probe:
+            return target_or_window
+
+        connectors = tuple(getattr(self._connector_manager, "_connectors", ()) or ())
+        for connector in connectors:
+            if connector.connector_id != "desktop-uia":
+                continue
+            probe = getattr(connector, "probe_target", None)
+            if not callable(probe):
+                continue
+            try:
+                snapshot = probe(target)
+            except Exception:
+                return target_or_window
+            return snapshot or target_or_window
+        return target_or_window
+
     def execute(
         self,
         target_or_window: object,
@@ -390,39 +513,33 @@ class ControlFabric:
         *,
         allow_control: bool = False,
         browser_action_runner: Optional[object] = None,
+        foreground_takeover_approval: ForegroundTakeoverRequest | Mapping[str, object] | None = None,
+        trajectory_root: str | Path = "",
+        trajectory_metadata: Optional[dict] = None,
     ) -> ControlExecutionReport:
         started = time.perf_counter()
         dispatch_report = self.dispatch(target_or_window, intent)
         if not allow_control:
-            return ControlExecutionReport(
-                dispatch_report=dispatch_report,
-                decision="blocked",
-                ok=False,
-                allow_control=False,
-                ownership_required=self._require_owned_session_for_execution,
-                error="explicit_control_permission_required",
-                elapsed_ms=(time.perf_counter() - started) * 1000,
+            return _finalize_execution_report(
+                ControlExecutionReport(
+                    dispatch_report=dispatch_report,
+                    decision="blocked",
+                    ok=False,
+                    allow_control=False,
+                    ownership_required=self._require_owned_session_for_execution,
+                    error="explicit_control_permission_required",
+                    elapsed_ms=(time.perf_counter() - started) * 1000,
+                ),
+                trajectory_root=trajectory_root,
+                trajectory_metadata=trajectory_metadata,
             )
-        transport_gate = _evaluate_transport_execution_gate(dispatch_report)
-        if not transport_gate.allowed:
-            takeover_request = None
-            if transport_gate.decision == "blocked_foreground_takeover_required":
-                takeover_request = build_foreground_takeover_request(dispatch_report)
-            return ControlExecutionReport(
-                dispatch_report=dispatch_report,
-                decision="blocked",
-                ok=False,
-                allow_control=True,
-                ownership_required=self._require_owned_session_for_execution,
-                transport_gate_decision=transport_gate.decision,
-                transport_gate_error=transport_gate.error,
-                foreground_takeover_request=takeover_request,
-                error=transport_gate.error,
-                elapsed_ms=(time.perf_counter() - started) * 1000,
-            )
-        if not _dispatch_allows_connector_action(dispatch_report):
-            if not dispatch_report.side_effect_gate.allowed:
-                return ControlExecutionReport(
+        transport_gate = _evaluate_transport_execution_gate(
+            dispatch_report,
+            foreground_takeover_approval=foreground_takeover_approval,
+        )
+        if dispatch_report.blocked:
+            return _finalize_execution_report(
+                ControlExecutionReport(
                     dispatch_report=dispatch_report,
                     decision="blocked",
                     ok=False,
@@ -430,31 +547,82 @@ class ControlFabric:
                     ownership_required=self._require_owned_session_for_execution,
                     transport_gate_decision=transport_gate.decision,
                     transport_gate_error=transport_gate.error,
-                    error=dispatch_report.side_effect_gate.reason,
+                    error=dispatch_report.reason or dispatch_report.decision,
                     elapsed_ms=(time.perf_counter() - started) * 1000,
+                ),
+                trajectory_root=trajectory_root,
+                trajectory_metadata=trajectory_metadata,
+            )
+        if not transport_gate.allowed:
+            takeover_request = transport_gate.takeover_request
+            if (
+                takeover_request is None
+                and transport_gate.decision.startswith("blocked_foreground_takeover")
+            ):
+                takeover_request = _build_bound_foreground_takeover_request(dispatch_report)
+            return _finalize_execution_report(
+                ControlExecutionReport(
+                    dispatch_report=dispatch_report,
+                    decision="blocked",
+                    ok=False,
+                    allow_control=True,
+                    ownership_required=self._require_owned_session_for_execution,
+                    transport_gate_decision=transport_gate.decision,
+                    transport_gate_error=transport_gate.error,
+                    foreground_takeover_request=takeover_request,
+                    error=transport_gate.error,
+                    elapsed_ms=(time.perf_counter() - started) * 1000,
+                ),
+                trajectory_root=trajectory_root,
+                trajectory_metadata=trajectory_metadata,
+            )
+        if not _dispatch_allows_connector_action(dispatch_report):
+            if not dispatch_report.side_effect_gate.allowed:
+                return _finalize_execution_report(
+                    ControlExecutionReport(
+                        dispatch_report=dispatch_report,
+                        decision="blocked",
+                        ok=False,
+                        allow_control=True,
+                        ownership_required=self._require_owned_session_for_execution,
+                        transport_gate_decision=transport_gate.decision,
+                        transport_gate_error=transport_gate.error,
+                        error=dispatch_report.side_effect_gate.reason,
+                        elapsed_ms=(time.perf_counter() - started) * 1000,
+                    ),
+                    trajectory_root=trajectory_root,
+                    trajectory_metadata=trajectory_metadata,
                 )
-            return ControlExecutionReport(
-                dispatch_report=dispatch_report,
-                decision="blocked",
-                ok=False,
-                allow_control=True,
-                ownership_required=self._require_owned_session_for_execution,
-                transport_gate_decision=transport_gate.decision,
-                transport_gate_error=transport_gate.error,
-                error="dispatch_gate_not_ready",
-                elapsed_ms=(time.perf_counter() - started) * 1000,
+            return _finalize_execution_report(
+                ControlExecutionReport(
+                    dispatch_report=dispatch_report,
+                    decision="blocked",
+                    ok=False,
+                    allow_control=True,
+                    ownership_required=self._require_owned_session_for_execution,
+                    transport_gate_decision=transport_gate.decision,
+                    transport_gate_error=transport_gate.error,
+                    error="dispatch_gate_not_ready",
+                    elapsed_ms=(time.perf_counter() - started) * 1000,
+                ),
+                trajectory_root=trajectory_root,
+                trajectory_metadata=trajectory_metadata,
             )
         if self._require_owned_session_for_execution and not dispatch_report.ownership.owned:
-            return ControlExecutionReport(
-                dispatch_report=dispatch_report,
-                decision="blocked",
-                ok=False,
-                allow_control=True,
-                ownership_required=True,
-                transport_gate_decision=transport_gate.decision,
-                transport_gate_error=transport_gate.error,
-                error="owned_session_required",
-                elapsed_ms=(time.perf_counter() - started) * 1000,
+            return _finalize_execution_report(
+                ControlExecutionReport(
+                    dispatch_report=dispatch_report,
+                    decision="blocked",
+                    ok=False,
+                    allow_control=True,
+                    ownership_required=True,
+                    transport_gate_decision=transport_gate.decision,
+                    transport_gate_error=transport_gate.error,
+                    error="owned_session_required",
+                    elapsed_ms=(time.perf_counter() - started) * 1000,
+                ),
+                trajectory_root=trajectory_root,
+                trajectory_metadata=trajectory_metadata,
             )
 
         if _dispatch_allows_browser_devtools_action(dispatch_report):
@@ -471,20 +639,24 @@ class ControlFabric:
         else:
             resolution = self._resolve_executable_connector(dispatch_report)
             if resolution.connector is None:
-                return ControlExecutionReport(
-                    dispatch_report=dispatch_report,
-                    decision="blocked",
-                    ok=False,
-                    allow_control=True,
-                    ownership_required=self._require_owned_session_for_execution,
-                    transport_gate_decision=transport_gate.decision,
-                    transport_gate_error=transport_gate.error,
-                    error=resolution.error or "connector_execution_not_available",
-                    elapsed_ms=(time.perf_counter() - started) * 1000,
+                return _finalize_execution_report(
+                    ControlExecutionReport(
+                        dispatch_report=dispatch_report,
+                        decision="blocked",
+                        ok=False,
+                        allow_control=True,
+                        ownership_required=self._require_owned_session_for_execution,
+                        transport_gate_decision=transport_gate.decision,
+                        transport_gate_error=transport_gate.error,
+                        error=resolution.error or "connector_execution_not_available",
+                        elapsed_ms=(time.perf_counter() - started) * 1000,
+                    ),
+                    trajectory_root=trajectory_root,
+                    trajectory_metadata=trajectory_metadata,
                 )
-            connector_result = resolution.connector.send_message(
+            connector_result = resolution.connector.execute_action(
                 dispatch_report.target,
-                _connector_message_from_intent(intent),
+                intent,
             )
             action_report_obj = _connector_action_result_to_dict(connector_result)
         action_report = (
@@ -493,7 +665,7 @@ class ControlFabric:
             else dict(action_report_obj or {})
         )
         ok = bool(action_report.get("ok"))
-        return ControlExecutionReport(
+        report = ControlExecutionReport(
             dispatch_report=dispatch_report,
             decision="executed" if ok else "failed",
             ok=ok,
@@ -501,9 +673,16 @@ class ControlFabric:
             ownership_required=self._require_owned_session_for_execution,
             transport_gate_decision=transport_gate.decision,
             transport_gate_error=transport_gate.error,
+            foreground_takeover_request=transport_gate.takeover_request,
             action_report=action_report,
             error=str(action_report.get("error", "") or ""),
             elapsed_ms=(time.perf_counter() - started) * 1000,
+        )
+        report = _enforce_no_foreground_contract(report)
+        return _finalize_execution_report(
+            report,
+            trajectory_root=trajectory_root,
+            trajectory_metadata=trajectory_metadata,
         )
 
     def execute_command_intent(
@@ -593,7 +772,7 @@ class ControlFabric:
                 side_effect_gate=side_effect_gate,
             )
 
-        if _is_hard_block(target, route_plan):
+        if _is_hard_block(target, route_plan, selected_route=selected_route):
             return _report(
                 target,
                 intent,
@@ -609,9 +788,59 @@ class ControlFabric:
                 side_effect_gate=side_effect_gate,
             )
 
+        if selected_route in _UIA_CONNECTOR_ROUTE_IDS:
+            if route_plan.is_blocked or not _route_is_declared(route_plan, selected_route):
+                return _report(
+                    target,
+                    intent,
+                    route_plan,
+                    started,
+                    decision="blocked",
+                    execution_mode="none",
+                    selected_route=selected_route,
+                    blocked=True,
+                    reason="uia_route_not_allowed_by_policy",
+                    session_discovery=session_discovery,
+                    ownership=ownership,
+                    side_effect_gate=side_effect_gate,
+                )
+            resolution = self._resolve_route_connector(target, selected_route, intent)
+            if resolution.connector is not None:
+                transport = build_transport_capability(
+                    route_plan,
+                    intent,
+                    selected_route=selected_route,
+                )
+                return _report(
+                    target,
+                    intent,
+                    route_plan,
+                    started,
+                    decision="dispatch_connector",
+                    execution_mode=(
+                        "foreground_uia" if transport.foreground_required else "background_uia"
+                    ),
+                    selected_route=selected_route,
+                    selected_connector_id=resolution.connector.connector_id,
+                    installed_connector_ids=resolution.installed_connector_ids,
+                    candidate_connector_ids=resolution.candidate_connector_ids,
+                    connector_ready=True,
+                    background_safe=transport.background_safe,
+                    foreground_required=transport.foreground_required,
+                    reason="policy_bound_uia_connector_available",
+                    session_discovery=session_discovery,
+                    ownership=ownership,
+                    side_effect_gate=side_effect_gate,
+                )
+
         if selected_route in _CONNECTOR_ROUTE_IDS:
             resolution = self._resolve_route_connector(target, selected_route, intent)
             if resolution.connector is not None:
+                transport = build_transport_capability(
+                    route_plan,
+                    intent,
+                    selected_route=selected_route,
+                )
                 return _report(
                     target,
                     intent,
@@ -624,31 +853,55 @@ class ControlFabric:
                     installed_connector_ids=resolution.installed_connector_ids,
                     candidate_connector_ids=resolution.candidate_connector_ids,
                     connector_ready=True,
-                    background_safe=True,
+                    background_safe=transport.background_safe,
+                    foreground_required=transport.foreground_required,
                     reason="deterministic_connector_available",
                     session_discovery=session_discovery,
                     ownership=ownership,
                     side_effect_gate=side_effect_gate,
                 )
-            reason = f"no_connector_available:{selected_route}"
-            if resolution.candidate_connector_ids:
-                reason = f"connector_installed_session_not_ready:{selected_route}"
-            return _report(
-                target,
-                intent,
-                route_plan,
-                started,
-                decision="connector_required",
-                execution_mode="none",
-                selected_route=selected_route,
-                installed_connector_ids=resolution.installed_connector_ids,
-                candidate_connector_ids=resolution.candidate_connector_ids,
-                background_safe=True,
-                reason=reason,
-                session_discovery=session_discovery,
-                ownership=ownership,
-                side_effect_gate=side_effect_gate,
-            )
+            if selected_route == "app-native-bridge-required" and not resolution.candidate_connector_ids:
+                if _input_candidate_count(target, route_plan) <= 0:
+                    return _report(
+                        target,
+                        intent,
+                        route_plan,
+                        started,
+                        decision="blocked",
+                        execution_mode="none",
+                        selected_route=selected_route,
+                        installed_connector_ids=resolution.installed_connector_ids,
+                        candidate_connector_ids=resolution.candidate_connector_ids,
+                        blocked=True,
+                        reason="no_deterministic_route",
+                        session_discovery=session_discovery,
+                        ownership=ownership,
+                        side_effect_gate=side_effect_gate,
+                    )
+            else:
+                reason = f"no_connector_available:{selected_route}"
+                if resolution.candidate_connector_ids:
+                    reason = f"connector_installed_session_not_ready:{selected_route}"
+                return _report(
+                    target,
+                    intent,
+                    route_plan,
+                    started,
+                    decision="connector_required",
+                    execution_mode="none",
+                    selected_route=selected_route,
+                    installed_connector_ids=resolution.installed_connector_ids,
+                    candidate_connector_ids=resolution.candidate_connector_ids,
+                    background_safe=build_transport_capability(
+                        route_plan,
+                        intent,
+                        selected_route=selected_route,
+                    ).background_safe,
+                    reason=reason,
+                    session_discovery=session_discovery,
+                    ownership=ownership,
+                    side_effect_gate=side_effect_gate,
+                )
 
         if selected_route == "uia-semantic":
             return _report(
@@ -756,7 +1009,7 @@ class ControlFabric:
         route_candidates = tuple(
             connector
             for connector in candidates
-            if _connector_matches_route(connector, route_id)
+            if _connector_is_candidate_for_route(connector, route_id, target)
         )
         for connector in candidates:
             if not _connector_matches_route(connector, route_id):
@@ -800,20 +1053,118 @@ class ControlFabric:
 
 def default_connector_manager() -> ConnectorManager:
     from openwukong.connectors import (
+        AgentNativeBridgeConnector,
         BrowserSessionConnector,
+        DesktopUIAConnector,
         GitCommandConnector,
         IDEExtensionConnector,
         TerminalCommandConnector,
+        WeChatNativeBridgeConnector,
     )
 
     return ConnectorManager(
         [
+            WeChatNativeBridgeConnector(),
+            AgentNativeBridgeConnector(),
             BrowserSessionConnector(),
             GitCommandConnector(),
             TerminalCommandConnector(),
             IDEExtensionConnector(),
+            DesktopUIAConnector(),
         ]
     )
+
+
+def _finalize_execution_report(
+    report: ControlExecutionReport,
+    *,
+    trajectory_root: str | Path = "",
+    trajectory_metadata: Optional[dict] = None,
+) -> ControlExecutionReport:
+    root_text = str(trajectory_root or "").strip()
+    if not root_text:
+        return report
+    try:
+        recorder = ControlTrajectoryRecorder(
+            root_text,
+            scenario="control-fabric-execute",
+            target_id=_trajectory_target_id(report.dispatch_report),
+            metadata={
+                "route": report.selected_route,
+                "connector_id": report.selected_connector_id,
+                "decision": report.decision,
+                **dict(trajectory_metadata or {}),
+            },
+        )
+        final_report = dataclasses.replace(
+            report,
+            trajectory_id=recorder.trajectory_id,
+            trajectory_path=str(recorder.manifest_path),
+        )
+        recorder.record_step(
+            phase="dispatch",
+            action=str(report.dispatch_report.intent.action or ""),
+            report=report.dispatch_report,
+        )
+        recorder.record_step(
+            phase="execution",
+            action=str(report.dispatch_report.intent.action or ""),
+            report=final_report,
+            artifacts=extract_trajectory_artifacts(final_report.action_report),
+        )
+        return final_report
+    except OSError as exc:
+        return dataclasses.replace(
+            report,
+            trajectory_error=f"trajectory_write_failed:{type(exc).__name__}",
+        )
+
+
+def _enforce_no_foreground_contract(
+    report: ControlExecutionReport,
+) -> ControlExecutionReport:
+    if report.selected_route in _COMMAND_EXECUTION_ROUTES:
+        return report
+    if not report.action_report:
+        return report
+
+    transport = report.dispatch_report.transport_capability or build_transport_capability(
+        report.dispatch_report.route_plan,
+        report.dispatch_report.intent,
+        selected_route=report.dispatch_report.selected_route,
+    )
+    contract = build_no_foreground_contract(
+        report.dispatch_report.route_plan,
+        report.dispatch_report.intent,
+        transport=transport,
+        selected_route=report.dispatch_report.selected_route,
+    )
+    validation = validate_no_foreground_contract(contract, report.action_report)
+    if validation.ok:
+        return report
+
+    violations = ",".join(validation.violations) or validation.decision
+    return dataclasses.replace(
+        report,
+        ok=False,
+        decision="failed",
+        error=f"no_foreground_contract_violation:{violations}",
+    )
+
+
+def _trajectory_target_id(report: ControlDispatchReport) -> str:
+    target = report.target
+    for value in (
+        target.session_id,
+        target.workspace_id,
+        target.resource_url,
+        target.window_title,
+        target.process_name,
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return report.selected_route or "control-fabric-target"
 
 
 def _report(
@@ -869,17 +1220,42 @@ def _preferred_route(intent: ControlIntent, route_plan: ControlRoutePlan) -> str
     preferred = (intent.preferred_route_id or "").strip()
     if preferred:
         return preferred
+    if str(intent.action or "").strip().lower() in {
+        "launch_app",
+        "launch_application",
+        "start_application",
+    }:
+        return "desktop-app-launch"
     return route_plan.primary_route.route_id
 
 
-def _is_hard_block(target: ConnectorTarget, route_plan: ControlRoutePlan) -> bool:
+def _is_hard_block(
+    target: ConnectorTarget,
+    route_plan: ControlRoutePlan,
+    *,
+    selected_route: str = "",
+) -> bool:
     del target
+    if selected_route == "desktop-app-launch":
+        return False
+    if (
+        selected_route in _UIA_CONNECTOR_ROUTE_IDS
+        and not route_plan.is_blocked
+        and _route_is_declared(route_plan, selected_route)
+    ):
+        return False
     route_id = route_plan.primary_route.route_id
     if route_id == "no-deterministic-route":
         return True
     if route_id not in _CONNECTOR_ROUTE_IDS and "no_accessible_elements" in route_plan.missing_capabilities:
         return True
     return False
+
+
+def _route_is_declared(route_plan: ControlRoutePlan, route_id: str) -> bool:
+    declared = {route_plan.primary_route.route_id}
+    declared.update(route.route_id for route in route_plan.fallback_routes)
+    return route_id in declared
 
 
 def _first_foreground_route(route_plan: ControlRoutePlan, selected_route: str) -> str:
@@ -918,7 +1294,24 @@ def _connector_matches_route(connector: SessionConnector, route_id: str) -> bool
     }
     if route_id in route_values:
         return True
+    route_ids = getattr(connector, "route_ids", ())
+    if isinstance(route_ids, str):
+        route_ids = (route_ids,)
+    if route_id in {str(item or "") for item in route_ids}:
+        return True
     return connector.connector_id in _ROUTE_CONNECTOR_IDS.get(route_id, ())
+
+
+def _connector_is_candidate_for_route(
+    connector: SessionConnector,
+    route_id: str,
+    target: ConnectorTarget,
+) -> bool:
+    if not _connector_matches_route(connector, route_id):
+        return False
+    if connector.connector_id in {"agent-native-bridge", "wechat-native-bridge"}:
+        return _connector_supports_target(connector, target)
+    return True
 
 
 def _connector_supports_target(connector: SessionConnector, target: ConnectorTarget) -> bool:
@@ -950,6 +1343,10 @@ def _connector_session_ready(
         return bool((target.resource_url or "").strip())
     if connector_id == "ide-extension":
         return bool((target.ide_bridge_url or "").strip())
+    if connector_id == "agent-native-bridge":
+        return bool((target.agent_native_bridge_url or "").strip())
+    if connector_id == "wechat-native-bridge":
+        return bool((target.wechat_native_bridge_url or "").strip())
     if connector_id in {"terminal", "git"}:
         return _has_workspace_dir(target)
     return True
@@ -970,11 +1367,68 @@ def _dispatch_allows_connector_action(report: ControlDispatchReport) -> bool:
         report.decision == "dispatch_connector"
         and report.connector_ready
         and bool(report.selected_connector_id)
-        and report.selected_route in _CONNECTOR_ROUTE_IDS
+        and report.selected_route in (_CONNECTOR_ROUTE_IDS | _UIA_CONNECTOR_ROUTE_IDS)
     )
 
 
-def _evaluate_transport_execution_gate(report: ControlDispatchReport) -> _TransportExecutionGate:
+def _build_bound_foreground_takeover_request(
+    report: ControlDispatchReport,
+) -> ForegroundTakeoverRequest:
+    """Bind an approval artifact to the exact PID and typed action payload."""
+    request = build_foreground_takeover_request(report)
+    intent = report.intent
+    target = report.target
+    material = {
+        "base_request_id": request.to_dict().get("request_id", ""),
+        "selected_route": report.selected_route,
+        "selected_transport": str(
+            getattr(report.transport_capability, "selected_transport", "") or ""
+        ),
+        "target": {
+            "pid": int(target.pid or 0),
+            "process_name": target.process_name,
+            "window_title": target.window_title,
+            "workspace_id": target.workspace_id,
+            "session_id": target.session_id,
+        },
+        "intent": {
+            "action": intent.action,
+            "text": intent.text,
+            "url": intent.url,
+            "selector": intent.selector,
+            "value": intent.value,
+            "submit": bool(intent.submit),
+            "preferred_connector_id": intent.preferred_connector_id,
+            "preferred_route_id": intent.preferred_route_id,
+            "parameters": _stable_approval_value(intent.parameters),
+        },
+    }
+    canonical = json.dumps(
+        material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return dataclasses.replace(request, request_id=f"fgt-{digest[:24]}")
+
+
+def _stable_approval_value(value: object):
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Mapping):
+        pairs = sorted(value.items(), key=lambda item: str(item[0]))
+        return {str(key): _stable_approval_value(item) for key, item in pairs}
+    if isinstance(value, (list, tuple)):
+        return [_stable_approval_value(item) for item in value]
+    return {"type": f"{type(value).__module__}.{type(value).__qualname__}"}
+
+
+def _evaluate_transport_execution_gate(
+    report: ControlDispatchReport,
+    *,
+    foreground_takeover_approval: ForegroundTakeoverRequest | Mapping[str, object] | None = None,
+) -> _TransportExecutionGate:
     transport = report.transport_capability or build_transport_capability(
         report.route_plan,
         report.intent,
@@ -987,12 +1441,78 @@ def _evaluate_transport_execution_gate(report: ControlDispatchReport) -> _Transp
             error="transport_capability_blocked",
         )
     if transport.foreground_required or transport.capability_level == "foreground-required":
+        request = _build_bound_foreground_takeover_request(report)
+        if foreground_takeover_approval is not None:
+            validation = validate_foreground_takeover_request(
+                foreground_takeover_approval,
+                action=report.intent.action,
+                target_process_names=(report.target.process_name,),
+                selected_transport=transport.selected_transport,
+            )
+            approved = validation.request
+            if not validation.valid:
+                return _TransportExecutionGate(
+                    allowed=False,
+                    decision="blocked_foreground_takeover_invalid",
+                    error=validation.decision,
+                    takeover_request=approved or request,
+                )
+            if not _foreground_approval_matches(request, approved):
+                return _TransportExecutionGate(
+                    allowed=False,
+                    decision="blocked_foreground_takeover_invalid",
+                    error="foreground_takeover_target_binding_mismatch",
+                    takeover_request=approved or request,
+                )
+            if str(getattr(approved, "status", "") or "").strip().lower() != "approved":
+                return _TransportExecutionGate(
+                    allowed=False,
+                    decision="blocked_foreground_takeover_not_approved",
+                    error="foreground_takeover_approval_required",
+                    takeover_request=approved or request,
+                )
+            if not report.intent.allow_foreground_interaction:
+                return _TransportExecutionGate(
+                    allowed=False,
+                    decision="blocked_foreground_takeover_not_allowed",
+                    error="foreground_takeover_not_allowed",
+                    takeover_request=approved,
+                )
+            return _TransportExecutionGate(
+                allowed=True,
+                decision="allow_approved_foreground_takeover",
+                takeover_request=approved,
+            )
         return _TransportExecutionGate(
             allowed=False,
             decision="blocked_foreground_takeover_required",
             error="foreground_takeover_confirmation_required",
+            takeover_request=request,
         )
     return _TransportExecutionGate(allowed=True)
+
+
+def _foreground_approval_matches(
+    expected: ForegroundTakeoverRequest,
+    approved: ForegroundTakeoverRequest | None,
+) -> bool:
+    if approved is None:
+        return False
+    expected_data = expected.to_dict()
+    approved_data = approved.to_dict()
+    for field in (
+        "request_id",
+        "action",
+        "target_process_name",
+        "target_window_title",
+        "selected_route",
+        "selected_transport",
+    ):
+        left = str(expected_data.get(field, "") or "").strip().casefold()
+        right = str(approved_data.get(field, "") or "").strip().casefold()
+        if left != right:
+            return False
+    return True
 
 
 def _connector_message_from_intent(intent: ControlIntent) -> str:
@@ -1077,6 +1597,22 @@ def _connector_target_from(target_or_window: object) -> ConnectorTarget:
         resource_url=str(_attr(target_or_window, "resource_url", "") or ""),
         debugger_url=str(_attr(target_or_window, "debugger_url", "") or ""),
         ide_bridge_url=str(_attr(target_or_window, "ide_bridge_url", "") or ""),
+        agent_native_bridge_url=str(
+            _attr(target_or_window, "agent_native_bridge_url", "") or ""
+        ),
+        wechat_native_bridge_url=str(
+            _attr(target_or_window, "wechat_native_bridge_url", "") or ""
+        ),
+        conversation_name=str(_attr(target_or_window, "conversation_name", "") or ""),
+        background_screenshot_focus_stable=bool(
+            _attr(target_or_window, "background_screenshot_focus_stable", True)
+        ),
+        background_screenshot_count=_safe_int(
+            _attr(target_or_window, "background_screenshot_count", 0)
+        ),
+        background_screenshot_success_count=_safe_int(
+            _attr(target_or_window, "background_screenshot_success_count", 0)
+        ),
     )
 
 
@@ -1102,6 +1638,12 @@ def _target_to_dict(target: ConnectorTarget) -> dict:
         "resource_url": target.resource_url,
         "debugger_url": target.debugger_url,
         "ide_bridge_url": target.ide_bridge_url,
+        "agent_native_bridge_url": target.agent_native_bridge_url,
+        "wechat_native_bridge_url": target.wechat_native_bridge_url,
+        "conversation_name": target.conversation_name,
+        "background_screenshot_focus_stable": target.background_screenshot_focus_stable,
+        "background_screenshot_count": target.background_screenshot_count,
+        "background_screenshot_success_count": target.background_screenshot_success_count,
     }
 
 
@@ -1117,6 +1659,28 @@ def _attr(obj: object, name: str, default):
     if callable(value):
         return value()
     return value
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _intent_parameters_to_dict(value: object) -> dict:
+    if not isinstance(value, Mapping):
+        return {}
+    redacted = {}
+    for key, item in value.items():
+        name = str(key or "")
+        if name.lower() in {"text", "value", "keys"}:
+            redacted[f"{name}_preview"] = _clip(str(item or ""))
+        elif name.lower() in {"password", "secret", "token", "api_key"}:
+            redacted[name] = "[redacted]"
+        else:
+            redacted[name] = item
+    return redacted
 
 
 def _clip(value: str, limit: int = 500) -> str:

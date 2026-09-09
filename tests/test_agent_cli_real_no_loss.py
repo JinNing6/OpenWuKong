@@ -44,6 +44,16 @@ class _FakeCommandExecutor:
         return self.result
 
 
+class _FakeSystemDialogObserver:
+    def __init__(self, snapshots):
+        self.snapshots = list(snapshots)
+
+    def capture_system_dialogs(self):
+        if not self.snapshots:
+            return []
+        return self.snapshots.pop(0)
+
+
 class AgentCliRealNoLossTests(unittest.TestCase):
     def test_background_cli_success_is_verified_without_focus_or_workspace_mutation(self):
         executor = _FakeCommandExecutor(
@@ -109,6 +119,65 @@ class AgentCliRealNoLossTests(unittest.TestCase):
         self.assertFalse(case["real_verified"])
         self.assertEqual(case["agent_command_attempts"], 1)
         self.assertEqual(case["window_input_attempts"], 0)
+
+    def test_usage_limit_is_classified_without_marking_real_verified(self):
+        executor = _FakeCommandExecutor(
+            _FakeExecutionResult(
+                ok=False,
+                stdout=(
+                    "{\"type\":\"error\",\"message\":\"You've hit your usage limit. "
+                    "Purchase more credits or try again at 7:43 PM.\"}"
+                ),
+                error="exit_code=1",
+                exit_code=1,
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_cli_real_no_loss(
+                agents=("codex",),
+                output_root=Path(td),
+                allow_cli_execution=True,
+                resolver=_resolver_with_codex_cli(),
+                command_executor=executor,
+                foreground_observer=StaticForegroundObserver(before=77, after=77),
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+
+        self.assertEqual(case["status"], "cli_usage_limit")
+        self.assertTrue(case["passed"])
+        self.assertFalse(case["real_verified"])
+        self.assertEqual(case["agent_command_attempts"], 1)
+        self.assertEqual(case["window_input_attempts"], 0)
+        self.assertEqual(case["selected_transport"], "codex-cli-managed-terminal")
+        self.assertEqual(data["verified_cases"], 0)
+
+    def test_cursor_agent_cli_success_is_supported_as_background_transport(self):
+        executor = _FakeCommandExecutor(
+            _FakeExecutionResult(
+                stdout="OPENWUKONG_AGENT_CLI_NO_LOSS: PASS\nNo files changed."
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_cli_real_no_loss(
+                agents=("cursor",),
+                output_root=Path(td),
+                allow_cli_execution=True,
+                resolver=_resolver_with_cursor_agent_cli(),
+                command_executor=executor,
+                foreground_observer=StaticForegroundObserver(before=77, after=77),
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+
+        self.assertEqual(case["status"], "verified")
+        self.assertTrue(case["passed"])
+        self.assertTrue(case["real_verified"])
+        self.assertEqual(case["selected_transport"], "cursor-agent-cli-managed-terminal")
+        self.assertEqual(case["agent_command_attempts"], 1)
+        self.assertEqual(data["verified_cases"], 1)
 
     def test_cli_probe_records_foreground_change_without_failing_when_no_window_input_happened(self):
         executor = _FakeCommandExecutor(
@@ -261,6 +330,220 @@ class AgentCliRealNoLossTests(unittest.TestCase):
         self.assertEqual(case["agent_command_attempts"], 0)
         self.assertEqual(len(executor.requests), 0)
 
+    def test_cli_probe_does_not_fall_back_to_cursor_desktop_shell_when_agent_cli_missing(self):
+        executor = _FakeCommandExecutor(_FakeExecutionResult())
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_cli_real_no_loss(
+                agents=("cursor",),
+                output_root=Path(td),
+                allow_cli_execution=True,
+                resolver=_resolver_with_cursor_desktop_shell_only(),
+                command_executor=executor,
+                foreground_observer=StaticForegroundObserver(before=1, after=1),
+            )
+            case = report.to_dict()["cases"][0]
+
+        self.assertEqual(case["status"], "background_cli_unavailable")
+        self.assertEqual(case["selected_transport"], "")
+        self.assertEqual(case["agent_command_attempts"], 0)
+        self.assertEqual(case["window_input_attempts"], 0)
+        self.assertEqual(len(executor.requests), 0)
+
+    def test_dry_run_reports_background_cli_unavailable_when_agent_cli_missing(self):
+        executor = _FakeCommandExecutor(_FakeExecutionResult())
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_cli_real_no_loss(
+                agents=("cursor",),
+                output_root=Path(td),
+                allow_cli_execution=False,
+                resolver=_resolver_with_cursor_desktop_shell_only(),
+                command_executor=executor,
+                foreground_observer=StaticForegroundObserver(before=1, after=1),
+            )
+            case = report.to_dict()["cases"][0]
+
+        self.assertEqual(case["status"], "background_cli_unavailable")
+        self.assertEqual(case["selected_transport"], "")
+        self.assertEqual(case["agent_command_attempts"], 0)
+        self.assertEqual(case["window_input_attempts"], 0)
+        self.assertEqual(len(executor.requests), 0)
+
+    def test_preexisting_system_dialog_blocks_cli_execution(self):
+        executor = _FakeCommandExecutor(
+            _FakeExecutionResult(
+                stdout="OPENWUKONG_AGENT_CLI_NO_LOSS: PASS\nNo files changed."
+            )
+        )
+        observer = _FakeSystemDialogObserver(
+            [
+                [
+                    {
+                        "hwnd": 301,
+                        "title": "Error",
+                        "process_name": "Codex.exe",
+                        "text": (
+                            "Error launching app\n"
+                            "Unable to find Electron app at "
+                            "C:/Program Files/WindowsApps/OpenAI.Codex_26.527/"
+                            "?type=click&tag=644788747192184631\n"
+                            "Cannot find module"
+                        ),
+                    }
+                ]
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_cli_real_no_loss(
+                agents=("codex",),
+                output_root=Path(td),
+                allow_cli_execution=True,
+                resolver=_resolver_with_codex_cli(),
+                command_executor=executor,
+                foreground_observer=StaticForegroundObserver(before=1, after=1),
+                system_dialog_observer=observer,
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+
+        self.assertEqual(case["status"], "system_dialog_detected_preflight")
+        self.assertFalse(case["passed"])
+        self.assertFalse(case["real_verified"])
+        self.assertTrue(data["system_dialog_detected"])
+        self.assertTrue(data["system_dialog_preflight_failed"])
+        self.assertEqual(case["agent_command_attempts"], 0)
+        self.assertEqual(len(executor.requests), 0)
+
+    def test_post_cli_system_dialog_overrides_success_marker(self):
+        executor = _FakeCommandExecutor(
+            _FakeExecutionResult(
+                stdout="OPENWUKONG_AGENT_CLI_NO_LOSS: PASS\nNo files changed."
+            )
+        )
+        observer = _FakeSystemDialogObserver(
+            [
+                [],
+                [
+                    {
+                        "hwnd": 302,
+                        "title": "Error",
+                        "process_name": "Codex.exe",
+                        "text": (
+                            "A JavaScript error occurred in the main process\n"
+                            "Uncaught Exception: Error: AttachConsole failed"
+                        ),
+                    }
+                ],
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_cli_real_no_loss(
+                agents=("codex",),
+                output_root=Path(td),
+                allow_cli_execution=True,
+                resolver=_resolver_with_codex_cli(),
+                command_executor=executor,
+                foreground_observer=StaticForegroundObserver(before=1, after=1),
+                system_dialog_observer=observer,
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+
+        self.assertEqual(case["status"], "system_dialog_detected_postflight")
+        self.assertFalse(case["passed"])
+        self.assertFalse(case["real_verified"])
+        self.assertTrue(data["system_dialog_detected"])
+        self.assertTrue(data["system_dialog_postflight_failed"])
+        self.assertEqual(case["agent_command_attempts"], 1)
+        self.assertEqual(len(executor.requests), 1)
+
+    def test_delayed_post_cli_system_dialog_overrides_success_marker(self):
+        executor = _FakeCommandExecutor(
+            _FakeExecutionResult(
+                stdout="OPENWUKONG_AGENT_CLI_NO_LOSS: PASS\nNo files changed."
+            )
+        )
+        observer = _FakeSystemDialogObserver(
+            [
+                [],
+                [],
+                [],
+                [
+                    {
+                        "hwnd": 303,
+                        "title": "Error",
+                        "process_name": "Codex.exe",
+                        "text": (
+                            "Error launching app\n"
+                            "Unable to find Electron app at "
+                            "C:/Program Files/WindowsApps/OpenAI.Codex_26.527/"
+                            "?type=click&tag=644788747192184631\n"
+                            "Cannot find module"
+                        ),
+                    }
+                ],
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_cli_real_no_loss(
+                agents=("codex",),
+                output_root=Path(td),
+                allow_cli_execution=True,
+                resolver=_resolver_with_codex_cli(),
+                command_executor=executor,
+                foreground_observer=StaticForegroundObserver(before=1, after=1),
+                system_dialog_observer=observer,
+                system_dialog_postflight_poll_sec=0.01,
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+
+        self.assertEqual(case["status"], "system_dialog_detected_postflight")
+        self.assertFalse(case["passed"])
+        self.assertFalse(case["real_verified"])
+        self.assertTrue(data["system_dialog_detected"])
+        self.assertTrue(data["system_dialog_postflight_failed"])
+        self.assertEqual(case["agent_command_attempts"], 1)
+        self.assertEqual(len(executor.requests), 1)
+
+    def test_codex_cli_sandbox_spawn_setup_refresh_is_not_verified(self):
+        executor = _FakeCommandExecutor(
+            _FakeExecutionResult(
+                ok=True,
+                stdout="OPENWUKONG_AGENT_CLI_NO_LOSS: PASS\nNo files changed.",
+                stderr=(
+                    "ERROR codex_core::exec: exec error: windows sandbox: "
+                    "spawn setup refresh\n"
+                    "Error launching app\n"
+                    "Unable to find Electron app at "
+                    "C:/Program Files/WindowsApps/OpenAI.Codex_26.527/"
+                    "?type=click&tag=644788747192184631"
+                ),
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_cli_real_no_loss(
+                agents=("codex",),
+                output_root=Path(td),
+                allow_cli_execution=True,
+                resolver=_resolver_with_codex_cli(),
+                command_executor=executor,
+                foreground_observer=StaticForegroundObserver(before=1, after=1),
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+
+        self.assertEqual(case["status"], "cli_runtime_foreground_risk")
+        self.assertFalse(case["passed"])
+        self.assertFalse(case["real_verified"])
+        self.assertEqual(data["verified_cases"], 0)
+        self.assertEqual(case["agent_command_attempts"], 1)
+
 
 def _resolver_with_claude_cli():
     return WindowsAppResolver(
@@ -272,6 +555,42 @@ def _resolver_with_claude_cli():
                         display_name="claude",
                         executable_name="claude.exe",
                         path="C:/Users/me/.local/bin/claude.exe",
+                    ),
+                ]
+            ),
+        )
+    )
+
+
+def _resolver_with_cursor_agent_cli():
+    return WindowsAppResolver(
+        candidate_providers=(
+            StaticAppCandidateProvider(
+                [
+                    AppResolutionCandidate(
+                        source="path",
+                        display_name="cursor-agent",
+                        executable_name="cursor-agent.cmd",
+                        path="C:/Users/me/AppData/Roaming/npm/cursor-agent.cmd",
+                    ),
+                ]
+            ),
+        )
+    )
+
+
+def _resolver_with_cursor_desktop_shell_only():
+    return WindowsAppResolver(
+        candidate_providers=(
+            StaticAppCandidateProvider(
+                [
+                    AppResolutionCandidate(
+                        source="running-process",
+                        display_name="Cursor.exe",
+                        process_name="Cursor.exe",
+                        executable_name="Cursor.exe",
+                        path="E:/cursor/cursor/cursor/Cursor.exe",
+                        pid=2020,
                     ),
                 ]
             ),

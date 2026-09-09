@@ -17,19 +17,17 @@ import requests
 
 from openwukong.connectors.base import ConnectorTarget
 from openwukong.connectors.route_policy import classify_app_family
+from openwukong.control.ide_bridge_registry import discover_ide_bridge_urls
 
 
 @dataclasses.dataclass(frozen=True)
 class SessionDiscoveryOptions:
     browser_debug_ports: tuple[int, ...] = (9222, 9223)
-    ide_bridge_urls: tuple[str, ...] = (
-        "http://127.0.0.1:8787",
-        "http://127.0.0.1:8788",
-        "http://127.0.0.1:8789",
-        "http://127.0.0.1:8790",
-    )
+    ide_bridge_urls: tuple[str, ...] = ()
+    ide_bridge_registry_paths: tuple[str, ...] = ()
     workspace_roots: tuple[str, ...] = ()
     request_timeout: float = 0.2
+    environment: dict | None = None
 
 
 class SessionDiscoveryHTTPProbe(Protocol):
@@ -229,7 +227,13 @@ class SessionDiscovery:
                 "workspace_path": target.workspace_path,
             },
         }
-        for base in self.options.ide_bridge_urls:
+        bridge_urls = discover_ide_bridge_urls(
+            self.options.ide_bridge_urls,
+            target=target,
+            registry_paths=self.options.ide_bridge_registry_paths,
+            environment=self.options.environment,
+        )
+        for base in bridge_urls:
             url = f"{base.rstrip('/')}/v1/ide/capabilities"
             try:
                 data = self._http_probe.post_json(

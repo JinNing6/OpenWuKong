@@ -178,6 +178,52 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertEqual(data["request"]["target"]["hwnd"], 2491830)
         self.assertEqual(data["request"]["endpoint"]["preferred_chat_adapter"], "cursor")
 
+    def test_ide_bridge_explicit_workspace_target_can_satisfy_project_for_new_task(self):
+        probe = _ready_ide_bridge_probe()
+        probe["decision"] = "agent_app_target_not_visible"
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "decision": "agent_app_task_not_visible",
+            "target_matched": False,
+            "semantic_composer_count": 0,
+            "matched_windows": [
+                {
+                    "process_name": "Cursor.exe",
+                    "pid": 32080,
+                    "window_title": "openwukong - Cursor",
+                    "hwnd": 19208036,
+                }
+            ],
+        }
+        probe["endpoints"][0]["metadata"] = {
+            "ide_name": "Cursor",
+            "workspaceFolders": [],
+            "requested_workspace_path": "E:/ideaProjects/agent/openwukong",
+            "requested_workspace_name": "openwukong",
+            "workspace_target_source": "explicit_probe_request",
+            "readback_action_ready": True,
+            "capabilities": ["agent_app_conversation.read_transcript"],
+        }
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="openwukong",
+            task_name="new-background-task",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: new-background-task",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=probe,
+            required_markers=("OPENWUKONG_ACCEPTED",),
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_dry_run_ready")
+        self.assertTrue(data["request"]["target_ready"])
+        self.assertEqual(data["request"]["endpoint"]["preferred_chat_adapter"], "cursor")
+
     def test_ide_bridge_cursor_adapter_cannot_satisfy_codex_app_request(self):
         probe = _ready_ide_bridge_probe()
         probe["app_uia_probe"] = {
@@ -337,6 +383,146 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertEqual(data["decision"], "app_bridge_target_not_ready")
         self.assertFalse(data["request"]["target_ready"])
         self.assertTrue(data["request"]["native_endpoint_ready"])
+
+    def test_claude_agent_native_bridge_cli_binding_path_cannot_satisfy_app_request(self):
+        probe = _ready_claude_desktop_extension_native_bridge_probe()
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "target_matched": False,
+            "semantic_composer_count": 0,
+            "matched_windows": [],
+        }
+        probe["endpoints"][0]["metadata"]["app_binding"] = {
+            "process_name": "Claude.exe",
+            "executable_path": "C:/Users/me/.local/bin/claude.exe",
+            "window_title": "Claude",
+        }
+        request = build_agent_app_bridge_request(
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="desktop-message",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: desktop-message",
+            selected_transport={"transport_id": "claude-desktop-shell"},
+            app_surface_probe=probe,
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_target_not_ready")
+        self.assertFalse(data["request"]["target_ready"])
+        self.assertTrue(data["request"]["native_endpoint_ready"])
+        self.assertTrue(data["request"]["acceptance_readback_ready"])
+
+    def test_claude_agent_native_bridge_name_only_binding_cannot_satisfy_app_request(self):
+        probe = _ready_claude_desktop_extension_native_bridge_probe()
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "target_matched": False,
+            "semantic_composer_count": 0,
+            "matched_windows": [],
+        }
+        probe["endpoints"][0]["metadata"]["app_binding"] = {
+            "process_name": "Claude.exe",
+            "window_title": "Claude",
+        }
+        request = build_agent_app_bridge_request(
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="desktop-message",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: desktop-message",
+            selected_transport={"transport_id": "claude-desktop-shell"},
+            app_surface_probe=probe,
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_target_not_ready")
+        self.assertFalse(data["request"]["target_ready"])
+        self.assertTrue(data["request"]["native_endpoint_ready"])
+        self.assertTrue(data["request"]["acceptance_readback_ready"])
+
+    def test_claude_desktop_extension_native_endpoint_builds_dry_run_envelope(self):
+        probe = _ready_claude_desktop_extension_native_bridge_probe()
+        probe["app_uia_probe"] = {
+            **probe["app_uia_probe"],
+            "target_matched": False,
+            "semantic_composer_count": 0,
+            "matched_windows": [],
+        }
+        request = build_agent_app_bridge_request(
+            agent="claude desktop",
+            agent_id="claude",
+            project_name="openwukong",
+            task_name="desktop-message",
+            message="Summarize the active task.",
+            composed_message=(
+                "Project: openwukong\n"
+                "Task: desktop-message\n\n"
+                "Message:\nSummarize the active task."
+            ),
+            selected_transport={"transport_id": "claude-desktop-shell"},
+            app_surface_probe=probe,
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+            forbidden_markers=("DO_NOT_SEND",),
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertTrue(data["ok"], data["validation_errors"])
+        self.assertEqual(data["decision"], "app_bridge_dry_run_ready")
+        self.assertEqual(data["bridge_send_attempts"], 0)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertTrue(data["request"]["target_ready"])
+        self.assertTrue(data["request"]["native_endpoint_ready"])
+        self.assertTrue(data["request"]["acceptance_readback_ready"])
+        self.assertEqual(data["request"]["endpoint"]["endpoint_type"], "agent_native_bridge")
+        self.assertEqual(data["request"]["endpoint"]["preferred_chat_adapter"], "claude")
+        self.assertEqual(
+            data["request"]["payload"]["required_markers"],
+            ["OPENWUKONG_ACCEPTANCE: PASS"],
+        )
+        self.assertEqual(
+            data["request"]["payload"]["forbidden_markers"],
+            ["DO_NOT_SEND"],
+        )
+
+    def test_agent_native_bridge_without_readback_metadata_is_not_dry_run_ready_for_markers(self):
+        probe = _ready_agent_native_bridge_probe()
+        metadata = probe["endpoints"][0]["metadata"]
+        metadata["capabilities"] = ["agent_app_conversation.native_bridge_send_message"]
+        metadata.pop("readback_action_ready", None)
+        request = build_agent_app_bridge_request(
+            agent="codex app",
+            agent_id="codex",
+            project_name="openwukong",
+            task_name="desktop-message",
+            message="Summarize the active task.",
+            composed_message="Project: openwukong\nTask: desktop-message",
+            selected_transport={"transport_id": "codex-desktop-shell"},
+            app_surface_probe=probe,
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+        )
+
+        report = AgentAppBridgeDryRunAdapter().prepare(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_readback_not_ready")
+        self.assertTrue(data["request"]["target_ready"])
+        self.assertTrue(data["request"]["native_endpoint_ready"])
+        self.assertFalse(data["request"]["acceptance_readback_ready"])
+        self.assertEqual(data["validation_errors"], ["acceptance_readback_not_ready"])
 
     def test_native_adapter_sends_agent_native_bridge_without_cdp_or_window_input(self):
         bridge = _FakeAgentNativeBridgeClient(
@@ -565,6 +751,74 @@ class AgentAppBridgeTests(unittest.TestCase):
         self.assertIn("submitWaitIndex", devtools.evaluate_calls[1][2])
         self.assertIn("anysphere-icon-button", devtools.evaluate_calls[1][2])
         self.assertIn("postComposerText", devtools.evaluate_calls[1][2])
+
+    def test_cdp_adapter_reports_auth_required_when_cursor_login_gate_blocks_submit(self):
+        devtools = _FakeDevToolsClient(
+            [
+                _ready_cdp_composer_probe(),
+                {
+                    "composerFound": True,
+                    "safeComposerFound": True,
+                    "composerCandidateCount": 1,
+                    "safeComposerCandidateCount": 1,
+                    "messageSet": True,
+                    "submitAttempted": False,
+                    "submitVerified": False,
+                    "readbackText": (
+                        "Cursor\nSign Up\nLog In\n"
+                        "Cursor's AI features require you to be logged in"
+                    ),
+                },
+            ]
+        )
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="openwukong",
+            task_name="",
+            message="OPENWUKONG_CURSOR_LOGIN_GATE",
+            composed_message="Project: openwukong\n\nMessage:\nOPENWUKONG_CURSOR_LOGIN_GATE",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=_ready_cursor_devtools_probe(),
+            required_markers=("OPENWUKONG_CURSOR_LOGIN_GATE",),
+        )
+
+        report = AgentAppBridgeCdpAdapter(devtools_client=devtools).send(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_auth_required")
+        self.assertTrue(data["auth_required"])
+        self.assertEqual(data["bridge_send_attempts"], 1)
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+
+    def test_cdp_adapter_reports_auth_required_from_probe_when_send_times_out(self):
+        devtools = _CursorLoginGateThenTimeoutDevToolsClient()
+        request = build_agent_app_bridge_request(
+            agent="cursor",
+            agent_id="cursor",
+            project_name="openwukong",
+            task_name="",
+            message="OPENWUKONG_CURSOR_LOGIN_TIMEOUT",
+            composed_message="Project: openwukong\n\nMessage:\nOPENWUKONG_CURSOR_LOGIN_TIMEOUT",
+            selected_transport={"transport_id": "cursor-desktop-shell"},
+            app_surface_probe=_ready_cursor_devtools_probe(),
+            required_markers=("OPENWUKONG_CURSOR_LOGIN_TIMEOUT",),
+        )
+
+        report = AgentAppBridgeCdpAdapter(devtools_client=devtools).send(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "app_bridge_auth_required")
+        self.assertTrue(data["auth_required"])
+        self.assertEqual(data["error"], "timed out")
+        self.assertEqual(data["bridge_send_attempts"], 1)
+        self.assertIn(
+            "require you to be logged in",
+            data["composer_probe_report"]["action_result"]["readbackText"],
+        )
 
     def test_bound_devtools_endpoint_is_ready_without_uia_semantic_composer(self):
         probe = _ready_probe()
@@ -957,6 +1211,22 @@ class _NoSubmitCleanupGuardDevToolsClient:
         }
 
 
+class _CursorLoginGateThenTimeoutDevToolsClient:
+    def __init__(self):
+        self.evaluate_calls = []
+
+    def evaluate(self, debugger_url, target, expression):
+        self.evaluate_calls.append((debugger_url, target, expression))
+        if "selectedComposer" in expression:
+            value = _ready_cdp_composer_probe()
+            value["readbackText"] = (
+                "Cursor\nSign Up\nLog In\n"
+                "Cursor's AI features require you to be logged in"
+            )
+            return {"type": "object", "value": value}
+        raise TimeoutError("timed out")
+
+
 class _FakeIDEBridgeClient:
     def __init__(self, value):
         self.value = dict(value)
@@ -981,11 +1251,15 @@ class _FakeAgentNativeBridgeClient:
             "surface_kind": "desktop_app",
             "app_binding": {
                 "process_name": "Codex.exe",
+                "executable_path": "C:/Program Files/OpenAI/Codex/app/Codex.exe",
                 "pid": 77064,
                 "hwnd": 138024,
                 "window_title": "Codex",
             },
-            "capabilities": ["agent_app_conversation.native_bridge_send_message"],
+            "capabilities": [
+                "agent_app_conversation.native_bridge_send_message",
+                "agent_app_conversation.read_transcript",
+            ],
             "agents": [{"agent_id": request.agent_id, "available": True}],
             "projects": [{"name": request.project_name, "available": True}],
             "tasks": [{"name": request.task_name, "available": True}],
@@ -1118,7 +1392,11 @@ def _ready_ide_bridge_probe():
                     "available_candidates": ["cursor.chat.submit"],
                 }
             ],
-            "metadata": {"ide_name": "Cursor"},
+            "metadata": {
+                "ide_name": "Cursor",
+                "readback_action_ready": True,
+                "capabilities": ["agent_app_conversation.read_transcript"],
+            },
         }
     ]
     return probe
@@ -1140,15 +1418,70 @@ def _ready_agent_native_bridge_probe():
                 "app_binding_ready": True,
                 "app_binding": {
                     "process_name": "Codex.exe",
+                    "executable_path": "C:/Program Files/OpenAI/Codex/app/Codex.exe",
                     "pid": 77064,
                     "hwnd": 138024,
                     "window_title": "Codex",
                 },
+                "capabilities": [
+                    "agent_app_conversation.native_bridge_send_message",
+                    "agent_app_conversation.read_transcript",
+                ],
+                "readback_action_ready": True,
                 "projects": [{"name": "openwukong", "available": True}],
                 "tasks": [{"name": "desktop-message", "available": True}],
             },
         }
     ]
+    return probe
+
+
+def _ready_claude_desktop_extension_native_bridge_probe():
+    probe = _ready_probe()
+    probe["agent"] = "claude desktop"
+    probe["agent_id"] = "claude"
+    probe["endpoints"] = [
+        {
+            "endpoint_type": "agent_native_bridge",
+            "bridge_url": "http://127.0.0.1:18891",
+            "debugger_url": "http://127.0.0.1:18891",
+            "ready": True,
+            "preferred_chat_adapter": "claude",
+            "send_command_id": "agent_app_conversation.native_bridge_send_message",
+            "metadata": {
+                "agent_id": "claude",
+                "surface_kind": "desktop_app",
+                "connector_host": "claude_desktop",
+                "connector_packaging": "mcpb_desktop_extension",
+                "app_binding_ready": True,
+                "app_binding": {
+                    "process_name": "Claude.exe",
+                    "executable_path": "C:/Users/me/AppData/Local/Programs/Claude/Claude.exe",
+                    "pid": 77064,
+                    "hwnd": 138024,
+                    "window_title": "Claude",
+                },
+                "capabilities": [
+                    "agent_app_conversation.native_bridge_send_message",
+                    "agent_app_conversation.read_transcript",
+                ],
+                "readback_action_ready": True,
+                "projects": [{"name": "openwukong", "available": True}],
+                "tasks": [{"name": "desktop-message", "available": True}],
+            },
+        }
+    ]
+    probe["app_uia_probe"] = {
+        **probe["app_uia_probe"],
+        "matched_windows": [
+            {
+                "process_name": "Claude.exe",
+                "pid": 77064,
+                "window_title": "Claude",
+                "hwnd": 138024,
+            }
+        ],
+    }
     return probe
 
 

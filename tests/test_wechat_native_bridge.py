@@ -94,6 +94,8 @@ class WeChatNativeBridgeTests(unittest.TestCase):
             target_name="File Transfer Assistant",
             message="OPENWUKONG_WECHAT_NATIVE: PASS",
             required_markers=("OPENWUKONG_WECHAT_NATIVE: PASS",),
+            background_screenshot_count=1,
+            background_screenshot_success_count=1,
         )
 
         report = WeChatNativeBridgeDryRunAdapter(request_timeout=2.0).prepare(request)
@@ -114,6 +116,29 @@ class WeChatNativeBridgeTests(unittest.TestCase):
             _WeChatBridgeHandler.requests[0][1]["payload"]["action"],
             "wechat.conversation.native_bridge_send_message",
         )
+        self.assertTrue(data["request"]["background_screenshot_verified"])
+
+    def test_ready_bridge_without_background_screenshot_success_stays_gated(self):
+        request = build_wechat_native_bridge_request(
+            bridge_url=self.bridge_url,
+            target_name="File Transfer Assistant",
+            message="OPENWUKONG_WECHAT_NATIVE: PASS",
+            required_markers=("OPENWUKONG_WECHAT_NATIVE: PASS",),
+            background_screenshot_focus_stable=True,
+        )
+
+        report = WeChatNativeBridgeDryRunAdapter(request_timeout=2.0).prepare(request)
+        data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(
+            data["decision"],
+            "wechat_native_bridge_background_screenshot_not_verified",
+        )
+        self.assertIn("background_screenshot_not_verified", data["validation_errors"])
+        self.assertFalse(data["request"]["background_screenshot_verified"])
+        self.assertEqual(data["send_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
 
     def test_sender_uses_native_endpoint_and_verifies_readback_without_window_input(self):
         request = build_wechat_native_bridge_request(
@@ -122,6 +147,8 @@ class WeChatNativeBridgeTests(unittest.TestCase):
             message="OPENWUKONG_WECHAT_NATIVE_SEND: PASS",
             required_markers=("OPENWUKONG_WECHAT_NATIVE_SEND: PASS",),
             forbidden_markers=("OPENWUKONG_WECHAT_NATIVE_SEND: FAIL",),
+            background_screenshot_count=1,
+            background_screenshot_success_count=1,
         )
 
         report = WeChatNativeBridgeSenderAdapter(request_timeout=2.0).send(request)
@@ -153,6 +180,8 @@ class WeChatNativeBridgeTests(unittest.TestCase):
             target_name="File Transfer Assistant",
             message="OPENWUKONG_WECHAT_NATIVE_SEND: PASS",
             required_markers=("OPENWUKONG_WECHAT_NATIVE_SEND: PASS",),
+            background_screenshot_count=1,
+            background_screenshot_success_count=1,
         )
 
         dry_run = WeChatNativeBridgeDryRunAdapter(request_timeout=2.0).prepare(request)

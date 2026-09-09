@@ -13,13 +13,24 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Protocol
 from urllib.parse import urlsplit
 
-from openwukong.control.app_resolution import WindowsAppResolver, lower_text
+from openwukong.control.app_resolution import (
+    AppIdentityRegistry,
+    AppResolutionCandidate,
+    WindowsAppResolver,
+    claude_candidate_surface_kind,
+    codex_candidate_surface_kind,
+    cursor_candidate_surface_kind,
+    lower_text,
+    requested_agent_surface_kind,
+)
 from openwukong.control.agent_native_bridge import (
     SEND_ACTION as AGENT_NATIVE_SEND_ACTION,
     AgentNativeBridgeDryRunAdapter,
     build_agent_native_bridge_request,
 )
 from openwukong.control.native_bridge_registry import discover_agent_native_bridge_urls
+from openwukong.control.computer_use_transport import build_computer_use_runtime_probe
+from openwukong.evaluation.codex_app_server_probe import probe_codex_app_server_ws
 from openwukong.evaluation.agent_app_uia_probe import (
     AgentAppUiaProbeReport,
     run_agent_app_uia_probe,
@@ -111,6 +122,8 @@ class NativeConnectorEndpoint:
                 and _agent_native_bridge_surface_ok(dict(self.metadata or {}))
                 and _agent_native_bridge_app_binding_ok(dict(self.metadata or {}))
             )
+        if self.endpoint_type == "codex_app_server_ws":
+            return bool(not self.error and self.capability_ok and self.bridge_url)
         return bool(not self.error and self.version and any(target.ready for target in self.targets))
 
     @property
@@ -148,6 +161,7 @@ class AgentNativeConnectorProbeReport:
     task_name: str
     app_uia_probe: AgentAppUiaProbeReport
     endpoints: tuple[NativeConnectorEndpoint, ...] = ()
+    computer_use_probe: dict | None = None
     process_count: int = 0
     elapsed_ms: float = 0.0
 
@@ -165,6 +179,10 @@ class AgentNativeConnectorProbeReport:
 
     @property
     def control_attempts(self) -> int:
+        return 0
+
+    @property
+    def window_input_attempts(self) -> int:
         return 0
 
     @property
@@ -205,10 +223,12 @@ class AgentNativeConnectorProbeReport:
             "task_name": self.task_name,
             "control_allowed": self.control_allowed,
             "control_attempts": self.control_attempts,
+            "window_input_attempts": self.window_input_attempts,
             "process_count": int(self.process_count or 0),
             "endpoint_count": self.endpoint_count,
             "ready_endpoint_count": self.ready_endpoint_count,
             "endpoints": [endpoint.to_dict() for endpoint in self.endpoints],
+            "computer_use_probe": dict(self.computer_use_probe or {}),
             "app_uia_probe": self.app_uia_probe.to_dict(),
             "elapsed_ms": round(self.elapsed_ms, 3),
         }
@@ -229,6 +249,9 @@ def run_agent_native_connector_probe(
     agent_native_bridge_urls: Iterable[str] = (),
     agent_native_bridge_registry_paths: Iterable[str | Path] = (),
     agent_native_bridge_probe: Callable[..., object] | None = None,
+    codex_app_server_ws_urls: Iterable[str] = (),
+    codex_app_server_probe: Callable[..., object] | None = None,
+    computer_use_probe_runner: Callable[[], object] | None = None,
     workspace_path: str = "",
     screenshot_dir: str | Path = "",
     window_capture_provider: object | None = None,
@@ -250,7 +273,13 @@ def run_agent_native_connector_probe(
     )
     provider = process_provider or list_native_processes
     processes = tuple(provider())
-    matching = tuple(_matching_agent_processes(processes, app_probe))
+    matching = tuple(
+        _matching_agent_processes(
+            processes,
+            app_probe,
+            requested_agent=str(agent or "").strip(),
+        )
+    )
     debugger_endpoints = _discover_debugger_endpoints(
         matching,
         reserved_ports=_ports_from_debugger_urls(debugger_urls),
@@ -289,6 +318,18 @@ def run_agent_native_connector_probe(
         task_name=str(task_name or "").strip(),
         app_probe=app_probe,
     )
+    codex_app_server_endpoints = _discover_codex_app_server_ws_endpoints(
+        codex_app_server_ws_urls,
+        codex_app_server_probe=codex_app_server_probe or probe_codex_app_server_ws,
+        processes=processes,
+        agent_id=app_probe.surface_binding.agent_id,
+        project_name=str(project_name or "").strip(),
+        task_name=str(task_name or "").strip(),
+        timeout=max(0.05, float(request_timeout)),
+    )
+    computer_probe = _report_to_dict(
+        (computer_use_probe_runner or build_computer_use_runtime_probe)()
+    )
     return AgentNativeConnectorProbeReport(
         agent=str(agent or "").strip(),
         project_name=str(project_name or "").strip(),
@@ -299,7 +340,9 @@ def run_agent_native_connector_probe(
             + tuple(explicit_debugger_endpoints)
             + tuple(ide_endpoints)
             + tuple(agent_native_endpoints)
+            + tuple(codex_app_server_endpoints)
         ),
+        computer_use_probe=computer_probe,
         process_count=len(processes),
         elapsed_ms=(time.perf_counter() - started) * 1000,
     )
@@ -412,6 +455,12 @@ def main(
         help="Read-only JSON registry file with agent app native bridge URLs.",
     )
     parser.add_argument(
+        "--codex-app-server-ws-url",
+        action="append",
+        default=[],
+        help="Explicit local Codex app-server WebSocket URL to probe read-only.",
+    )
+    parser.add_argument(
         "--workspace-path",
         default="",
         help="Optional workspace path included in IDE bridge capability probes.",
@@ -432,6 +481,7 @@ def main(
         ide_bridge_probe=ide_bridge_probe,
         agent_native_bridge_urls=tuple(args.agent_native_bridge_url or ()),
         agent_native_bridge_registry_paths=tuple(args.agent_native_bridge_registry or ()),
+        codex_app_server_ws_urls=tuple(args.codex_app_server_ws_url or ()),
         workspace_path=args.workspace_path,
         screenshot_dir=args.screenshot_dir,
         window_capture_provider=window_capture_provider,
@@ -457,12 +507,16 @@ def main(
 def _matching_agent_processes(
     processes: Iterable[NativeProcessSnapshot],
     app_probe: AgentAppUiaProbeReport,
+    *,
+    requested_agent: str = "",
 ) -> tuple[NativeProcessSnapshot, ...]:
     selected = app_probe.surface_binding.selected_transport
     selected_pid = int(selected.pid or 0) if selected else 0
     selected_path = lower_text(selected.path if selected else "")
     selected_dir = _parent_dir(selected_path)
-    expected_names = set(_agent_process_names(app_probe.surface_binding.agent_id))
+    agent_id = app_probe.surface_binding.agent_id
+    expected_names = set(_agent_process_names(agent_id))
+    requested_surface = _requested_surface_kind(requested_agent, agent_id)
     matched: list[NativeProcessSnapshot] = []
     for process in processes:
         pname = lower_text(process.process_name)
@@ -471,6 +525,13 @@ def _matching_agent_processes(
             matched.append(process)
             continue
         if pname not in expected_names:
+            continue
+        if not _process_allowed_for_requested_surface(
+            process,
+            agent_id=agent_id,
+            requested_surface=requested_surface,
+            selected_dir=selected_dir,
+        ):
             continue
         if _extract_remote_debugging_ports(process.command_line):
             matched.append(process)
@@ -481,6 +542,121 @@ def _matching_agent_processes(
         if not selected_dir:
             matched.append(process)
     return tuple(matched)
+
+
+def _requested_surface_kind(requested_agent: str, agent_id: str) -> str:
+    text = str(requested_agent or "").strip()
+    if not text:
+        return ""
+    identity = AppIdentityRegistry().identity_for(text)
+    if identity.app_id != lower_text(agent_id):
+        identity = AppIdentityRegistry().identity_for(agent_id)
+    return requested_agent_surface_kind(text, identity)
+
+
+def _process_allowed_for_requested_surface(
+    process: NativeProcessSnapshot,
+    *,
+    agent_id: str,
+    requested_surface: str,
+    selected_dir: str,
+) -> bool:
+    if requested_surface != "desktop":
+        return True
+    surface = _agent_process_surface_kind(agent_id, process)
+    if surface == "cli":
+        return False
+    if lower_text(agent_id) == "claude":
+        if surface == "desktop":
+            return True
+        path = lower_text(process.executable_path)
+        return bool(selected_dir and path and path.startswith(selected_dir))
+    return True
+
+
+def _agent_process_surface_kind(
+    agent_id: str,
+    process: NativeProcessSnapshot,
+) -> str:
+    candidate = AppResolutionCandidate(
+        source="running-process",
+        display_name=process.process_name,
+        path=process.executable_path,
+        executable_name=Path(process.executable_path).name if process.executable_path else process.process_name,
+        process_name=process.process_name,
+        pid=int(process.pid or 0),
+        metadata={"command_line": process.command_line},
+    )
+    normalized = lower_text(agent_id)
+    if normalized == "codex":
+        return codex_candidate_surface_kind(candidate) or _surface_kind_from_process_text(
+            normalized,
+            process,
+        )
+    if normalized == "claude":
+        return claude_candidate_surface_kind(candidate) or _surface_kind_from_process_text(
+            normalized,
+            process,
+        )
+    if normalized == "cursor":
+        return cursor_candidate_surface_kind(candidate) or _surface_kind_from_process_text(
+            normalized,
+            process,
+        )
+    return ""
+
+
+def _surface_kind_from_process_text(
+    agent_id: str,
+    process: NativeProcessSnapshot,
+) -> str:
+    text = "\n".join(
+        (
+            process.process_name,
+            process.executable_path,
+            process.command_line,
+        )
+    ).replace("\\", "/").casefold()
+    if agent_id == "claude":
+        if any(
+            fragment in text
+            for fragment in (
+                "/.local/bin/",
+                "/appdata/roaming/npm/",
+                "/appdata/roaming/claude/claude-code/",
+                "/node_modules/@anthropic-ai/claude-code/",
+                "/.claude-code",
+            )
+        ):
+            return "cli"
+        if any(
+            fragment in text
+            for fragment in (
+                "/program files/windowsapps/claude_",
+                "/programs/claude/",
+                "/anthropic/",
+                "/anthropicclaude/",
+            )
+        ):
+            return "desktop"
+    if agent_id == "codex":
+        if any(
+            fragment in text
+            for fragment in (
+                "/.local/bin/",
+                "/appdata/local/openai/codex/bin/",
+                "/appdata/roaming/npm/",
+            )
+        ):
+            return "cli"
+        if "/program files/windowsapps/openai.codex" in text:
+            return "desktop"
+    if agent_id == "cursor":
+        if "cursor-agent" in text:
+            return "cli"
+        if "cursor.exe" in text:
+            return "desktop"
+    return ""
 
 
 def _discover_debugger_endpoints(
@@ -618,6 +794,14 @@ def _probe_ide_bridge_endpoint(
         )
         data = _report_to_dict(raw_report)
         metadata = _dict_value(data.get("metadata"))
+        workspace_target = str(workspace_path or "").strip()
+        if workspace_target:
+            metadata = {
+                **metadata,
+                "requested_workspace_path": workspace_target,
+                "requested_workspace_name": Path(workspace_target).name,
+                "workspace_target_source": "explicit_probe_request",
+            }
         commands = tuple(_string_list(data.get("commands")))
         chat_adapters = tuple(
             dict(item) for item in data.get("chat_adapters", []) if isinstance(item, dict)
@@ -727,6 +911,7 @@ def _probe_agent_native_bridge_endpoint(
         )
         surface_ok = _agent_native_bridge_surface_ok(metadata)
         app_binding_ok = _agent_native_bridge_app_binding_ok(metadata)
+        metadata["app_binding_ready"] = app_binding_ok
         ok = bool(data.get("ok", False) and surface_ok and app_binding_ok)
         return NativeConnectorEndpoint(
             debugger_url=bridge_url,
@@ -755,6 +940,223 @@ def _probe_agent_native_bridge_endpoint(
             endpoint_type="agent_native_bridge",
             error=str(exc) or exc.__class__.__name__,
         )
+
+
+def _discover_codex_app_server_ws_endpoints(
+    ws_urls: Iterable[str],
+    *,
+    codex_app_server_probe: Callable[..., object],
+    processes: Iterable[NativeProcessSnapshot],
+    agent_id: str,
+    project_name: str,
+    task_name: str,
+    timeout: float,
+) -> tuple[NativeConnectorEndpoint, ...]:
+    if lower_text(agent_id) != "codex":
+        return ()
+    endpoints: list[NativeConnectorEndpoint] = []
+    seen: set[str] = set()
+    for raw_url in ws_urls or ():
+        ws_url = _normalize_local_ws_url(raw_url)
+        if not ws_url or ws_url in seen:
+            continue
+        seen.add(ws_url)
+        owner = _process_listening_on_port(processes, _port_from_url(ws_url))
+        block_reason = _codex_app_server_ws_probe_block_reason(owner)
+        if block_reason:
+            endpoints.append(
+                _blocked_codex_app_server_ws_endpoint(
+                    ws_url,
+                    process=owner,
+                    project_name=project_name,
+                    task_name=task_name,
+                    block_reason=block_reason,
+                )
+            )
+            continue
+        endpoints.append(
+            _probe_codex_app_server_ws_endpoint(
+                ws_url,
+                codex_app_server_probe=codex_app_server_probe,
+                project_name=project_name,
+                task_name=task_name,
+                timeout=timeout,
+                process=owner,
+            )
+        )
+    return tuple(endpoints)
+
+
+def _blocked_codex_app_server_ws_endpoint(
+    ws_url: str,
+    *,
+    process: NativeProcessSnapshot | None,
+    project_name: str,
+    task_name: str,
+    block_reason: str,
+) -> NativeConnectorEndpoint:
+    metadata = {
+        "agent_id": "codex",
+        "project_name": str(project_name or "").strip(),
+        "task_name": str(task_name or "").strip(),
+        "surface_kind": "desktop_app",
+        "background_safe": False,
+        "thread_api_ready": False,
+        "send_contract_ready": False,
+        "probe_block_reason": block_reason,
+    }
+    if process is not None:
+        metadata["process_path"] = process.executable_path
+        metadata["process_name"] = process.process_name
+        metadata["command_line"] = process.command_line
+    return NativeConnectorEndpoint(
+        debugger_url=ws_url,
+        bridge_url=ws_url,
+        port=_port_from_url(ws_url),
+        source="explicit-codex-app-server-ws-url",
+        endpoint_type="codex_app_server_ws",
+        process=process,
+        metadata=metadata,
+        commands=(),
+        capability_ok=False,
+        error="codex_app_server_windowsapps_probe_blocked",
+    )
+
+
+def _codex_app_server_ws_probe_block_reason(
+    process: NativeProcessSnapshot | None,
+) -> str:
+    if process is None:
+        return ""
+    haystack = "\n".join(
+        (
+            str(process.process_name or ""),
+            str(process.executable_path or ""),
+            str(process.command_line or ""),
+        )
+    ).casefold()
+    if (
+        "windowsapps" in haystack
+        and "openai.codex" in haystack
+        and "app-server" in haystack
+    ):
+        return "windowsapps_codex_app_server_foreground_risk"
+    if "openai.codex" in haystack and (
+        "type=click&tag" in haystack or "?type=click" in haystack
+    ):
+        return "windowsapps_codex_app_server_foreground_risk"
+    return ""
+
+
+def _probe_codex_app_server_ws_endpoint(
+    ws_url: str,
+    *,
+    codex_app_server_probe: Callable[..., object],
+    project_name: str,
+    task_name: str,
+    timeout: float,
+    process: NativeProcessSnapshot | None = None,
+) -> NativeConnectorEndpoint:
+    try:
+        raw_report = codex_app_server_probe(
+            ws_url,
+            request_timeout=max(0.05, float(timeout)),
+        )
+        data = _report_to_dict(raw_report)
+        ok = bool(data.get("ok", False))
+        owned_ephemeral = _codex_app_server_owned_ephemeral_process(process)
+        metadata = {
+            "agent_id": "codex",
+            "project_name": str(project_name or "").strip(),
+            "task_name": str(task_name or "").strip(),
+            "surface_kind": (
+                "owned_ephemeral_app_server" if owned_ephemeral else "desktop_app"
+            ),
+            "background_safe": bool(data.get("background_safe", True)),
+            "owned_loopback_app_server": owned_ephemeral,
+            "turn_start_foreground_safe": owned_ephemeral,
+            "force_fresh_thread_start": owned_ephemeral,
+            "codex_home": str(data.get("codex_home", "") or ""),
+            "user_agent": str(data.get("user_agent", "") or ""),
+            "platform_family": str(data.get("platform_family", "") or ""),
+            "platform_os": str(data.get("platform_os", "") or ""),
+            "observed_thread_count": int(data.get("observed_thread_count", 0) or 0),
+            "observed_threads": [
+                dict(item)
+                for item in data.get("observed_threads", []) or []
+                if isinstance(item, dict)
+            ],
+            "selected_thread_id": str(data.get("selected_thread_id", "") or ""),
+            "selected_thread_cwd": str(data.get("selected_thread_cwd", "") or ""),
+            "selected_thread_preview": str(
+                data.get("selected_thread_preview", "") or ""
+            ),
+            "probe_decision": str(data.get("decision", "") or ""),
+            "thread_api_ready": ok,
+            "send_contract_ready": False,
+        }
+        if process is not None:
+            metadata["process_path"] = process.executable_path
+            metadata["process_name"] = process.process_name
+            metadata["command_line"] = process.command_line
+            metadata["process_pid"] = int(process.pid or 0)
+        return NativeConnectorEndpoint(
+            debugger_url=ws_url,
+            bridge_url=ws_url,
+            port=_port_from_url(ws_url),
+            source=(
+                "explicit-owned-codex-app-server-ws-url"
+                if owned_ephemeral
+                else "explicit-codex-app-server-ws-url"
+            ),
+            endpoint_type="codex_app_server_ws",
+            process=process,
+            metadata=metadata,
+            commands=(
+                (
+                    "initialize",
+                    "thread/list",
+                    "thread/start",
+                    "windowsSandbox/readiness",
+                    "turn/start",
+                )
+                if owned_ephemeral
+                else ("initialize", "thread/list")
+            ),
+            capability_ok=ok,
+            error="" if ok else str(data.get("error", "") or data.get("decision", "") or "codex_app_server_ws_not_ready"),
+        )
+    except Exception as exc:
+        return NativeConnectorEndpoint(
+            debugger_url=ws_url,
+            bridge_url=ws_url,
+            port=_port_from_url(ws_url),
+            source="explicit-codex-app-server-ws-url",
+            endpoint_type="codex_app_server_ws",
+            error=str(exc) or exc.__class__.__name__,
+        )
+
+
+def _codex_app_server_owned_ephemeral_process(
+    process: NativeProcessSnapshot | None,
+) -> bool:
+    if process is None:
+        return False
+    haystack = "\n".join(
+        (
+            str(process.process_name or ""),
+            str(process.executable_path or ""),
+            str(process.command_line or ""),
+        )
+    ).casefold()
+    return bool(
+        "codex.exe" in haystack
+        and "app-server" in haystack
+        and "--listen" in haystack
+        and "ws://127.0.0.1" in haystack
+        and "windowsapps" not in haystack
+        and "openai.codex" not in haystack
+    )
 
 
 def _probe_debugger_endpoint(
@@ -924,6 +1326,10 @@ def _agent_native_bridge_metadata(
         or capability_report.get("target_app")
         or target.get("app_binding")
     )
+    app_binding_surface_kind = _agent_app_binding_surface_kind(
+        agent_id,
+        app_binding,
+    )
     metadata = {
         "agent_id": str(
             request_data.get("agent_id", "")
@@ -955,6 +1361,7 @@ def _agent_native_bridge_metadata(
         "expected_app_pids": list(request_data.get("expected_app_pids", []) or []),
         "expected_app_hwnds": list(request_data.get("expected_app_hwnds", []) or []),
         "app_binding": app_binding,
+        "app_binding_surface_kind": app_binding_surface_kind,
         "app_binding_ready": bool(
             request_data.get("app_binding_ready", False)
             or target.get("app_binding_ready", False)
@@ -976,6 +1383,15 @@ def _agent_native_bridge_app_binding_ok(metadata: dict) -> bool:
     binding = metadata.get("app_binding")
     if not isinstance(binding, dict) or not binding:
         return False
+    required_desktop = (
+        _normalize_surface_kind(metadata.get("required_surface_kind", ""))
+        == "desktop_app"
+    )
+    binding_surface = _normalize_surface_kind(
+        metadata.get("app_binding_surface_kind", "")
+    )
+    if required_desktop and binding_surface == "cli":
+        return False
     expected_names = {
         _normalize_process_name(name)
         for name in metadata.get("expected_app_process_names", []) or []
@@ -984,22 +1400,69 @@ def _agent_native_bridge_app_binding_ok(metadata: dict) -> bool:
     actual_name = _binding_process_name(binding)
     if expected_names and actual_name not in expected_names:
         return False
+    pid_matched = False
+    hwnd_matched = False
     expected_pids = _positive_int_set(metadata.get("expected_app_pids", []) or [])
     if expected_pids:
         pid = _int_value(binding.get("pid"))
         if pid not in expected_pids:
             return False
+        pid_matched = True
     expected_hwnds = _positive_int_set(metadata.get("expected_app_hwnds", []) or [])
     if expected_hwnds:
         hwnd = _int_value(binding.get("hwnd"))
         if hwnd not in expected_hwnds:
             return False
+        hwnd_matched = True
+    if required_desktop and not (
+        binding_surface == "desktop" or pid_matched or hwnd_matched
+    ):
+        return False
     return bool(
         actual_name
         or _int_value(binding.get("pid"))
         or _int_value(binding.get("hwnd"))
         or str(binding.get("window_title", "") or binding.get("title", "") or "").strip()
     )
+
+
+def _agent_app_binding_surface_kind(agent_id: str, binding: dict) -> str:
+    if not binding:
+        return ""
+    process = NativeProcessSnapshot(
+        pid=_int_value(binding.get("pid")),
+        process_name=_binding_raw_process_name(binding),
+        executable_path=_binding_raw_path(binding),
+        command_line=_binding_raw_command_line(binding),
+    )
+    return _agent_process_surface_kind(agent_id, process)
+
+
+def _binding_raw_process_name(binding: dict) -> str:
+    for key in ("process_name", "processName", "executable_name", "executableName"):
+        value = str(binding.get(key, "") or "").strip()
+        if value:
+            return value
+    path = _binding_raw_path(binding)
+    return Path(path).name if path else ""
+
+
+def _binding_raw_path(binding: dict) -> str:
+    for key in ("executable_path", "executablePath", "path"):
+        value = str(binding.get(key, "") or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _binding_raw_command_line(binding: dict) -> str:
+    for key in ("command_line", "commandLine", "cmdline", "argv"):
+        value = binding.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, list):
+            return " ".join(str(item) for item in value if str(item or "").strip())
+    return ""
 
 
 def _normalize_surface_kind(value: object) -> str:
@@ -1058,6 +1521,31 @@ def _normalize_local_debugger_url(value: object) -> str:
     if path and path != "/":
         return ""
     return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+
+
+def _normalize_local_ws_url(value: object) -> str:
+    text = str(value or "").strip().rstrip("/")
+    if not text:
+        return ""
+    try:
+        parsed = urlsplit(text)
+    except Exception:
+        return ""
+    if parsed.scheme != "ws":
+        return ""
+    host = str(parsed.hostname or "").strip().casefold()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return ""
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    if not port or not (0 < int(port) <= 65535):
+        return ""
+    path = str(parsed.path or "").strip()
+    if path and path != "/":
+        return ""
+    return f"ws://{parsed.netloc}".rstrip("/")
 
 
 def _process_listening_on_port(

@@ -9,8 +9,11 @@ File Transfer Assistant, and the opened target is confirmed before sending.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import dataclasses
 import json
+import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -155,8 +158,9 @@ class FakeWeChatKeyboardAutomation:
 
 
 class Win32WeChatKeyboardAutomation:
-    def __init__(self, *, action_delay: float = 0.35):
+    def __init__(self, *, action_delay: float = 0.35, ocr_timeout: float = 20.0):
         self.action_delay = action_delay
+        self.ocr_timeout = ocr_timeout
         self._saved_clipboard: str | None = None
         self._window = None
 
@@ -259,6 +263,14 @@ class Win32WeChatKeyboardAutomation:
     def verify_target(self, target_name: str, screenshot_path: str) -> bool:
         del target_name, screenshot_path
         return False
+
+    def verify_post_send_message(self, target_name: str, message: str, screenshot_path: str) -> dict:
+        return verify_wechat_post_send_message_from_screenshot(
+            target_name=target_name,
+            message=message,
+            screenshot_path=screenshot_path,
+            ocr_timeout=self.ocr_timeout,
+        )
 
     def restore_clipboard(self) -> None:
         if self._saved_clipboard is None:
@@ -562,6 +574,167 @@ def _verify_post_send_message(
     data.setdefault("screenshot_path", screenshot_path)
     data["verified"] = bool(data.get("verified"))
     return data
+
+
+def verify_wechat_post_send_message_from_screenshot(
+    *,
+    target_name: str,
+    message: str,
+    screenshot_path: str,
+    ocr_timeout: float = 20.0,
+    ocr_runner: object | None = None,
+) -> dict:
+    """Verify a post-send WeChat screenshot contains the sent marker text."""
+
+    path = Path(str(screenshot_path or ""))
+    if not screenshot_path or not path.is_file():
+        return {
+            "verified": False,
+            "method": "windows-media-ocr-readback",
+            "target_name": target_name,
+            "message_preview": _clip(message),
+            "screenshot_path": screenshot_path,
+            "error": "screenshot_missing",
+        }
+    runner = ocr_runner if callable(ocr_runner) else _windows_media_ocr_text_from_image
+    ocr = runner(str(path), timeout=ocr_timeout)
+    if not isinstance(ocr, dict):
+        ocr = {"ok": False, "error": "ocr_runner_invalid_result"}
+    text = str(ocr.get("text", "") or "")
+    marker_seen = _message_seen_in_text(message, text)
+    return {
+        "verified": bool(ocr.get("ok", False) and marker_seen),
+        "method": "windows-media-ocr-readback",
+        "target_name": target_name,
+        "message_preview": _clip(message),
+        "screenshot_path": str(path),
+        "ocr_method": str(ocr.get("method", "windows-media-ocr") or ""),
+        "ocr_ok": bool(ocr.get("ok", False)),
+        "ocr_text_preview": _clip(text, limit=1000),
+        "normalized_marker_matched": bool(marker_seen),
+        "normalized_marker": _normalize_ocr_match_text(message),
+        "normalized_text_preview": _clip(_normalize_ocr_match_text(text), limit=1000),
+        "error": str(ocr.get("error", "") or ""),
+    }
+
+
+def _message_seen_in_text(message: str, text: str) -> bool:
+    if not message or not text:
+        return False
+    if str(message) in str(text):
+        return True
+    marker = _normalize_ocr_match_text(message)
+    haystack = _normalize_ocr_match_text(text)
+    return bool(marker and marker in haystack)
+
+
+def _normalize_ocr_match_text(value: str) -> str:
+    return "".join(ch for ch in str(value or "").casefold() if ch.isalnum())
+
+
+def _windows_media_ocr_text_from_image(path: str, *, timeout: float = 20.0) -> dict:
+    if not sys.platform.startswith("win"):
+        return {
+            "ok": False,
+            "method": "windows-media-ocr",
+            "text": "",
+            "error": "windows_ocr_requires_windows",
+        }
+    target = Path(str(path or ""))
+    if not target.is_file():
+        return {
+            "ok": False,
+            "method": "windows-media-ocr",
+            "text": "",
+            "error": "image_missing",
+        }
+    try:
+        text = _run_async_blocking(_python_winrt_ocr_text_from_image(target), timeout=timeout)
+    except ImportError as exc:
+        missing_name = getattr(exc, "name", "") or exc.__class__.__name__
+        return {
+            "ok": False,
+            "method": "windows-media-ocr",
+            "text": "",
+            "error": f"python_winrt_ocr_unavailable:{missing_name}",
+        }
+    except TimeoutError:
+        return {
+            "ok": False,
+            "method": "windows-media-ocr",
+            "text": "",
+            "error": "ocr_timeout",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "method": "windows-media-ocr",
+            "text": "",
+            "error": f"ocr_error:{exc.__class__.__name__}:{exc}",
+        }
+    return {
+        "ok": True,
+        "method": "python-winrt-windows-media-ocr",
+        "text": str(text or "").strip(),
+        "error": "",
+    }
+
+
+async def _python_winrt_ocr_text_from_image(path: Path) -> str:
+    from winrt.windows.graphics.imaging import BitmapDecoder
+    from winrt.windows.media.ocr import OcrEngine
+    from winrt.windows.storage.streams import DataWriter, InMemoryRandomAccessStream
+
+    stream = InMemoryRandomAccessStream()
+    writer = DataWriter(stream)
+    try:
+        writer.write_bytes(path.read_bytes())
+        await writer.store_async()
+        await writer.flush_async()
+        writer.detach_stream()
+        stream.seek(0)
+        decoder = await BitmapDecoder.create_async(stream)
+        bitmap = await decoder.get_software_bitmap_async()
+        engine = OcrEngine.try_create_from_user_profile_languages()
+        if engine is None:
+            raise RuntimeError("ocr_engine_unavailable")
+        result = await engine.recognize_async(bitmap)
+        return str(result.text or "")
+    finally:
+        for closeable in (writer, stream):
+            close = getattr(closeable, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+
+def _run_async_blocking(coro, *, timeout: float):
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(asyncio.wait_for(coro, timeout=max(1.0, float(timeout or 0))))
+
+    result: dict[str, object] = {}
+
+    def _runner() -> None:
+        try:
+            result["value"] = asyncio.run(
+                asyncio.wait_for(coro, timeout=max(1.0, float(timeout or 0)))
+            )
+        except BaseException as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout=max(1.0, float(timeout or 0)) + 1.0)
+    if thread.is_alive():
+        raise TimeoutError("ocr_timeout")
+    error = result.get("error")
+    if isinstance(error, BaseException):
+        raise error
+    return result.get("value")
 
 
 def _report(started: float, **kwargs) -> WeChatSendProbeReport:

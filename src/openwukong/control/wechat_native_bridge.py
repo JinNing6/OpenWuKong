@@ -32,6 +32,9 @@ class WeChatNativeBridgeRequest:
     target_name: str
     message: str
     background_screenshot_focus_stable: bool = True
+    background_screenshot_count: int = 0
+    background_screenshot_success_count: int = 0
+    background_screenshots: tuple[dict, ...] = ()
     selected_transport: dict = dataclasses.field(default_factory=dict)
     required_markers: tuple[str, ...] = ()
     forbidden_markers: tuple[str, ...] = ()
@@ -57,6 +60,13 @@ class WeChatNativeBridgeRequest:
             "forbidden_markers": list(self.forbidden_markers),
         }
 
+    @property
+    def background_screenshot_verified(self) -> bool:
+        return (
+            self.background_screenshot_focus_stable
+            and self.background_screenshot_success_count > 0
+        )
+
     def to_dict(self, capability_report: dict | None = None) -> dict:
         capabilities = dict(capability_report or {})
         return {
@@ -69,6 +79,12 @@ class WeChatNativeBridgeRequest:
             "send_action_ready": _send_action_ready(capabilities),
             "background_safe": _background_safe(capabilities),
             "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
+            "background_screenshot_count": int(self.background_screenshot_count or 0),
+            "background_screenshot_success_count": int(
+                self.background_screenshot_success_count or 0
+            ),
+            "background_screenshot_verified": self.background_screenshot_verified,
+            "background_screenshots": [dict(item) for item in self.background_screenshots],
             "target_name": self.target_name,
             "selected_transport": dict(self.selected_transport),
             "target": _target_summary(capabilities, self.target_name),
@@ -147,6 +163,8 @@ class WeChatNativeBridgeDryRunReport:
             return "wechat_native_bridge_background_not_safe"
         if not self.request.background_screenshot_focus_stable:
             return "wechat_native_bridge_visual_focus_not_stable"
+        if not self.request.background_screenshot_verified:
+            return "wechat_native_bridge_background_screenshot_not_verified"
         if self.validation_errors:
             return "wechat_native_bridge_request_invalid"
         return "wechat_native_bridge_dry_run_ready"
@@ -434,6 +452,9 @@ def build_wechat_native_bridge_request(
     target_name: str,
     message: str,
     background_screenshot_focus_stable: bool = True,
+    background_screenshot_count: int = 0,
+    background_screenshot_success_count: int = 0,
+    background_screenshots: tuple[dict, ...] | list[dict] = (),
     selected_transport: dict | object | None = None,
     required_markers: tuple[str, ...] = (),
     forbidden_markers: tuple[str, ...] = (),
@@ -443,6 +464,14 @@ def build_wechat_native_bridge_request(
         target_name=str(target_name or "").strip(),
         message=str(message or "").strip(),
         background_screenshot_focus_stable=bool(background_screenshot_focus_stable),
+        background_screenshot_count=max(0, int(background_screenshot_count or 0)),
+        background_screenshot_success_count=max(
+            0,
+            int(background_screenshot_success_count or 0),
+        ),
+        background_screenshots=tuple(
+            dict(item) for item in (background_screenshots or ()) if isinstance(item, dict)
+        ),
         selected_transport=_dict_from_report(selected_transport),
         required_markers=_string_tuple(required_markers),
         forbidden_markers=_string_tuple(forbidden_markers),
@@ -467,6 +496,8 @@ def _validate_request(request: WeChatNativeBridgeRequest, capability_report: dic
         errors.append("background_not_safe")
     if not request.background_screenshot_focus_stable:
         errors.append("background_screenshot_focus_not_stable")
+    if not request.background_screenshot_verified:
+        errors.append("background_screenshot_not_verified")
     return tuple(errors)
 
 

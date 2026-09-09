@@ -30,11 +30,11 @@ def main(
     )
     parser.add_argument("--route", action="append", default=None, help="Route id to make discoverable.")
     parser.add_argument("--browser-executable", default="chrome.exe")
-    parser.add_argument("--browser-debug-port", type=int, default=9222)
+    parser.add_argument("--browser-debug-port", type=int, default=0)
     parser.add_argument("--browser-user-data-dir", default="logs/runtime/browser-devtools-profile")
     parser.add_argument("--browser-url", default="about:blank")
     parser.add_argument("--agent-app-executable", default="")
-    parser.add_argument("--agent-app-debug-port", type=int, default=9555)
+    parser.add_argument("--agent-app-debug-port", type=int, default=0)
     parser.add_argument(
         "--agent-app-user-data-dir",
         default="logs/runtime/agent-app-devtools-profile",
@@ -45,12 +45,22 @@ def main(
     parser.add_argument("--ide-extensions-dir", default="logs/runtime/ide-bridge-extensions")
     parser.add_argument("--ide-extension-dir", default="extensions/openwukong-vscode")
     parser.add_argument("--ide-bridge-host", default="127.0.0.1")
-    parser.add_argument("--ide-bridge-port", type=int, default=8787)
+    parser.add_argument(
+        "--ide-bridge-port",
+        type=int,
+        default=0,
+        help="IDE bridge port. Use 0 to let the operating system assign an unused loopback port.",
+    )
     parser.add_argument("--agent-bridge-python-executable", default="")
     parser.add_argument("--agent-bridge-agent", default="agent app")
     parser.add_argument("--agent-bridge-agent-id", default="")
     parser.add_argument("--agent-bridge-host", default="127.0.0.1")
-    parser.add_argument("--agent-bridge-port", type=int, default=18888)
+    parser.add_argument(
+        "--agent-bridge-port",
+        type=int,
+        default=0,
+        help="Agent native bridge port. Use 0 to let the operating system assign an unused loopback port.",
+    )
     parser.add_argument("--agent-bridge-debugger-url", default="")
     parser.add_argument(
         "--agent-bridge-registry-path",
@@ -64,6 +74,37 @@ def main(
     parser.add_argument("--agent-bridge-task", default="")
     parser.add_argument("--agent-bridge-target-title", default="")
     parser.add_argument("--agent-bridge-target-url", default="")
+    parser.add_argument("--wechat-bridge-python-executable", default="")
+    parser.add_argument("--wechat-bridge-host", default="127.0.0.1")
+    parser.add_argument(
+        "--wechat-bridge-port",
+        type=int,
+        default=0,
+        help="WeChat native bridge port. Use 0 to let the operating system assign an unused loopback port.",
+    )
+    parser.add_argument(
+        "--wechat-bridge-registry-path",
+        default="logs/runtime/wechat-native-bridge/wechat-native-bridges.json",
+    )
+    parser.add_argument("--wechat-bridge-process-name", default="Weixin.exe")
+    parser.add_argument("--wechat-bridge-pid", type=int, default=0)
+    parser.add_argument("--wechat-bridge-hwnd", type=int, default=0)
+    parser.add_argument("--wechat-bridge-window-title", default="")
+    parser.add_argument(
+        "--wechat-bridge-conversation-name",
+        default="File Transfer Assistant",
+    )
+    parser.add_argument("--wechat-bridge-conversation-id", default="")
+    parser.add_argument(
+        "--wechat-bridge-backend",
+        default="read-only-evidence",
+        choices=("read-only-evidence", "unavailable"),
+    )
+    parser.add_argument(
+        "--wechat-bridge-capture-dir",
+        default="logs/runtime/wechat-native-bridge/captures",
+    )
+    parser.add_argument("--wechat-bridge-capability-timeout-sec", type=float, default=5.0)
     parser.add_argument("--workspace-root", default="")
     parser.add_argument("--output", default="")
     parser.add_argument("--execute", action="store_true")
@@ -123,6 +164,22 @@ def main(
         agent_bridge_task_name=args.agent_bridge_task,
         agent_bridge_target_title=args.agent_bridge_target_title,
         agent_bridge_target_url=args.agent_bridge_target_url,
+        wechat_bridge_python_executable=(
+            args.wechat_bridge_python_executable
+            or SessionReadinessPlanOptions().wechat_bridge_python_executable
+        ),
+        wechat_bridge_host=args.wechat_bridge_host,
+        wechat_bridge_port=args.wechat_bridge_port,
+        wechat_bridge_registry_path=args.wechat_bridge_registry_path,
+        wechat_bridge_process_name=args.wechat_bridge_process_name,
+        wechat_bridge_pid=args.wechat_bridge_pid,
+        wechat_bridge_hwnd=args.wechat_bridge_hwnd,
+        wechat_bridge_window_title=args.wechat_bridge_window_title,
+        wechat_bridge_conversation_name=args.wechat_bridge_conversation_name,
+        wechat_bridge_conversation_id=args.wechat_bridge_conversation_id,
+        wechat_bridge_backend=args.wechat_bridge_backend,
+        wechat_bridge_capture_dir=args.wechat_bridge_capture_dir,
+        wechat_bridge_capability_timeout_sec=args.wechat_bridge_capability_timeout_sec,
     )
     plan = build_session_readiness_plan(routes=routes, options=options)
     if args.execute:

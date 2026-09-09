@@ -14,6 +14,10 @@ from openwukong.evaluation.office_word_runner import (
 class OfficeWordRunnerTests(unittest.TestCase):
     def test_hidden_word_com_probe_writes_saves_reads_and_quits(self):
         fake = _FakeWordFactory()
+        foreground = _FakeForegroundObserver(
+            before={"hwnd": 1001, "pid": 11, "process_name": "Weixin.exe", "window_title": "WeChat"},
+            after={"hwnd": 1001, "pid": 11, "process_name": "Weixin.exe", "window_title": "WeChat"},
+        )
 
         with tempfile.TemporaryDirectory() as td:
             output = Path(td) / "probe.docx"
@@ -21,6 +25,7 @@ class OfficeWordRunnerTests(unittest.TestCase):
                 document_path=str(output),
                 marker="OPENWUKONG_WORD_BACKGROUND_OK",
                 word_factory=fake.create,
+                foreground_observer=foreground,
             )
             data = report.to_dict()
 
@@ -30,6 +35,11 @@ class OfficeWordRunnerTests(unittest.TestCase):
         self.assertEqual(data["window_input_attempts"], 0)
         self.assertEqual(data["office_com_attempts"], 1)
         self.assertEqual(data["visible_requested"], False)
+        self.assertTrue(data["foreground_no_steal_verified"])
+        self.assertTrue(data["foreground_focus_stable"])
+        self.assertEqual(data["foreground_change_classification"], "stable")
+        self.assertEqual(data["foreground_snapshot_before"]["process_name"], "Weixin.exe")
+        self.assertEqual(data["foreground_snapshot_after"]["process_name"], "Weixin.exe")
         self.assertIn("OPENWUKONG_WORD_BACKGROUND_OK", data["readback_text"])
         self.assertEqual(fake.app.Visible, False)
         self.assertEqual(fake.app.DisplayAlerts, 0)
@@ -55,6 +65,50 @@ class OfficeWordRunnerTests(unittest.TestCase):
         self.assertEqual(data["office_com_attempts"], 0)
         self.assertEqual(data["control_attempts"], 0)
         self.assertIn("word com unavailable", data["error"])
+
+    def test_word_focus_steal_is_rejected_even_when_readback_succeeds(self):
+        fake = _FakeWordFactory()
+        foreground = _FakeForegroundObserver(
+            before={"hwnd": 1001, "pid": 11, "process_name": "Weixin.exe", "window_title": "WeChat"},
+            after={"hwnd": 2002, "pid": 22, "process_name": "WINWORD.EXE", "window_title": "probe.docx - Word"},
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_office_word_background_probe(
+                document_path=str(Path(td) / "probe.docx"),
+                marker="OPENWUKONG_WORD_BACKGROUND_OK",
+                word_factory=fake.create,
+                foreground_observer=foreground,
+            )
+            data = report.to_dict()
+
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["decision"], "word_foreground_stolen")
+        self.assertFalse(data["foreground_focus_stable"])
+        self.assertFalse(data["foreground_no_steal_verified"])
+        self.assertEqual(data["foreground_change_classification"], "changed_to_word_surface")
+
+    def test_unrelated_user_foreground_change_does_not_fail_background_probe(self):
+        fake = _FakeWordFactory()
+        foreground = _FakeForegroundObserver(
+            before={"hwnd": 1001, "pid": 11, "process_name": "Weixin.exe", "window_title": "WeChat"},
+            after={"hwnd": 3003, "pid": 33, "process_name": "chrome.exe", "window_title": "Docs - Chrome"},
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_office_word_background_probe(
+                document_path=str(Path(td) / "probe.docx"),
+                marker="OPENWUKONG_WORD_BACKGROUND_OK",
+                word_factory=fake.create,
+                foreground_observer=foreground,
+            )
+            data = report.to_dict()
+
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["decision"], "word_background_probe_verified")
+        self.assertFalse(data["foreground_focus_stable"])
+        self.assertTrue(data["foreground_no_steal_verified"])
+        self.assertEqual(data["foreground_change_classification"], "changed_to_unrelated_surface")
 
     def test_cli_writes_json_report(self):
         fake = _FakeWordFactory()
@@ -139,6 +193,18 @@ class _FakeDocument:
 class _FakeRange:
     def __init__(self, text):
         self.Text = text
+
+
+class _FakeForegroundObserver:
+    def __init__(self, *, before, after):
+        self.before = dict(before)
+        self.after = dict(after)
+
+    def get_foreground_snapshot(self):
+        return dict(self.before)
+
+    def get_foreground_snapshot_after(self):
+        return dict(self.after)
 
 
 if __name__ == "__main__":

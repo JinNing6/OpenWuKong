@@ -16,6 +16,7 @@ from openwukong.control.app_resolution import (
     AppResolutionReport,
     WindowsAppResolver,
     claude_candidate_surface_kind,
+    cursor_candidate_surface_kind,
     lower_text,
 )
 from openwukong.control.side_effects import (
@@ -166,7 +167,9 @@ def _build_transports(
             _claude_transports(resolution.candidates, require_desktop=require_desktop)
         )
     if app_id == "cursor":
-        return _dedupe_transports(_cursor_transports(resolution.candidates))
+        return _dedupe_transports(
+            _cursor_transports(resolution.candidates, require_desktop=require_desktop)
+        )
     return ()
 
 
@@ -283,34 +286,55 @@ def _claude_transports(
 
 def _cursor_transports(
     candidates: tuple[AppResolutionCandidate, ...],
+    *,
+    require_desktop: bool = False,
 ) -> tuple[AgentTransportSurface, ...]:
+    cli: list[AgentTransportSurface] = []
     desktop: list[AgentTransportSurface] = []
     for candidate in candidates:
-        exe = lower_text(_candidate_file_name(candidate))
-        if exe != "cursor.exe":
-            continue
-        desktop.append(
-            AgentTransportSurface(
-                transport_id="cursor-desktop-shell",
-                display_name="Cursor Desktop Shell",
-                route_id="cursor-desktop-connector",
-                transport="desktop-shell-uia-or-native-bridge",
-                source=candidate.source,
-                path=_candidate_control_target(candidate),
-                pid=candidate.pid,
-                background_capable=False,
-                ready=True,
-                execution_allowed=False,
-                control_allowed=False,
-                notes=("background_task_submit_requires_ide_or_native_bridge",),
+        if not require_desktop and _is_cursor_agent_cli(candidate):
+            cli.append(
+                AgentTransportSurface(
+                    transport_id="cursor-agent-cli-managed-terminal",
+                    display_name="Cursor Agent CLI",
+                    route_id="terminal-native-session",
+                    transport="managed-terminal-cli",
+                    source=candidate.source,
+                    path=candidate.path,
+                    pid=candidate.pid,
+                    background_capable=True,
+                    ready=True,
+                    execution_allowed=False,
+                    control_allowed=False,
+                    command_family="cursor-agent -p",
+                    notes=("agent_task_submission_requires_confirmation",),
+                )
             )
-        )
-    return tuple(desktop)
+        elif _is_cursor_desktop_shell(candidate):
+            desktop.append(
+                AgentTransportSurface(
+                    transport_id="cursor-desktop-shell",
+                    display_name="Cursor Desktop Shell",
+                    route_id="cursor-desktop-connector",
+                    transport="desktop-shell-uia-or-native-bridge",
+                    source=candidate.source,
+                    path=_candidate_control_target(candidate),
+                    pid=candidate.pid,
+                    background_capable=False,
+                    ready=True,
+                    execution_allowed=False,
+                    control_allowed=False,
+                    notes=("background_task_submit_requires_ide_or_native_bridge",),
+                )
+            )
+    return tuple(cli + desktop)
 
 
 def _is_codex_standalone_cli(candidate: AppResolutionCandidate) -> bool:
     path_text = _normalized_path(candidate.path)
     exe = lower_text(_candidate_file_name(candidate))
+    if candidate.source == "local-agent-cli":
+        return True
     if ".cursor/extensions/" in path_text or "/resources/" in path_text:
         return False
     if "/appdata/local/openai/codex/bin/" in path_text:
@@ -335,6 +359,14 @@ def _is_claude_code_cli(candidate: AppResolutionCandidate) -> bool:
 
 def _is_claude_desktop_shell(candidate: AppResolutionCandidate) -> bool:
     return claude_candidate_surface_kind(candidate) == "desktop"
+
+
+def _is_cursor_agent_cli(candidate: AppResolutionCandidate) -> bool:
+    return cursor_candidate_surface_kind(candidate) == "cli"
+
+
+def _is_cursor_desktop_shell(candidate: AppResolutionCandidate) -> bool:
+    return cursor_candidate_surface_kind(candidate) == "desktop"
 
 
 def _request_requires_desktop_surface(agent_name: str) -> bool:

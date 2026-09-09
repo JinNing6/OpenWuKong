@@ -17,6 +17,13 @@ from openwukong.control.session_readiness_plan import (
     execute_session_readiness_plan,
     stop_session_readiness_manifest,
 )
+from openwukong.control.ide_bridge_registry import IDE_BRIDGE_REGISTRY_SCHEMA_VERSION
+from openwukong.control.native_bridge_registry import (
+    AGENT_NATIVE_BRIDGE_REGISTRY_SCHEMA_VERSION,
+)
+from openwukong.control.wechat_native_bridge_registry import (
+    WECHAT_NATIVE_BRIDGE_REGISTRY_SCHEMA_VERSION,
+)
 from openwukong.evaluation.session_readiness_plan import main
 
 
@@ -51,9 +58,147 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertTrue(Path(user_data_dir).is_absolute())
         self.assertIn("--user-data-dir=", action["command"])
         self.assertIn("--remote-debugging-port=9222", action["argv"])
-        self.assertIn("--headless", action["argv"])
+        self.assertIn("--headless=new", action["argv"])
+        self.assertIn("--remote-debugging-address=127.0.0.1", action["argv"])
+        self.assertIn("--disable-gpu", action["argv"])
+        self.assertIn("--no-default-browser-check", action["argv"])
         self.assertIn("--disable-crash-reporter", action["argv"])
         self.assertNotIn("--new-window", action["argv"])
+
+    def test_browser_dynamic_debug_port_reads_devtools_active_port_after_launch(self):
+        class _FakeLauncher:
+            def __init__(self):
+                self.calls = []
+
+            def launch(self, argv, cwd=None):
+                self.calls.append((tuple(argv), cwd))
+                user_data_arg = next(
+                    value for value in argv if value.startswith("--user-data-dir=")
+                )
+                profile_path = Path(user_data_arg.split("=", 1)[1])
+                profile_path.mkdir(parents=True, exist_ok=True)
+                (profile_path / "DevToolsActivePort").write_text(
+                    "19631\n/devtools/browser/openwukong\n",
+                    encoding="utf-8",
+                )
+                return 6161
+
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "dynamic-profile"
+            manifest_path = Path(tmp) / "manifest.json"
+            launcher = _FakeLauncher()
+            plan = build_session_readiness_plan(
+                routes=("browser-devtools-or-extension",),
+                options=SessionReadinessPlanOptions(
+                    browser_executable="chrome.exe",
+                    browser_debug_port=0,
+                    browser_user_data_dir=str(profile),
+                    browser_url="about:blank",
+                ),
+            )
+
+            report = execute_session_readiness_plan(
+                plan,
+                manifest_path=str(manifest_path),
+                launcher=launcher,
+            )
+            data = report.to_dict()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["launch_attempts"], 1)
+        self.assertEqual(data["results"][0]["status"], "started")
+        self.assertEqual(data["results"][0]["pid"], 6161)
+        self.assertEqual(data["results"][0]["readiness_url"], "http://127.0.0.1:19631")
+        self.assertEqual(manifest["launches"][0]["readiness_url"], "http://127.0.0.1:19631")
+        self.assertIn("--remote-debugging-port=0", launcher.calls[0][0])
+
+    def test_ide_bridge_plan_defaults_to_dynamic_port(self):
+        report = build_session_readiness_plan(
+            routes=("ide-extension-connector",),
+            options=SessionReadinessPlanOptions(
+                ide_executable="cursor.exe",
+                workspace_root="E:/ideaProjects/agent/openwukong",
+            ),
+        )
+        action = report.to_dict()["actions"][0]
+
+        self.assertEqual(action["route_id"], "ide-extension-connector")
+        self.assertEqual(action["connector_id"], "ide-extension")
+        self.assertEqual(action["readiness_url"], "")
+        self.assertEqual(action["settings_preview"]["openwukong.bridge.port"], 0)
+
+    def test_execute_dynamic_ide_bridge_reads_registry_port_after_launch(self):
+        class _FakeLauncher:
+            def __init__(self, registry_root):
+                self.registry_root = Path(registry_root)
+                self.calls = []
+
+            def launch(self, argv, cwd=None):
+                self.calls.append((tuple(argv), cwd))
+                bridge_dir = self.registry_root / "OpenWukong" / "ide-bridges"
+                bridge_dir.mkdir(parents=True, exist_ok=True)
+                (bridge_dir / "cursor-instance.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": IDE_BRIDGE_REGISTRY_SCHEMA_VERSION,
+                            "ide_bridges": [
+                                {
+                                    "type": "ide_bridge",
+                                    "enabled": True,
+                                    "app_name": "Cursor",
+                                    "bridge_url": "http://127.0.0.1:19641",
+                                    "dynamic_port": True,
+                                    "workspace_folders": [
+                                        {
+                                            "fsPath": "E:/ideaProjects/agent/openwukong",
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return 6262
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            launcher = _FakeLauncher(root)
+            manifest_path = root / "manifest.json"
+            plan = build_session_readiness_plan(
+                routes=("ide-extension-connector",),
+                options=SessionReadinessPlanOptions(
+                    ide_executable="cursor.exe",
+                    ide_bridge_port=0,
+                    ide_user_data_dir=str(root / "ide-user-data"),
+                    ide_extensions_dir=str(root / "ide-extensions"),
+                    workspace_root="E:/ideaProjects/agent/openwukong",
+                ),
+            )
+            with patch.dict(
+                "openwukong.control.session_readiness_plan.os.environ",
+                {"LOCALAPPDATA": str(root), "PROGRAMDATA": ""},
+                clear=True,
+            ):
+                report = execute_session_readiness_plan(
+                    plan,
+                    manifest_path=str(manifest_path),
+                    launcher=launcher,
+            )
+            data = report.to_dict()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            user_data_arg = next(
+                value for value in launcher.calls[0][0] if value.startswith("--user-data-dir=")
+            )
+            settings_path = Path(user_data_arg.split("=", 1)[1]) / "User" / "settings.json"
+            settings_text = settings_path.read_text(encoding="utf-8")
+
+        self.assertEqual(data["launch_attempts"], 1)
+        self.assertEqual(data["results"][0]["status"], "started")
+        self.assertEqual(data["results"][0]["pid"], 6262)
+        self.assertEqual(data["results"][0]["readiness_url"], "http://127.0.0.1:19641")
+        self.assertEqual(manifest["launches"][0]["readiness_url"], "http://127.0.0.1:19641")
+        self.assertIn("openwukong.bridge.port", settings_text)
 
     def test_ide_plan_uses_extension_host_and_bridge_settings_preview(self):
         options = SessionReadinessPlanOptions(
@@ -144,6 +289,237 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertIn("--project", action["argv"])
         self.assertIn("openwukong", action["argv"])
 
+    def test_agent_native_cdp_bridge_plan_defaults_to_dynamic_port(self):
+        report = build_session_readiness_plan(
+            routes=("agent-native-cdp-bridge",),
+            options=SessionReadinessPlanOptions(
+                agent_bridge_python_executable="python.exe",
+                agent_bridge_agent="codex app",
+                agent_bridge_agent_id="codex",
+                agent_bridge_debugger_url="http://127.0.0.1:9555",
+                agent_bridge_registry_path="E:/tmp/openwukong/native-bridges.json",
+                agent_bridge_process_name="Codex.exe",
+            ),
+        )
+        action = report.to_dict()["actions"][0]
+
+        self.assertEqual(action["readiness_url"], "")
+        port_index = action["argv"].index("--port") + 1
+        self.assertEqual(action["argv"][port_index], "0")
+
+    def test_execute_dynamic_agent_native_cdp_bridge_reads_registry_port_after_launch(self):
+        class _FakeLauncher:
+            def __init__(self):
+                self.calls = []
+
+            def launch(self, argv, cwd=None):
+                self.calls.append((tuple(argv), cwd))
+                registry_path = Path(argv[argv.index("--registry-path") + 1])
+                registry_path.parent.mkdir(parents=True, exist_ok=True)
+                registry_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": AGENT_NATIVE_BRIDGE_REGISTRY_SCHEMA_VERSION,
+                            "agent_native_bridges": [
+                                {
+                                    "type": "agent_native_bridge",
+                                    "agent_id": "codex",
+                                    "agent": "codex app",
+                                    "surface_kind": "desktop_app",
+                                    "enabled": True,
+                                    "url": "http://127.0.0.1:19651",
+                                    "app_binding": {"process_name": "Codex.exe"},
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return 6363
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "native-bridges.json"
+            manifest_path = Path(tmp) / "manifest.json"
+            launcher = _FakeLauncher()
+            plan = build_session_readiness_plan(
+                routes=("agent-native-cdp-bridge",),
+                options=SessionReadinessPlanOptions(
+                    agent_bridge_python_executable="python.exe",
+                    agent_bridge_agent="codex app",
+                    agent_bridge_agent_id="codex",
+                    agent_bridge_port=0,
+                    agent_bridge_debugger_url="http://127.0.0.1:9555",
+                    agent_bridge_registry_path=str(registry_path),
+                    agent_bridge_process_name="Codex.exe",
+                ),
+            )
+
+            report = execute_session_readiness_plan(
+                plan,
+                manifest_path=str(manifest_path),
+                launcher=launcher,
+            )
+            data = report.to_dict()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["launch_attempts"], 1)
+        self.assertEqual(data["results"][0]["status"], "started")
+        self.assertEqual(data["results"][0]["pid"], 6363)
+        self.assertEqual(data["results"][0]["readiness_url"], "http://127.0.0.1:19651")
+        self.assertEqual(manifest["launches"][0]["readiness_url"], "http://127.0.0.1:19651")
+        self.assertIn("--port", launcher.calls[0][0])
+        self.assertEqual(launcher.calls[0][0][launcher.calls[0][0].index("--port") + 1], "0")
+
+    def test_wechat_native_bridge_plan_defaults_to_dynamic_port(self):
+        report = build_session_readiness_plan(
+            routes=("wechat-native-bridge",),
+            options=SessionReadinessPlanOptions(
+                wechat_bridge_python_executable="python.exe",
+                wechat_bridge_registry_path="E:/tmp/openwukong/wechat-native-bridges.json",
+                wechat_bridge_process_name="Weixin.exe",
+                wechat_bridge_conversation_name="File Transfer Assistant",
+            ),
+        )
+        action = report.to_dict()["actions"][0]
+
+        self.assertEqual(action["action_id"], "launch_wechat_native_bridge")
+        self.assertEqual(action["route_id"], "wechat-native-bridge")
+        self.assertEqual(action["connector_id"], "wechat-native-bridge")
+        self.assertEqual(action["readiness_url"], "")
+        self.assertTrue(action["managed_background_helper"])
+        self.assertFalse(action["foreground_required"])
+        self.assertIn("openwukong.control.wechat_native_endpoint_publisher", action["argv"])
+        self.assertIn("--backend", action["argv"])
+        self.assertEqual(
+            action["argv"][action["argv"].index("--backend") + 1],
+            "read-only-evidence",
+        )
+        self.assertIn("--registry-path", action["argv"])
+        self.assertIn("E:/tmp/openwukong/wechat-native-bridges.json", action["argv"])
+        port_index = action["argv"].index("--port") + 1
+        self.assertEqual(action["argv"][port_index], "0")
+
+    def test_execute_dynamic_wechat_native_bridge_reads_registry_port_after_launch(self):
+        class _FakeLauncher:
+            def __init__(self):
+                self.calls = []
+
+            def launch(self, argv, cwd=None):
+                self.calls.append((tuple(argv), cwd))
+                registry_path = Path(argv[argv.index("--registry-path") + 1])
+                registry_path.parent.mkdir(parents=True, exist_ok=True)
+                registry_path.write_text(
+                    json.dumps(
+                        {
+                            "schema_version": WECHAT_NATIVE_BRIDGE_REGISTRY_SCHEMA_VERSION,
+                            "wechat_native_bridges": [
+                                {
+                                    "type": "wechat_native_bridge",
+                                    "surface_kind": "desktop_app",
+                                    "enabled": True,
+                                    "url": "http://127.0.0.1:19671",
+                                    "app_binding": {"process_name": "Weixin.exe"},
+                                    "target": {
+                                        "conversation_name": "File Transfer Assistant",
+                                    },
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return 6464
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = Path(tmp) / "wechat-native-bridges.json"
+            manifest_path = Path(tmp) / "manifest.json"
+            launcher = _FakeLauncher()
+            plan = build_session_readiness_plan(
+                routes=("wechat-native-bridge",),
+                options=SessionReadinessPlanOptions(
+                    wechat_bridge_python_executable="python.exe",
+                    wechat_bridge_port=0,
+                    wechat_bridge_registry_path=str(registry_path),
+                    wechat_bridge_process_name="Weixin.exe",
+                    wechat_bridge_conversation_name="File Transfer Assistant",
+                ),
+            )
+
+            report = execute_session_readiness_plan(
+                plan,
+                manifest_path=str(manifest_path),
+                launcher=launcher,
+            )
+            data = report.to_dict()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["launch_attempts"], 1)
+        self.assertEqual(data["results"][0]["status"], "started")
+        self.assertEqual(data["results"][0]["pid"], 6464)
+        self.assertEqual(data["results"][0]["readiness_url"], "http://127.0.0.1:19671")
+        self.assertEqual(manifest["launches"][0]["readiness_url"], "http://127.0.0.1:19671")
+        self.assertIn("--port", launcher.calls[0][0])
+        self.assertEqual(launcher.calls[0][0][launcher.calls[0][0].index("--port") + 1], "0")
+
+    def test_agent_app_devtools_owned_plan_defaults_to_dynamic_debug_port(self):
+        report = build_session_readiness_plan(
+            routes=("agent-app-devtools-owned",),
+            options=SessionReadinessPlanOptions(
+                agent_app_executable="C:/Users/me/AppData/Local/Programs/Codex/Codex.exe",
+                agent_app_user_data_dir="logs/runtime/openwukong-codex-app-profile",
+            ),
+        )
+        action = report.to_dict()["actions"][0]
+
+        self.assertEqual(action["readiness_url"], "")
+        self.assertIn("--remote-debugging-port=0", action["argv"])
+
+    def test_execute_dynamic_agent_app_devtools_owned_reads_devtools_active_port_after_launch(self):
+        class _FakeLauncher:
+            def __init__(self):
+                self.calls = []
+
+            def launch(self, argv, cwd=None):
+                self.calls.append((tuple(argv), cwd))
+                user_data_arg = next(
+                    value for value in argv if value.startswith("--user-data-dir=")
+                )
+                profile_path = Path(user_data_arg.split("=", 1)[1])
+                profile_path.mkdir(parents=True, exist_ok=True)
+                (profile_path / "DevToolsActivePort").write_text(
+                    "19661\n/devtools/browser/openwukong-agent\n",
+                    encoding="utf-8",
+                )
+                return 6464
+
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp) / "agent-app-profile"
+            manifest_path = Path(tmp) / "manifest.json"
+            launcher = _FakeLauncher()
+            plan = build_session_readiness_plan(
+                routes=("agent-app-devtools-owned",),
+                options=SessionReadinessPlanOptions(
+                    agent_app_executable="C:/Users/me/AppData/Local/Programs/Codex/Codex.exe",
+                    agent_app_debug_port=0,
+                    agent_app_user_data_dir=str(profile),
+                ),
+            )
+
+            report = execute_session_readiness_plan(
+                plan,
+                manifest_path=str(manifest_path),
+                launcher=launcher,
+            )
+            data = report.to_dict()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(data["launch_attempts"], 1)
+        self.assertEqual(data["results"][0]["status"], "started")
+        self.assertEqual(data["results"][0]["pid"], 6464)
+        self.assertEqual(data["results"][0]["readiness_url"], "http://127.0.0.1:19661")
+        self.assertEqual(manifest["launches"][0]["readiness_url"], "http://127.0.0.1:19661")
+        self.assertIn("--remote-debugging-port=0", launcher.calls[0][0])
+
     def test_agent_app_devtools_owned_plan_uses_isolated_profile_and_remote_debugging(self):
         options = SessionReadinessPlanOptions(
             agent_app_executable="C:/Users/me/AppData/Local/Programs/Codex/Codex.exe",
@@ -176,6 +552,50 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertEqual(
             action["argv"][-1],
             "openwukong://workspace/E:/ideaProjects/agent/openwukong",
+        )
+
+    def test_agent_app_devtools_owned_plan_blocks_windowsapps_msix_executable(self):
+        class _FailingLauncher:
+            def launch(self, argv, cwd=None):
+                raise AssertionError(f"MSIX app shell should not launch: {argv}")
+
+        options = SessionReadinessPlanOptions(
+            agent_app_executable=(
+                "C:/Program Files/WindowsApps/"
+                "OpenAI.Codex_26.527.7698.0_x64__2p2nqsd0c76g0/app/Codex.exe"
+            ),
+            agent_app_debug_port=9555,
+            agent_app_user_data_dir="logs/runtime/openwukong-codex-app-profile",
+        )
+
+        plan = build_session_readiness_plan(
+            routes=("agent-app-devtools-owned",),
+            options=options,
+        )
+        action = plan.to_dict()["actions"][0]
+        report = execute_session_readiness_plan(
+            plan,
+            launcher=_FailingLauncher(),
+        )
+        result = report.to_dict()["results"][0]
+
+        self.assertEqual(action["action_id"], "block_agent_app_devtools_owned_msix")
+        self.assertEqual(action["route_id"], "agent-app-devtools-owned")
+        self.assertEqual(action["connector_id"], "agent-app-devtools")
+        self.assertEqual(action["argv"], [])
+        self.assertEqual(action["command"], "")
+        self.assertFalse(action["managed_background_helper"])
+        self.assertFalse(action["creates_isolated_profile"])
+        self.assertTrue(action["foreground_required"])
+        self.assertEqual(
+            action["blocked_reason"],
+            "windowsapps_msix_executable_not_background_launchable",
+        )
+        self.assertEqual(report.launch_attempts, 0)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(
+            result["error"],
+            "windowsapps_msix_executable_not_background_launchable",
         )
 
     def test_agent_app_devtools_owned_plan_can_open_workspace_context(self):
@@ -355,6 +775,28 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertEqual(data["mode"], "session-readiness-launch-plan")
         self.assertEqual(data["actions"][0]["connector_id"], "browser")
 
+    def test_cli_ide_bridge_defaults_to_dynamic_port(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "--route",
+                    "ide-extension-connector",
+                    "--ide-executable",
+                    "cursor.exe",
+                    "--workspace-root",
+                    "E:/ideaProjects/agent/openwukong",
+                    "--json",
+                ]
+            )
+
+        data = json.loads(stdout.getvalue())
+        action = data["actions"][0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(action["route_id"], "ide-extension-connector")
+        self.assertEqual(action["readiness_url"], "")
+        self.assertEqual(action["settings_preview"]["openwukong.bridge.port"], 0)
+
     def test_cli_outputs_agent_native_cdp_bridge_plan_json(self):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -388,6 +830,64 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertTrue(action["managed_background_helper"])
         self.assertIn("--registry-path", action["argv"])
 
+    def test_cli_agent_native_cdp_bridge_defaults_to_dynamic_port(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "--route",
+                    "agent-native-cdp-bridge",
+                    "--agent-bridge-python-executable",
+                    "python.exe",
+                    "--agent-bridge-agent",
+                    "codex app",
+                    "--agent-bridge-agent-id",
+                    "codex",
+                    "--agent-bridge-debugger-url",
+                    "http://127.0.0.1:9555",
+                    "--agent-bridge-registry-path",
+                    "E:/tmp/openwukong/native-bridges.json",
+                    "--agent-bridge-process-name",
+                    "Codex.exe",
+                    "--json",
+                ]
+            )
+
+        data = json.loads(stdout.getvalue())
+        action = data["actions"][0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(action["route_id"], "agent-native-cdp-bridge")
+        self.assertEqual(action["readiness_url"], "")
+        self.assertEqual(action["argv"][action["argv"].index("--port") + 1], "0")
+
+    def test_cli_wechat_native_bridge_defaults_to_dynamic_port(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "--route",
+                    "wechat-native-bridge",
+                    "--wechat-bridge-python-executable",
+                    "python.exe",
+                    "--wechat-bridge-registry-path",
+                    "E:/tmp/openwukong/wechat-native-bridges.json",
+                    "--wechat-bridge-process-name",
+                    "Weixin.exe",
+                    "--wechat-bridge-conversation-name",
+                    "File Transfer Assistant",
+                    "--json",
+                ]
+            )
+
+        data = json.loads(stdout.getvalue())
+        action = data["actions"][0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(action["route_id"], "wechat-native-bridge")
+        self.assertEqual(action["connector_id"], "wechat-native-bridge")
+        self.assertTrue(action["managed_background_helper"])
+        self.assertEqual(action["readiness_url"], "")
+        self.assertEqual(action["argv"][action["argv"].index("--port") + 1], "0")
+
     def test_cli_outputs_agent_app_devtools_owned_plan_json(self):
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout):
@@ -412,6 +912,28 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertEqual(action["connector_id"], "agent-app-devtools")
         self.assertTrue(action["managed_background_helper"])
         self.assertIn("--remote-debugging-port=9555", action["argv"])
+
+    def test_cli_agent_app_devtools_owned_defaults_to_dynamic_port(self):
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            exit_code = main(
+                [
+                    "--route",
+                    "agent-app-devtools-owned",
+                    "--agent-app-executable",
+                    "Codex.exe",
+                    "--agent-app-user-data-dir",
+                    "E:/tmp/openwukong-codex-profile",
+                    "--json",
+                ]
+            )
+
+        data = json.loads(stdout.getvalue())
+        action = data["actions"][0]
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(action["route_id"], "agent-app-devtools-owned")
+        self.assertEqual(action["readiness_url"], "")
+        self.assertIn("--remote-debugging-port=0", action["argv"])
 
     def test_cli_execute_writes_execution_report_without_launching_workspace_bind(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1079,6 +1601,68 @@ class SessionReadinessPlanTests(unittest.TestCase):
         self.assertEqual(data["stop_attempts"], 1)
         self.assertEqual(data["results"][0]["status"], "stopped")
         self.assertEqual(terminator.tree_pids, [7171])
+        self.assertEqual(terminator.owned_argv, [argv])
+
+    def test_stop_manifest_accepts_wechat_native_bridge_helper(self):
+        class _FakeTerminator:
+            def __init__(self):
+                self.tree_pids = []
+                self.owned_argv = []
+
+            def terminate_tree(self, pid):
+                self.tree_pids.append(pid)
+
+            def terminate_owned_processes(self, argv):
+                self.owned_argv.append(tuple(argv))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry_path = str(Path(tmp) / "wechat-native-bridges.json").replace("\\", "/")
+            argv = (
+                "python.exe",
+                "-m",
+                "openwukong.control.wechat_native_endpoint_publisher",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0",
+                "--registry-path",
+                registry_path,
+                "--process-name",
+                "Weixin.exe",
+                "--conversation-name",
+                "File Transfer Assistant",
+            )
+            manifest_path = Path(tmp) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "mode": "session-readiness-execution",
+                        "safety_mode": "isolated_helper_launch",
+                        "launches": [
+                            {
+                                "action_id": "launch_wechat_native_bridge",
+                                "route_id": "wechat-native-bridge",
+                                "connector_id": "wechat-native-bridge",
+                                "status": "started",
+                                "pid": 7272,
+                                "argv": list(argv),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            terminator = _FakeTerminator()
+
+            report = stop_session_readiness_manifest(
+                str(manifest_path),
+                terminator=terminator,
+            )
+            data = report.to_dict()
+
+        self.assertEqual(data["stop_attempts"], 1)
+        self.assertEqual(data["results"][0]["status"], "stopped")
+        self.assertEqual(terminator.tree_pids, [7272])
         self.assertEqual(terminator.owned_argv, [argv])
 
     def test_stop_manifest_accepts_agent_app_devtools_owned_helper(self):

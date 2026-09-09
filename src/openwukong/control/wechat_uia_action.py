@@ -30,6 +30,9 @@ class WeChatUiaSemanticActionRequest:
     message: str
     windows: tuple[AccessibilityWindowSnapshot, ...]
     background_screenshot_focus_stable: bool = True
+    background_screenshot_count: int = 0
+    background_screenshot_success_count: int = 0
+    background_screenshots: tuple[dict, ...] = ()
     selected_transport: dict = dataclasses.field(default_factory=dict)
     required_markers: tuple[str, ...] = ()
     forbidden_markers: tuple[str, ...] = ()
@@ -101,13 +104,20 @@ class WeChatUiaSemanticActionRequest:
         return bool(self.submit_control)
 
     @property
+    def background_screenshot_verified(self) -> bool:
+        return bool(
+            self.background_screenshot_focus_stable
+            and int(self.background_screenshot_success_count or 0) > 0
+        )
+
+    @property
     def ready(self) -> bool:
         return bool(
             self.message
             and self.target_ready
             and self.uia_value_pattern_ready
             and self.uia_invoke_pattern_ready
-            and self.background_screenshot_focus_stable
+            and self.background_screenshot_verified
         )
 
     @property
@@ -137,6 +147,12 @@ class WeChatUiaSemanticActionRequest:
             "uia_value_pattern_ready": self.uia_value_pattern_ready,
             "uia_invoke_pattern_ready": self.uia_invoke_pattern_ready,
             "background_screenshot_focus_stable": self.background_screenshot_focus_stable,
+            "background_screenshot_count": int(self.background_screenshot_count or 0),
+            "background_screenshot_success_count": int(
+                self.background_screenshot_success_count or 0
+            ),
+            "background_screenshot_verified": self.background_screenshot_verified,
+            "background_screenshots": [dict(item) for item in self.background_screenshots],
             "target_name": self.target_name,
             "selected_transport": dict(self.selected_transport),
             "target": self.target,
@@ -207,6 +223,8 @@ class WeChatUiaSemanticActionDryRunReport:
             return "wechat_uia_semantic_action_invoke_pattern_not_ready"
         if not self.request.background_screenshot_focus_stable:
             return "wechat_uia_semantic_action_visual_focus_not_stable"
+        if not self.request.background_screenshot_verified:
+            return "wechat_uia_semantic_action_background_screenshot_not_verified"
         if self.validation_errors:
             return "wechat_uia_semantic_action_request_invalid"
         return "wechat_uia_semantic_action_dry_run_ready"
@@ -431,6 +449,9 @@ def build_wechat_uia_semantic_action_request(
     message: str,
     windows: Iterable[AccessibilityWindowSnapshot],
     background_screenshot_focus_stable: bool = True,
+    background_screenshot_count: int = 0,
+    background_screenshot_success_count: int = 0,
+    background_screenshots: Iterable[dict] = (),
     selected_transport: dict | object | None = None,
     required_markers: tuple[str, ...] = (),
     forbidden_markers: tuple[str, ...] = (),
@@ -440,6 +461,14 @@ def build_wechat_uia_semantic_action_request(
         message=str(message or "").strip(),
         windows=tuple(windows),
         background_screenshot_focus_stable=bool(background_screenshot_focus_stable),
+        background_screenshot_count=max(0, int(background_screenshot_count or 0)),
+        background_screenshot_success_count=max(
+            0,
+            int(background_screenshot_success_count or 0),
+        ),
+        background_screenshots=tuple(
+            dict(item) for item in background_screenshots if isinstance(item, dict)
+        ),
         selected_transport=_dict_from_report(selected_transport),
         required_markers=_string_tuple(required_markers),
         forbidden_markers=_string_tuple(forbidden_markers),
@@ -460,6 +489,8 @@ def _validate_request(request: WeChatUiaSemanticActionRequest) -> tuple[str, ...
         errors.append("uia_invoke_pattern_not_ready")
     if not request.background_screenshot_focus_stable:
         errors.append("background_screenshot_focus_not_stable")
+    if not request.background_screenshot_verified:
+        errors.append("background_screenshot_not_verified")
     return tuple(errors)
 
 

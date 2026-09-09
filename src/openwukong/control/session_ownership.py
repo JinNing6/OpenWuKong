@@ -143,6 +143,16 @@ def _matches_ownership(ownership: SessionOwnership, target: object) -> bool:
         if ownership.workspace_root:
             return _same_path(target.workspace_path, ownership.workspace_root)
         return True
+    if ownership.route_id == "app-native-bridge-required":
+        if ownership.connector_id == "wechat-native-bridge":
+            if not _same_url(target.wechat_native_bridge_url, ownership.endpoint):
+                return False
+            return True
+        if not _same_url(target.agent_native_bridge_url, ownership.endpoint):
+            return False
+        if ownership.workspace_root:
+            return _same_path(target.workspace_path, ownership.workspace_root)
+        return True
     if ownership.route_id in {"terminal-native-session", "git-cli"}:
         return bool(ownership.workspace_root and _same_path(target.workspace_path, ownership.workspace_root))
     if ownership.endpoint:
@@ -171,6 +181,22 @@ def _connector_target_from(target_or_window: object) -> ConnectorTarget:
         resource_url=str(_value(target_or_window, "resource_url", "") or ""),
         debugger_url=str(_value(target_or_window, "debugger_url", "") or ""),
         ide_bridge_url=str(_value(target_or_window, "ide_bridge_url", "") or ""),
+        agent_native_bridge_url=str(
+            _value(target_or_window, "agent_native_bridge_url", "") or ""
+        ),
+        wechat_native_bridge_url=str(
+            _value(target_or_window, "wechat_native_bridge_url", "") or ""
+        ),
+        conversation_name=str(_value(target_or_window, "conversation_name", "") or ""),
+        background_screenshot_focus_stable=bool(
+            _value(target_or_window, "background_screenshot_focus_stable", True)
+        ),
+        background_screenshot_count=_safe_int(
+            _value(target_or_window, "background_screenshot_count", 0)
+        ),
+        background_screenshot_success_count=_safe_int(
+            _value(target_or_window, "background_screenshot_success_count", 0)
+        ),
     )
 
 

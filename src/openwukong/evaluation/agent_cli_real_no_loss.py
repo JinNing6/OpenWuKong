@@ -18,6 +18,9 @@ from typing import Iterable, Optional
 from openwukong.control.agent_conversation import run_agent_conversation
 from openwukong.control.agent_surface import AGENT_TASK_EFFECT_IDS
 from openwukong.control.app_resolution import WindowsAppResolver
+from openwukong.control.desktop_system_dialog import (
+    run_desktop_system_dialog_preflight,
+)
 
 
 _ACCEPTANCE_MARKER = "OPENWUKONG_AGENT_CLI_NO_LOSS: PASS"
@@ -96,6 +99,8 @@ class AgentCliNoLossCase:
     workspace_clean: bool = True
     workspace_file_delta: tuple[str, ...] = ()
     conversation_report: dict = dataclasses.field(default_factory=dict)
+    system_dialog_preflight_report: dict = dataclasses.field(default_factory=dict)
+    system_dialog_postflight_report: dict = dataclasses.field(default_factory=dict)
 
     @property
     def mode(self) -> str:
@@ -120,6 +125,9 @@ class AgentCliNoLossCase:
         return not (before and after and before != after)
 
     def to_dict(self, *, include_details: bool = True) -> dict:
+        selected_transport = _selected_transport_from_conversation(
+            self.conversation_report
+        )
         data = {
             "mode": self.mode,
             "safety_mode": self.safety_mode,
@@ -129,6 +137,10 @@ class AgentCliNoLossCase:
             "status": self.status,
             "passed": self.passed,
             "real_verified": self.real_verified,
+            "selected_transport": str(
+                selected_transport.get("transport_id", "") or ""
+            ),
+            "selected_transport_detail": selected_transport,
             "artifact_path": self.artifact_path,
             "workspace_root": self.workspace_root,
             "output_root": self.output_root,
@@ -143,6 +155,18 @@ class AgentCliNoLossCase:
             "window_input_attempts": int(self.window_input_attempts or 0),
             "workspace_clean": bool(self.workspace_clean),
             "workspace_file_delta": list(self.workspace_file_delta),
+            "system_dialog_detected": _system_dialog_failed(
+                self.system_dialog_preflight_report
+            )
+            or _system_dialog_failed(self.system_dialog_postflight_report),
+            "system_dialog_preflight_failed": _system_dialog_failed(
+                self.system_dialog_preflight_report
+            ),
+            "system_dialog_postflight_failed": _system_dialog_failed(
+                self.system_dialog_postflight_report
+            ),
+            "system_dialog_preflight": dict(self.system_dialog_preflight_report),
+            "system_dialog_postflight": dict(self.system_dialog_postflight_report),
         }
         if include_details:
             data["conversation_report"] = dict(self.conversation_report)
@@ -204,6 +228,28 @@ class AgentCliNoLossReport:
     def foreground_no_steal_verified(self) -> bool:
         return not any(not case.foreground_no_steal_verified for case in self.cases)
 
+    @property
+    def system_dialog_detected(self) -> bool:
+        return any(
+            _system_dialog_failed(case.system_dialog_preflight_report)
+            or _system_dialog_failed(case.system_dialog_postflight_report)
+            for case in self.cases
+        )
+
+    @property
+    def system_dialog_preflight_failed(self) -> bool:
+        return any(
+            _system_dialog_failed(case.system_dialog_preflight_report)
+            for case in self.cases
+        )
+
+    @property
+    def system_dialog_postflight_failed(self) -> bool:
+        return any(
+            _system_dialog_failed(case.system_dialog_postflight_report)
+            for case in self.cases
+        )
+
     def to_dict(self, *, include_details: bool = True) -> dict:
         return {
             "mode": self.mode,
@@ -220,6 +266,9 @@ class AgentCliNoLossReport:
             "window_input_attempts": self.window_input_attempts,
             "foreground_focus_stable": self.foreground_focus_stable,
             "foreground_no_steal_verified": self.foreground_no_steal_verified,
+            "system_dialog_detected": self.system_dialog_detected,
+            "system_dialog_preflight_failed": self.system_dialog_preflight_failed,
+            "system_dialog_postflight_failed": self.system_dialog_postflight_failed,
             "cases": [
                 case.to_dict(include_details=include_details)
                 for case in self.cases
@@ -236,7 +285,9 @@ def run_agent_cli_real_no_loss(
     resolver: WindowsAppResolver | None = None,
     command_executor: object | None = None,
     foreground_observer: object | None = None,
+    system_dialog_observer: object | None = None,
     timeout_sec: float = 90.0,
+    system_dialog_postflight_poll_sec: float | None = None,
 ) -> AgentCliNoLossReport:
     started = time.perf_counter()
     names = tuple(str(agent or "").strip() for agent in agents if str(agent or "").strip())
@@ -251,7 +302,14 @@ def run_agent_cli_real_no_loss(
             resolver=resolver,
             command_executor=command_executor,
             foreground_observer=observer,
+            system_dialog_observer=system_dialog_observer,
             timeout_sec=timeout_sec,
+            system_dialog_postflight_poll_sec=(
+                _effective_postflight_poll_sec(
+                    system_dialog_postflight_poll_sec,
+                    command_executor=command_executor,
+                )
+            ),
         )
         for agent in names
     )
@@ -271,7 +329,9 @@ def _run_case(
     resolver: WindowsAppResolver | None,
     command_executor: object | None,
     foreground_observer: object,
+    system_dialog_observer: object | None,
     timeout_sec: float,
+    system_dialog_postflight_poll_sec: float,
 ) -> AgentCliNoLossCase:
     workspace = output_root / "owned_agent_cli_workspaces" / _safe_filename(agent)
     case_output = output_root / "agent_cli_conversations" / _safe_filename(agent)
@@ -281,8 +341,43 @@ def _run_case(
     before_files = _snapshot_files(workspace)
     foreground_snapshot_before = _foreground_snapshot_before(foreground_observer)
     foreground_before = int(foreground_snapshot_before.get("hwnd", 0) or 0)
+    system_dialog_preflight = _run_system_dialog_preflight(system_dialog_observer)
+    if _system_dialog_failed(system_dialog_preflight):
+        foreground_snapshot_after = _foreground_snapshot_after(foreground_observer)
+        foreground_after = int(foreground_snapshot_after.get("hwnd", 0) or 0)
+        foreground_classification = _classify_foreground_change(
+            agent,
+            {},
+            foreground_snapshot_before,
+            foreground_snapshot_after,
+        )
+        case = AgentCliNoLossCase(
+            agent=agent,
+            status="system_dialog_detected_preflight",
+            passed=False,
+            real_verified=False,
+            artifact_path="",
+            workspace_root=str(workspace),
+            output_root=str(case_output),
+            foreground_hwnd_before=foreground_before,
+            foreground_hwnd_after=foreground_after,
+            foreground_snapshot_before=foreground_snapshot_before,
+            foreground_snapshot_after=foreground_snapshot_after,
+            foreground_change_classification=foreground_classification,
+            foreground_no_steal_verified=foreground_classification
+            in {"stable", "changed_to_unrelated_surface"},
+            agent_command_attempts=0,
+            window_input_attempts=0,
+            workspace_clean=True,
+            workspace_file_delta=(),
+            conversation_report={},
+            system_dialog_preflight_report=system_dialog_preflight,
+            system_dialog_postflight_report={},
+        )
+        return _write_case_artifact(output_root, case)
+
     conversation = run_agent_conversation(
-        agent=agent,
+        agent=_cli_probe_agent_name(agent),
         project_name="openwukong",
         task_name="agent-cli-real-no-loss",
         message=_no_loss_message(agent),
@@ -304,6 +399,10 @@ def _run_case(
         timeout_sec=timeout_sec,
         audit_log_path=str(case_output / "command-audit.jsonl"),
     )
+    system_dialog_postflight = _run_system_dialog_postflight(
+        system_dialog_observer,
+        poll_sec=system_dialog_postflight_poll_sec,
+    )
     foreground_snapshot_after = _foreground_snapshot_after(foreground_observer)
     foreground_after = int(foreground_snapshot_after.get("hwnd", 0) or 0)
     after_files = _snapshot_files(workspace)
@@ -324,6 +423,8 @@ def _run_case(
         allow_cli_execution=allow_cli_execution,
         workspace_file_delta=delta,
     )
+    if _system_dialog_failed(system_dialog_postflight):
+        status = "system_dialog_detected_postflight"
     window_input_attempts = _window_input_attempts(data)
     workspace_clean = not delta
     passed = bool(
@@ -333,6 +434,7 @@ def _run_case(
             "skipped_requires_cli_execution_opt_in",
             "background_cli_unavailable",
             "cli_auth_required",
+            "cli_usage_limit",
             "cli_access_denied",
             "cli_executable_not_found",
             "cli_execution_failed",
@@ -359,8 +461,67 @@ def _run_case(
         workspace_clean=workspace_clean,
         workspace_file_delta=delta,
         conversation_report=data,
+        system_dialog_preflight_report=system_dialog_preflight,
+        system_dialog_postflight_report=system_dialog_postflight,
     )
     return _write_case_artifact(output_root, case)
+
+
+def _run_system_dialog_preflight(observer: object | None) -> dict:
+    return run_desktop_system_dialog_preflight(observer=observer).to_dict()
+
+
+def _run_system_dialog_postflight(
+    observer: object | None,
+    *,
+    poll_sec: float,
+    poll_interval_sec: float = 0.25,
+) -> dict:
+    deadline = time.perf_counter() + max(0.0, float(poll_sec or 0.0))
+    attempts = 0
+    last_report: dict = {}
+    if observer is not None and poll_sec > 0:
+        max_observed_attempts = 5
+    else:
+        max_observed_attempts = 1
+    while True:
+        attempts += 1
+        last_report = _run_system_dialog_preflight(observer)
+        last_report["postflight_poll_attempts"] = attempts
+        last_report["postflight_poll_sec"] = max(0.0, float(poll_sec or 0.0))
+        if _system_dialog_failed(last_report):
+            return last_report
+        if poll_sec <= 0:
+            return last_report
+        if observer is not None:
+            if attempts >= max_observed_attempts:
+                return last_report
+            continue
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            return last_report
+        time.sleep(min(max(0.01, float(poll_interval_sec or 0.25)), remaining))
+
+
+def _effective_postflight_poll_sec(
+    configured: float | None,
+    *,
+    command_executor: object | None,
+) -> float:
+    if configured is not None:
+        return max(0.0, float(configured or 0.0))
+    if command_executor is not None:
+        return 0.0
+    return 1.5
+
+
+def _system_dialog_failed(report: dict) -> bool:
+    if not isinstance(report, dict) or not report:
+        return False
+    return bool(
+        report.get("system_dialog_detected", False)
+        or not bool(report.get("ok", True))
+    )
 
 
 def _classify_status(
@@ -371,20 +532,27 @@ def _classify_status(
 ) -> str:
     if workspace_file_delta:
         return "failed_workspace_mutated"
-    if not allow_cli_execution:
-        return "skipped_requires_cli_execution_opt_in"
     if conversation.get("decision") == "agent_conversation_requires_app_bridge_or_foreground":
         return "background_cli_unavailable"
+    if not _conversation_has_cli_transport(conversation):
+        return "background_cli_unavailable"
+    if not allow_cli_execution:
+        return "skipped_requires_cli_execution_opt_in"
+    execution = dict(conversation.get("agent_task_report", {}).get("execution_report", {}) or {})
+    evidence = _execution_evidence(execution)
+    if _cli_runtime_foreground_risk(evidence):
+        return "cli_runtime_foreground_risk"
     if bool(conversation.get("ok", False)) and bool(conversation.get("execution_attempted", False)):
         return "verified"
 
-    execution = dict(conversation.get("agent_task_report", {}).get("execution_report", {}) or {})
-    evidence = " ".join(
-        str(execution.get(key, "") or "")
-        for key in ("stdout", "stderr", "error")
-    ).casefold()
     if "not logged in" in evidence or "/login" in evidence or "auth" in evidence:
         return "cli_auth_required"
+    if (
+        "usage limit" in evidence
+        or "purchase more credits" in evidence
+        or "try again at" in evidence
+    ):
+        return "cli_usage_limit"
     if "access is denied" in evidence or "permissionerror" in evidence or "winerror 5" in evidence:
         return "cli_access_denied"
     if "executable_not_found" in evidence:
@@ -394,11 +562,62 @@ def _classify_status(
     return "background_cli_unavailable"
 
 
+def _conversation_has_cli_transport(conversation: dict) -> bool:
+    selected = _selected_transport_from_conversation(conversation)
+    transport_id = str(selected.get("transport_id", "") or "")
+    if not transport_id:
+        return False
+    if "cli" not in transport_id and "managed-terminal" not in transport_id:
+        return False
+    command_plan = dict(
+        conversation.get("agent_task_report", {}).get("command_plan", {}) or {}
+    )
+    return bool(command_plan.get("ready", False))
+
+
+def _execution_evidence(execution: dict) -> str:
+    return " ".join(
+        str(execution.get(key, "") or "")
+        for key in ("stdout", "stderr", "error")
+    ).casefold()
+
+
+def _cli_runtime_foreground_risk(evidence: str) -> bool:
+    text = str(evidence or "").casefold()
+    return any(
+        marker in text
+        for marker in (
+            "windows sandbox: spawn setup refresh",
+            "error launching app",
+            "unable to find electron app",
+            "cannot find module",
+            "a javascript error occurred in the main process",
+            "attachconsole failed",
+            "?type=click",
+            "type=click&tag",
+            "c:/program files/windowsapps/openai.codex",
+            "c:\\program files\\windowsapps\\openai.codex",
+        )
+    )
+
+
 def _window_input_attempts(conversation: dict) -> int:
     bridge = conversation.get("app_bridge_send_report", {})
     if not isinstance(bridge, dict):
         return 0
     return int(bridge.get("window_input_attempts", 0) or 0)
+
+
+def _selected_transport_from_conversation(conversation: dict) -> dict:
+    selected = conversation.get("selected_transport")
+    if isinstance(selected, dict):
+        return dict(selected)
+    task = conversation.get("agent_task_report")
+    if isinstance(task, dict):
+        selected = task.get("selected_transport")
+        if isinstance(selected, dict):
+            return dict(selected)
+    return {}
 
 
 def _write_case_artifact(output_root: Path, case: AgentCliNoLossCase) -> AgentCliNoLossCase:
@@ -427,9 +646,20 @@ def _no_loss_message(agent: str) -> str:
     return (
         "This is an OpenWukong no-loss background CLI probe. "
         f"Agent: {agent}. "
-        "Do not edit files, run GUI apps, or request foreground input. "
+        "Do not inspect files, execute shell commands, run GUI apps, or request foreground input. "
         f"Reply with exactly this marker on its own line: {_ACCEPTANCE_MARKER}"
     )
+
+
+def _cli_probe_agent_name(agent: str) -> str:
+    normalized = str(agent or "").strip().casefold()
+    if normalized == "codex":
+        return "codex cli"
+    if normalized == "claude":
+        return "claude cli"
+    if normalized == "cursor":
+        return "cursor agent"
+    return str(agent or "").strip()
 
 
 def _foreground_before(observer: object) -> int:

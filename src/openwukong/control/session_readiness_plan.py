@@ -14,23 +14,35 @@ import time
 from pathlib import Path
 from typing import Protocol
 
+from openwukong.control.ide_bridge_registry import discover_ide_bridge_urls
+from openwukong.control.native_bridge_registry import discover_agent_native_bridge_urls
+from openwukong.control.wechat_native_bridge_registry import (
+    discover_wechat_native_bridge_urls,
+)
+
 
 _MANAGED_HELPER_ACTION_IDS = {
     "launch_agent_native_cdp_bridge",
     "launch_agent_app_devtools_owned",
     "launch_browser_devtools_isolated",
     "launch_ide_bridge_isolated",
+    "launch_wechat_native_bridge",
 }
+_DEVTOOLS_ACTIVE_PORT_FILENAME = "DevToolsActivePort"
+_DYNAMIC_DEVTOOLS_PORT_TIMEOUT_SEC = 15.0
+_DYNAMIC_DEVTOOLS_PORT_POLL_SEC = 0.1
+_DYNAMIC_IDE_BRIDGE_TIMEOUT_SEC = 15.0
+_DYNAMIC_IDE_BRIDGE_POLL_SEC = 0.1
 
 
 @dataclasses.dataclass(frozen=True)
 class SessionReadinessPlanOptions:
     browser_executable: str = "chrome.exe"
-    browser_debug_port: int = 9222
+    browser_debug_port: int = 0
     browser_user_data_dir: str = "logs/runtime/browser-devtools-profile"
     browser_url: str = "about:blank"
     agent_app_executable: str = ""
-    agent_app_debug_port: int = 9555
+    agent_app_debug_port: int = 0
     agent_app_user_data_dir: str = "logs/runtime/agent-app-devtools-profile"
     agent_app_url: str = ""
     agent_app_workspace_path: str = ""
@@ -40,13 +52,13 @@ class SessionReadinessPlanOptions:
     ide_extensions_dir: str = "logs/runtime/ide-bridge-extensions"
     ide_extension_dir: str = "extensions/openwukong-vscode"
     ide_bridge_host: str = "127.0.0.1"
-    ide_bridge_port: int = 8787
+    ide_bridge_port: int = 0
     workspace_root: str = ""
     agent_bridge_python_executable: str = sys.executable or "python"
     agent_bridge_agent: str = "agent app"
     agent_bridge_agent_id: str = ""
     agent_bridge_host: str = "127.0.0.1"
-    agent_bridge_port: int = 18888
+    agent_bridge_port: int = 0
     agent_bridge_debugger_url: str = ""
     agent_bridge_registry_path: str = "logs/runtime/agent-native-cdp-bridge/native-bridges.json"
     agent_bridge_process_name: str = ""
@@ -57,6 +69,19 @@ class SessionReadinessPlanOptions:
     agent_bridge_task_name: str = ""
     agent_bridge_target_title: str = ""
     agent_bridge_target_url: str = ""
+    wechat_bridge_python_executable: str = sys.executable or "python"
+    wechat_bridge_host: str = "127.0.0.1"
+    wechat_bridge_port: int = 0
+    wechat_bridge_registry_path: str = "logs/runtime/wechat-native-bridge/wechat-native-bridges.json"
+    wechat_bridge_process_name: str = "Weixin.exe"
+    wechat_bridge_pid: int = 0
+    wechat_bridge_hwnd: int = 0
+    wechat_bridge_window_title: str = ""
+    wechat_bridge_conversation_name: str = "File Transfer Assistant"
+    wechat_bridge_conversation_id: str = ""
+    wechat_bridge_backend: str = "read-only-evidence"
+    wechat_bridge_capture_dir: str = "logs/runtime/wechat-native-bridge/captures"
+    wechat_bridge_capability_timeout_sec: float = 5.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -74,6 +99,7 @@ class SessionReadinessAction:
     managed_background_helper: bool = False
     foreground_required: bool = False
     execute_supported: bool = False
+    blocked_reason: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -90,6 +116,7 @@ class SessionReadinessAction:
             "managed_background_helper": self.managed_background_helper,
             "foreground_required": self.foreground_required,
             "execute_supported": self.execute_supported,
+            "blocked_reason": self.blocked_reason,
         }
 
 
@@ -529,6 +556,18 @@ def _execute_action(
     launcher: SessionReadinessLauncher,
 ) -> SessionReadinessLaunchResult:
     argv = tuple(action.argv)
+    if action.blocked_reason:
+        return SessionReadinessLaunchResult(
+            action_id=action.action_id,
+            route_id=action.route_id,
+            connector_id=action.connector_id,
+            status="rejected",
+            command=action.command,
+            argv=argv,
+            readiness_url=action.readiness_url,
+            workspace_root=action.workspace_root,
+            error=action.blocked_reason,
+        )
     if not argv and not action.command:
         return SessionReadinessLaunchResult(
             action_id=action.action_id,
@@ -568,6 +607,7 @@ def _execute_action(
         _prepare_isolated_profile_directories(argv)
         _prepare_isolated_ide_settings(argv, action.settings_preview)
         pid = launcher.launch(argv)
+        readiness_url, readiness_error = _resolve_launch_readiness_url(action, argv)
     except Exception as exc:
         return SessionReadinessLaunchResult(
             action_id=action.action_id,
@@ -588,8 +628,9 @@ def _execute_action(
         pid=pid,
         command=action.command,
         argv=argv,
-        readiness_url=action.readiness_url,
+        readiness_url=readiness_url,
         workspace_root=action.workspace_root,
+        error=readiness_error,
     )
 
 
@@ -680,6 +721,8 @@ def _action_for_route(
     route_id: str,
     options: SessionReadinessPlanOptions,
 ) -> SessionReadinessAction | None:
+    if route_id == "wechat-native-bridge":
+        return _wechat_native_bridge_action(options)
     if route_id == "agent-native-cdp-bridge":
         return _agent_native_cdp_bridge_action(options)
     if route_id == "agent-app-devtools-owned":
@@ -693,10 +736,66 @@ def _action_for_route(
     return None
 
 
+def _wechat_native_bridge_action(
+    options: SessionReadinessPlanOptions,
+) -> SessionReadinessAction:
+    bridge_port = int(options.wechat_bridge_port)
+    bridge_url = (
+        "" if bridge_port == 0 else f"http://{options.wechat_bridge_host}:{bridge_port}"
+    )
+    registry_path = _normalized_path(options.wechat_bridge_registry_path)
+    argv_parts = [
+        options.wechat_bridge_python_executable or sys.executable or "python",
+        "-m",
+        "openwukong.control.wechat_native_endpoint_publisher",
+        "--host",
+        options.wechat_bridge_host,
+        "--port",
+        str(bridge_port),
+        "--registry-path",
+        registry_path,
+        "--process-name",
+        options.wechat_bridge_process_name,
+        "--conversation-name",
+        options.wechat_bridge_conversation_name,
+        "--backend",
+        options.wechat_bridge_backend,
+        "--capture-dir",
+        _normalized_path(options.wechat_bridge_capture_dir),
+        "--capability-timeout-sec",
+        str(float(options.wechat_bridge_capability_timeout_sec or 0)),
+    ]
+    optional_pairs = (
+        ("--pid", str(int(options.wechat_bridge_pid or 0))),
+        ("--hwnd", str(int(options.wechat_bridge_hwnd or 0))),
+        ("--window-title", options.wechat_bridge_window_title),
+        ("--conversation-id", options.wechat_bridge_conversation_id),
+    )
+    for flag, value in optional_pairs:
+        text = str(value or "").strip()
+        if text and text != "0":
+            argv_parts.extend([flag, text])
+    return SessionReadinessAction(
+        action_id="launch_wechat_native_bridge",
+        route_id="wechat-native-bridge",
+        connector_id="wechat-native-bridge",
+        description="Launch a local background WeChat native bridge endpoint publisher and registry entry.",
+        command=_join_command([_quote(part) for part in argv_parts]),
+        argv=tuple(argv_parts),
+        readiness_url=bridge_url,
+        creates_isolated_profile=False,
+        managed_background_helper=True,
+        foreground_required=False,
+    )
+
+
 def _agent_native_cdp_bridge_action(
     options: SessionReadinessPlanOptions,
 ) -> SessionReadinessAction:
-    bridge_url = f"http://{options.agent_bridge_host}:{int(options.agent_bridge_port)}"
+    bridge_port = int(options.agent_bridge_port)
+    bridge_url = (
+        "" if bridge_port == 0 else f"http://{options.agent_bridge_host}:{bridge_port}"
+    )
     registry_path = _normalized_path(options.agent_bridge_registry_path)
     argv_parts = [
         options.agent_bridge_python_executable or sys.executable or "python",
@@ -705,7 +804,7 @@ def _agent_native_cdp_bridge_action(
         "--host",
         options.agent_bridge_host,
         "--port",
-        str(int(options.agent_bridge_port)),
+        str(bridge_port),
         "--agent",
         options.agent_bridge_agent,
         "--agent-id",
@@ -746,12 +845,16 @@ def _agent_native_cdp_bridge_action(
 
 def _browser_action(options: SessionReadinessPlanOptions) -> SessionReadinessAction:
     user_data_dir = _normalized_path(options.browser_user_data_dir)
+    debug_port = int(options.browser_debug_port)
     argv = (
         options.browser_executable,
-        f"--remote-debugging-port={int(options.browser_debug_port)}",
+        f"--remote-debugging-port={debug_port}",
+        "--remote-debugging-address=127.0.0.1",
         f"--user-data-dir={user_data_dir}",
         "--no-first-run",
-        "--headless",
+        "--no-default-browser-check",
+        "--headless=new",
+        "--disable-gpu",
         "--disable-crash-reporter",
         options.browser_url or "about:blank",
     )
@@ -763,7 +866,7 @@ def _browser_action(options: SessionReadinessPlanOptions) -> SessionReadinessAct
         description="Launch an isolated browser profile with a DevTools endpoint.",
         command=command,
         argv=argv,
-        readiness_url=f"http://127.0.0.1:{int(options.browser_debug_port)}",
+        readiness_url="" if debug_port == 0 else f"http://127.0.0.1:{debug_port}",
         creates_isolated_profile=True,
         foreground_required=False,
     )
@@ -772,6 +875,19 @@ def _browser_action(options: SessionReadinessPlanOptions) -> SessionReadinessAct
 def _agent_app_devtools_owned_action(
     options: SessionReadinessPlanOptions,
 ) -> SessionReadinessAction:
+    app_executable = str(options.agent_app_executable or "").strip()
+    if _is_windowsapps_msix_executable(app_executable):
+        return SessionReadinessAction(
+            action_id="block_agent_app_devtools_owned_msix",
+            route_id="agent-app-devtools-owned",
+            connector_id="agent-app-devtools",
+            description=(
+                "Blocked MSIX/WindowsApps agent desktop shell launch; use an "
+                "already-exposed native endpoint, standalone CLI, or extension bridge."
+            ),
+            foreground_required=True,
+            blocked_reason="windowsapps_msix_executable_not_background_launchable",
+        )
     use_default_profile = bool(options.agent_app_use_default_profile)
     user_data_dir = (
         ""
@@ -780,7 +896,7 @@ def _agent_app_devtools_owned_action(
     )
     debug_port = int(options.agent_app_debug_port)
     argv_parts = [
-        str(options.agent_app_executable or "").strip(),
+        app_executable,
         f"--remote-debugging-port={debug_port}",
         "--no-first-run",
         "--disable-crash-reporter",
@@ -805,7 +921,7 @@ def _agent_app_devtools_owned_action(
         description="Launch an owned agent desktop app instance with an isolated profile and local DevTools endpoint.",
         command=_join_command([_quote(part) for part in argv]),
         argv=argv,
-        readiness_url=f"http://127.0.0.1:{debug_port}",
+        readiness_url="" if debug_port == 0 else f"http://127.0.0.1:{debug_port}",
         creates_isolated_profile=not use_default_profile,
         managed_background_helper=True,
         foreground_required=False,
@@ -816,7 +932,8 @@ def _ide_action(options: SessionReadinessPlanOptions) -> SessionReadinessAction:
     user_data_dir = _normalized_path(options.ide_user_data_dir)
     extensions_dir = _normalized_path(options.ide_extensions_dir)
     extension_dir = _normalized_path(options.ide_extension_dir)
-    bridge_url = f"http://{options.ide_bridge_host}:{int(options.ide_bridge_port)}"
+    bridge_port = int(options.ide_bridge_port)
+    bridge_url = "" if bridge_port == 0 else f"http://{options.ide_bridge_host}:{bridge_port}"
     argv_parts = [
         options.ide_executable,
         f"--user-data-dir={user_data_dir}",
@@ -829,7 +946,7 @@ def _ide_action(options: SessionReadinessPlanOptions) -> SessionReadinessAction:
     settings = {
         "openwukong.bridge.autoStart": True,
         "openwukong.bridge.host": options.ide_bridge_host,
-        "openwukong.bridge.port": int(options.ide_bridge_port),
+        "openwukong.bridge.port": bridge_port,
     }
     return SessionReadinessAction(
         action_id="launch_ide_bridge_isolated",
@@ -888,6 +1005,191 @@ def _write_manifest(
     )
 
 
+def _resolve_launch_readiness_url(
+    action: SessionReadinessAction,
+    argv: tuple[str, ...],
+) -> tuple[str, str]:
+    if action.action_id in {
+        "launch_browser_devtools_isolated",
+        "launch_agent_app_devtools_owned",
+    }:
+        debug_port = _remote_debugging_port(argv)
+        if debug_port != 0:
+            return action.readiness_url, ""
+        return _wait_for_dynamic_devtools_readiness_url(argv)
+    if action.action_id == "launch_agent_native_cdp_bridge":
+        bridge_port = _flag_int(argv, "--port")
+        if bridge_port != 0:
+            return action.readiness_url, ""
+        return _wait_for_dynamic_agent_native_bridge_readiness_url(argv)
+    if action.action_id == "launch_wechat_native_bridge":
+        bridge_port = _flag_int(argv, "--port")
+        if bridge_port != 0:
+            return action.readiness_url, ""
+        return _wait_for_dynamic_wechat_native_bridge_readiness_url(argv)
+    if action.action_id == "launch_ide_bridge_isolated":
+        bridge_port = _safe_int((action.settings_preview or {}).get("openwukong.bridge.port"))
+        if bridge_port != 0:
+            return action.readiness_url, ""
+        return _wait_for_dynamic_ide_bridge_readiness_url(action)
+    return action.readiness_url, ""
+
+
+@dataclasses.dataclass(frozen=True)
+class _IDEBridgeDiscoveryTarget:
+    process_name: str = ""
+    window_title: str = ""
+    project_name: str = ""
+    workspace_path: str = ""
+
+
+def _wait_for_dynamic_ide_bridge_readiness_url(
+    action: SessionReadinessAction,
+) -> tuple[str, str]:
+    target = _ide_bridge_discovery_target(action)
+    started = time.perf_counter()
+    while (time.perf_counter() - started) < _DYNAMIC_IDE_BRIDGE_TIMEOUT_SEC:
+        urls = discover_ide_bridge_urls(target=target)
+        if urls:
+            return urls[0], ""
+        time.sleep(_DYNAMIC_IDE_BRIDGE_POLL_SEC)
+    return "", "dynamic_ide_bridge_registry_timeout"
+
+
+def _wait_for_dynamic_agent_native_bridge_readiness_url(
+    argv: tuple[str, ...],
+) -> tuple[str, str]:
+    registry_path = _flag_value(argv, "--registry-path")
+    if not registry_path:
+        return "", "dynamic_agent_native_bridge_registry_path_missing"
+    agent_id = _flag_value(argv, "--agent-id")
+    started = time.perf_counter()
+    while (time.perf_counter() - started) < _DYNAMIC_IDE_BRIDGE_TIMEOUT_SEC:
+        urls = discover_agent_native_bridge_urls(
+            agent_id=agent_id,
+            registry_paths=(registry_path,),
+            environment={},
+        )
+        if urls:
+            return urls[0], ""
+        time.sleep(_DYNAMIC_IDE_BRIDGE_POLL_SEC)
+    return "", "dynamic_agent_native_bridge_registry_timeout"
+
+
+def _wait_for_dynamic_wechat_native_bridge_readiness_url(
+    argv: tuple[str, ...],
+) -> tuple[str, str]:
+    registry_path = _flag_value(argv, "--registry-path")
+    if not registry_path:
+        return "", "dynamic_wechat_native_bridge_registry_path_missing"
+    started = time.perf_counter()
+    while (time.perf_counter() - started) < _DYNAMIC_IDE_BRIDGE_TIMEOUT_SEC:
+        urls = discover_wechat_native_bridge_urls(
+            registry_paths=(registry_path,),
+            environment={},
+        )
+        if urls:
+            return urls[0], ""
+        time.sleep(_DYNAMIC_IDE_BRIDGE_POLL_SEC)
+    return "", "dynamic_wechat_native_bridge_registry_timeout"
+
+
+def _ide_bridge_discovery_target(action: SessionReadinessAction) -> _IDEBridgeDiscoveryTarget:
+    executable = _ide_executable_name(action.argv)
+    family = _ide_family_from_executable(executable)
+    window_title = {
+        "cursor": "Cursor",
+        "vscode": "Visual Studio Code",
+    }.get(family, "")
+    project_name = Path(action.workspace_root).name if action.workspace_root else ""
+    return _IDEBridgeDiscoveryTarget(
+        process_name=executable,
+        window_title=window_title,
+        project_name=project_name,
+        workspace_path=action.workspace_root,
+    )
+
+
+def _ide_executable_name(argv: tuple[str, ...]) -> str:
+    if not argv:
+        return ""
+    text = str(argv[0] or "").strip().replace("\\", "/")
+    return text.rsplit("/", 1)[-1]
+
+
+def _ide_family_from_executable(value: str) -> str:
+    text = str(value or "").strip().casefold()
+    if "cursor" in text:
+        return "cursor"
+    if text in {"code.exe", "code", "vscodium.exe", "vscodium"} or "vscode" in text:
+        return "vscode"
+    return ""
+
+
+def _wait_for_dynamic_devtools_readiness_url(argv: tuple[str, ...]) -> tuple[str, str]:
+    profile_path = _user_data_dir_from_argv(argv)
+    if not profile_path:
+        return "", "dynamic_devtools_user_data_dir_missing"
+    active_port_path = Path(profile_path) / _DEVTOOLS_ACTIVE_PORT_FILENAME
+    started = time.perf_counter()
+    last_error = ""
+    while (time.perf_counter() - started) < _DYNAMIC_DEVTOOLS_PORT_TIMEOUT_SEC:
+        readiness_url, error = _read_devtools_active_port(active_port_path)
+        if readiness_url:
+            return readiness_url, ""
+        last_error = error
+        time.sleep(_DYNAMIC_DEVTOOLS_PORT_POLL_SEC)
+    return "", last_error or "dynamic_devtools_active_port_timeout"
+
+
+def _read_devtools_active_port(path: Path) -> tuple[str, str]:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return "", "dynamic_devtools_active_port_missing"
+    except Exception as exc:
+        return "", str(exc) or exc.__class__.__name__
+    first_line = ""
+    for line in text.splitlines():
+        if line.strip():
+            first_line = line.strip()
+            break
+    port = _safe_int(first_line)
+    if port <= 0:
+        return "", "dynamic_devtools_active_port_invalid"
+    return f"http://127.0.0.1:{port}", ""
+
+
+def _remote_debugging_port(argv: tuple[str, ...]) -> int:
+    for value in argv:
+        text = str(value or "").strip()
+        if text.startswith("--remote-debugging-port="):
+            return _safe_int(text.split("=", 1)[1].strip())
+    return -1
+
+
+def _flag_value(argv: tuple[str, ...], flag: str) -> str:
+    for index, value in enumerate(argv):
+        if str(value or "").strip() != flag:
+            continue
+        if index + 1 >= len(argv):
+            return ""
+        return str(argv[index + 1] or "").strip()
+    return ""
+
+
+def _flag_int(argv: tuple[str, ...], flag: str) -> int:
+    return _safe_int(_flag_value(argv, flag))
+
+
+def _user_data_dir_from_argv(argv: tuple[str, ...]) -> str:
+    for value in argv:
+        text = str(value or "").strip()
+        if text.startswith("--user-data-dir="):
+            return text.split("=", 1)[1].strip()
+    return ""
+
+
 def _normalized_path(value: str) -> str:
     text = str(value or "").strip()
     if not text:
@@ -909,6 +1211,14 @@ def _quote(value: str) -> str:
 
 def _join_command(parts: list[str]) -> str:
     return " ".join(part for part in parts if str(part or "").strip())
+
+
+def _is_windowsapps_msix_executable(value: str) -> bool:
+    text = str(value or "").strip().casefold()
+    if not text:
+        return False
+    normalized = text.replace("\\", "/")
+    return "/program files/windowsapps/" in normalized and normalized.endswith(".exe")
 
 
 def _safe_int(value: object) -> int:

@@ -10,6 +10,7 @@ uia_controller.py - UIA 核心控制器
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Optional
 
 from pywinauto.application import Application
@@ -49,6 +50,7 @@ class UIAController:
         self._element_finder = ElementFinder(backend=backend)
         self._current_app: Optional[Application] = None
         self._current_process: Optional[ProcessInfo] = None
+        self._bound_window_title = ""
 
     # ── 进程管理 ──
 
@@ -131,6 +133,51 @@ class UIAController:
         """断开当前连接并清理资源"""
         self._current_app = None
         self._current_process = None
+        self._bound_window_title = ""
+
+    def bind_window(self, window_title: str = ""):
+        """Bind subsequent window-scoped actions to a verified title."""
+        self._bound_window_title = str(window_title or "").strip()
+        return self.get_window()
+
+    def get_window(self):
+        """Return the bound top-level window, rejecting a missing binding."""
+        app = self._ensure_connected()
+        title = self._bound_window_title.casefold()
+        if not title:
+            return app.top_window()
+
+        try:
+            windows = list(app.windows())
+        except Exception:
+            windows = []
+        exact = []
+        partial = []
+        for window in windows:
+            try:
+                candidate = str(window.window_text() or "").strip()
+            except Exception:
+                continue
+            folded = candidate.casefold()
+            if folded == title:
+                exact.append(window)
+            elif title in folded:
+                partial.append(window)
+        matches = exact or partial
+        if not matches:
+            raise LookupError(
+                f"No window found for bound title: {self._bound_window_title!r}"
+            )
+        if len(matches) != 1:
+            raise LookupError(
+                f"Ambiguous bound window title: {self._bound_window_title!r}"
+            )
+        return matches[0]
+
+    def window_rectangle(self) -> tuple[int, int, int, int]:
+        """Return the bound top-level window rectangle."""
+        rect = self.get_window().rectangle()
+        return (int(rect.left), int(rect.top), int(rect.right), int(rect.bottom))
 
     # ── 元素查找 ──
 
@@ -148,6 +195,36 @@ class UIAController:
         """查找当前窗口中的所有文本元素"""
         app = self._ensure_connected()
         return self._element_finder.find_texts(app, max_results=max_results)
+
+    def find_controls(
+        self,
+        control_type: str = "",
+        max_results: int = 200,
+    ) -> list[ElementInfo]:
+        """Enumerate descendants of the already-bound top-level window only."""
+        window = self.get_window()
+        kwargs = {"control_type": control_type} if control_type else {}
+        descendants = window.descendants(**kwargs)
+        process = self._current_process
+        process_name = str(getattr(process, "name", "") or "")
+        pid = int(getattr(process, "pid", 0) or 0)
+        window_title = str(window.window_text() or "")
+        results: list[ElementInfo] = []
+        for wrapper in descendants:
+            try:
+                results.append(
+                    self._element_finder._extract_info(
+                        wrapper,
+                        process_name,
+                        pid,
+                        window_title,
+                    )
+                )
+            except Exception:
+                continue
+            if len(results) >= max(1, int(max_results)):
+                break
+        return results
 
     def find_by_id(self, automation_id: str) -> Optional[ElementInfo]:
         """通过 AutomationId 精确定位元素"""
@@ -219,12 +296,159 @@ class UIAController:
             except Exception:
                 return False
 
+    def invoke(self, element: ElementInfo) -> bool:
+        """Invoke a semantic UIA action without falling back to pointer input."""
+        wrapper = self._element_wrapper(element)
+        try:
+            wrapper.invoke()
+            return True
+        except Exception:
+            return False
+
+    def set_value(self, element: ElementInfo, text: str) -> tuple[bool, str]:
+        """Set a UIA value without keyboard fallback and return strict readback."""
+        wrapper = self._element_wrapper(element)
+        try:
+            wrapper.set_edit_text(text)
+        except Exception:
+            return False, self.read_value(element)
+        readback = self.read_value(element)
+        return readback == text or (bool(text) and text in readback), readback
+
+    def toggle(self, element: ElementInfo) -> bool:
+        """Toggle a semantic UIA control."""
+        wrapper = self._element_wrapper(element)
+        try:
+            wrapper.toggle()
+            return True
+        except Exception:
+            return False
+
+    def select(self, element: ElementInfo) -> bool:
+        """Select a semantic UIA item."""
+        wrapper = self._element_wrapper(element)
+        try:
+            wrapper.select()
+            return True
+        except Exception:
+            return False
+
+    def click_input(self, element: ElementInfo, *, double: bool = False) -> bool:
+        """Perform explicit foreground pointer input on an element."""
+        wrapper = self._element_wrapper(element)
+        try:
+            self.get_window().set_focus()
+            if double:
+                wrapper.double_click_input()
+            else:
+                wrapper.click_input()
+            return True
+        except Exception:
+            return False
+
+    def type_keys(
+        self,
+        element: ElementInfo,
+        keys: str,
+        *,
+        clear_first: bool = False,
+    ) -> bool:
+        """Perform explicit foreground keyboard input on an element."""
+        wrapper = self._element_wrapper(element)
+        try:
+            self.get_window().set_focus()
+            wrapper.set_focus()
+            if clear_first:
+                wrapper.type_keys("^a{DELETE}", pause=0.02)
+            wrapper.type_keys(keys, with_spaces=True, pause=0.02)
+            return True
+        except Exception:
+            return False
+
+    def key_press(self, keys: str) -> bool:
+        """Send an explicit foreground key sequence to the bound window."""
+        try:
+            from pywinauto.keyboard import send_keys
+
+            self.get_window().set_focus()
+            send_keys(keys, pause=0.02, with_spaces=True)
+            return True
+        except Exception:
+            return False
+
+    def click_coordinates(self, x: int, y: int, *, double: bool = False) -> bool:
+        """Click absolute coordinates after validating the bound window."""
+        if not self._point_in_bound_window(x, y):
+            return False
+        try:
+            from pywinauto import mouse
+
+            self.get_window().set_focus()
+            if double:
+                mouse.double_click(coords=(x, y))
+            else:
+                mouse.click(coords=(x, y))
+            return True
+        except Exception:
+            return False
+
+    def drag(
+        self,
+        start: tuple[int, int],
+        end: tuple[int, int],
+        *,
+        duration: float = 0.5,
+    ) -> bool:
+        """Drag between two absolute points inside the bound window."""
+        if not self._point_in_bound_window(*start) or not self._point_in_bound_window(*end):
+            return False
+        try:
+            from pywinauto import mouse
+
+            self.get_window().set_focus()
+            mouse.move(coords=start)
+            mouse.press(coords=start)
+            mouse.move(coords=end, duration=max(0.0, min(float(duration), 5.0)))
+            mouse.release(coords=end)
+            return True
+        except Exception:
+            return False
+
+    def scroll(
+        self,
+        wheel_dist: int,
+        *,
+        coordinates: Optional[tuple[int, int]] = None,
+    ) -> bool:
+        """Scroll inside the bound window using explicit pointer input."""
+        try:
+            from pywinauto import mouse
+
+            if coordinates is None:
+                left, top, right, bottom = self.window_rectangle()
+                coordinates = ((left + right) // 2, (top + bottom) // 2)
+            if not self._point_in_bound_window(*coordinates):
+                return False
+            self.get_window().set_focus()
+            mouse.scroll(coords=coordinates, wheel_dist=int(wheel_dist))
+            return True
+        except Exception:
+            return False
+
     def read_value(self, element: ElementInfo) -> str:
         """读取元素的当前值/文本"""
         wrapper = element._wrapper
         if wrapper is None:
             return element.value
 
+        try:
+            getter = getattr(wrapper, "get_value", None)
+            if callable(getter):
+                value = getter()
+                if value is not None:
+                    return str(value)
+        except Exception:
+            pass
         try:
             return wrapper.window_text() or ""
         except Exception:
@@ -251,6 +475,16 @@ class UIAController:
         try:
             img = wrapper.capture_as_image()
             img.save(save_path)
+            return True
+        except Exception:
+            return False
+
+    def screenshot_window(self, save_path: str) -> bool:
+        """Capture the bound top-level window without injecting user input."""
+        try:
+            output = Path(save_path)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            self.get_window().capture_as_image().save(output)
             return True
         except Exception:
             return False
@@ -287,3 +521,17 @@ class UIAController:
                 return elements[0]
             time.sleep(interval)
         return None
+
+    @staticmethod
+    def _element_wrapper(element: ElementInfo):
+        wrapper = element._wrapper
+        if wrapper is None:
+            raise ValueError("Element has no wrapper reference for interaction")
+        return wrapper
+
+    def _point_in_bound_window(self, x: int, y: int) -> bool:
+        try:
+            left, top, right, bottom = self.window_rectangle()
+        except Exception:
+            return False
+        return left <= int(x) < right and top <= int(y) < bottom

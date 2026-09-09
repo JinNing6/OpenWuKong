@@ -42,7 +42,193 @@ class _FakeComposerProbeSender:
         raise AssertionError("send should not run during read-only composer probe")
 
 
+class _FakeThreadStartClient:
+    def __init__(
+        self,
+        *,
+        thread_id: str,
+        cwd: str,
+        turn_id: str = "turn-1",
+        assistant_text: str = "",
+    ):
+        self.thread_id = thread_id
+        self.cwd = cwd
+        self.turn_id = turn_id
+        self.assistant_text = assistant_text
+        self.calls = []
+        self.turn_calls = []
+
+    def initialize_start_thread_and_list_threads(
+        self,
+        ws_url,
+        *,
+        params,
+        request_timeout,
+        thread_list_limit,
+    ):
+        self.calls.append(
+            {
+                "ws_url": ws_url,
+                "params": dict(params),
+                "request_timeout": request_timeout,
+                "thread_list_limit": thread_list_limit,
+            }
+        )
+        thread = {"id": self.thread_id, "cwd": self.cwd, "preview": "target"}
+        return {
+            "request_attempts": 3,
+            "thread_start_response": {
+                "id": 2,
+                "result": {"thread": dict(thread), "cwd": self.cwd},
+            },
+            "thread_list_response": {
+                "id": 3,
+                "result": {"data": [dict(thread)], "nextCursor": None},
+            },
+            "notifications": [],
+        }
+
+    def initialize_start_turn_and_collect(
+        self,
+        ws_url,
+        *,
+        params,
+        request_timeout,
+    ):
+        self.turn_calls.append(
+            {
+                "ws_url": ws_url,
+                "params": dict(params),
+                "request_timeout": request_timeout,
+            }
+        )
+        return {
+            "request_attempts": 2,
+            "turn_start_response": {
+                "id": 2,
+                "result": {
+                    "turn": {
+                        "id": self.turn_id,
+                        "items": [],
+                        "status": "inProgress",
+                    }
+                },
+            },
+            "notifications": [
+                {
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "threadId": self.thread_id,
+                        "turnId": self.turn_id,
+                        "itemId": "agent-message-1",
+                        "delta": self.assistant_text,
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": self.thread_id,
+                        "turn": {
+                            "id": self.turn_id,
+                            "items": [],
+                            "status": "completed",
+                        },
+                    },
+                },
+            ],
+        }
+
+
+class _FakeForegroundObserver:
+    def __init__(self, *, before: dict, after: dict):
+        self.before = list(before) if isinstance(before, list) else [dict(before)]
+        self.after = list(after) if isinstance(after, list) else [dict(after)]
+        self.before_index = 0
+        self.after_index = 0
+
+    def get_foreground_snapshot(self):
+        return self._next(self.before, "before_index")
+
+    def get_foreground_snapshot_after(self):
+        return self._next(self.after, "after_index")
+
+    def _next(self, snapshots, index_name):
+        index = getattr(self, index_name)
+        if index >= len(snapshots):
+            value = snapshots[-1]
+        else:
+            value = snapshots[index]
+        setattr(self, index_name, index + 1)
+        return dict(value)
+
+
+class _FakeSystemDialogObserver:
+    def __init__(self, snapshots):
+        self.snapshots = list(snapshots)
+        self.index = 0
+
+    def capture_system_dialogs(self):
+        if not self.snapshots:
+            return []
+        if self.index >= len(self.snapshots):
+            value = self.snapshots[-1]
+        else:
+            value = self.snapshots[self.index]
+        self.index += 1
+        return value
+
+
 class AgentAppRealNoLossTests(unittest.TestCase):
+    def test_falls_back_when_artifact_subdir_is_not_writable(self):
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=False,
+                decision="agent_native_connector_not_exposed",
+                agent=kwargs["agent"],
+                agent_id="codex",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_allowed=False,
+                control_attempts=0,
+                window_input_attempts=0,
+                endpoint_count=0,
+                ready_endpoint_count=0,
+                bridge_send_attempts=0,
+                app_uia_probe={
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "agent_app_real_no_loss").write_text(
+                "not a directory",
+                encoding="utf-8",
+            )
+
+            report = run_agent_app_real_no_loss(
+                agents=("codex app",),
+                project_name="openwukong",
+                task_name="agent-app-real-no-loss",
+                output_root=root,
+                probe_runner=fake_probe_runner,
+            )
+            data = report.to_dict()
+            artifact_path = Path(data["cases"][0]["artifact_path"])
+
+            self.assertTrue(artifact_path.exists())
+            self.assertNotEqual(artifact_path.parent, root / "agent_app_real_no_loss")
+            self.assertEqual(
+                json.loads(artifact_path.read_text(encoding="utf-8"))["agent"],
+                "codex app",
+            )
+
     def test_runs_agent_app_probes_without_control_attempts_and_writes_artifacts(self):
         calls = []
 
@@ -288,6 +474,332 @@ class AgentAppRealNoLossTests(unittest.TestCase):
             "Send this through the app surface.",
         )
         self.assertEqual(artifact["app_bridge_send_report"]["decision"], "app_bridge_send_accepted")
+
+    def test_app_bridge_auth_required_status_is_reported_without_foreground_input(self):
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="agent_native_connector_ready",
+                agent=kwargs["agent"],
+                agent_id="cursor",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_allowed=False,
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=1,
+                bridge_send_attempts=0,
+                endpoints=[
+                    {
+                        "endpoint_type": "devtools",
+                        "debugger_url": "http://127.0.0.1:19557",
+                        "ready": True,
+                        "targets": [
+                            {
+                                "target_id": "cursor-page",
+                                "id": "cursor-page",
+                                "type": "page",
+                                "title": "openwukong - Cursor",
+                                "url": "vscode-file://cursor/workbench.html",
+                                "ready": True,
+                                "webSocketDebuggerUrl": "ws://127.0.0.1:19557/devtools/page/cursor-page",
+                            }
+                        ],
+                    }
+                ],
+                app_uia_probe={
+                    "decision": "agent_app_uia_ready",
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "semantic_composer_count": 1,
+                    "submit_candidate_count": 1,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "matched_windows": [
+                        {
+                            "process_name": "Cursor.exe",
+                            "pid": 13592,
+                            "window_title": "openwukong - Cursor",
+                            "hwnd": 138024,
+                        }
+                    ],
+                },
+            )
+
+        def fake_bridge_sender(request):
+            return {
+                "mode": "agent-app-bridge-send",
+                "safety_mode": "native_bridge_execute",
+                "ok": False,
+                "decision": "app_bridge_auth_required",
+                "accepted": False,
+                "auth_required": True,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 1,
+                "native_call_attempts": 1,
+                "request": request.to_dict(),
+                "action_result": {
+                    "composerFound": True,
+                    "messageSet": True,
+                    "submitAttempted": False,
+                    "submitVerified": False,
+                    "readbackText": "Cursor's AI features require you to be logged in",
+                },
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            report = run_agent_app_real_no_loss(
+                agents=("cursor",),
+                project_name="openwukong",
+                task_name="desktop-message",
+                output_root=root,
+                screenshot_dir=root / "screenshots",
+                probe_runner=fake_probe_runner,
+                allow_app_bridge_send=True,
+                app_bridge_sender=fake_bridge_sender,
+                bridge_message="Send this through the app surface.",
+                required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+
+        self.assertEqual(case["status"], "auth_required")
+        self.assertFalse(case["passed"])
+        self.assertEqual(case["app_bridge_send_report"]["decision"], "app_bridge_auth_required")
+        self.assertEqual(case["control_attempts"], 0)
+        self.assertEqual(case["window_input_attempts"], 0)
+
+    def test_app_bridge_pending_readback_status_is_preserved(self):
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="agent_native_connector_ready",
+                agent=kwargs["agent"],
+                agent_id="cursor",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_allowed=False,
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=1,
+                bridge_send_attempts=0,
+                endpoints=[
+                    {
+                        "endpoint_type": "ide_bridge",
+                        "bridge_url": "http://127.0.0.1:8787",
+                        "ready": True,
+                        "preferred_chat_adapter": "cursor",
+                        "adapter_mapping": {
+                            "cursor": {
+                                "label": "Cursor Chat",
+                                "commandId": "composer.startComposerPrompt",
+                                "available": True,
+                                "availableCandidates": ["composer.startComposerPrompt"],
+                                "commandCandidates": ["composer.startComposerPrompt"],
+                            }
+                        },
+                        "metadata": {
+                            "ide_name": "Cursor",
+                            "requested_workspace_path": "E:/ideaProjects/agent/openwukong",
+                            "requested_workspace_name": "openwukong",
+                            "workspace_target_source": "explicit_probe_request",
+                            "readback_action_ready": True,
+                            "capabilities": ["agent_app_conversation.read_transcript"],
+                        },
+                    }
+                ],
+                app_uia_probe={
+                    "decision": "agent_app_task_not_visible",
+                    "matched_window_count": 1,
+                    "target_matched": False,
+                    "semantic_composer_count": 0,
+                    "background_screenshot_focus_stable": True,
+                    "matched_windows": [
+                        {
+                            "process_name": "Cursor.exe",
+                            "pid": 32080,
+                            "window_title": "openwukong - Cursor",
+                            "hwnd": 19208036,
+                        }
+                    ],
+                },
+            )
+
+        def fake_bridge_sender(request):
+            return {
+                "mode": "agent-app-bridge-send",
+                "safety_mode": "native_bridge_execute",
+                "ok": False,
+                "decision": "app_bridge_message_submitted_acceptance_pending",
+                "accepted": False,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 1,
+                "native_call_attempts": 1,
+                "request": request.to_dict(),
+                "action_result": {
+                    "bridgeOk": True,
+                    "messageSet": True,
+                    "submitAttempted": True,
+                    "submitVerified": True,
+                    "readbackText": "ide=Cursor\nworkspaceFolders=0\naction=chat_send",
+                },
+                "missing_required_markers": ["OPENWUKONG_ACCEPTANCE: PASS"],
+            }
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_app_real_no_loss(
+                agents=("cursor",),
+                project_name="openwukong",
+                task_name="new-background-task",
+                output_root=td,
+                probe_runner=fake_probe_runner,
+                allow_app_bridge_send=True,
+                app_bridge_sender=fake_bridge_sender,
+                bridge_message="Send this through the app surface.",
+                required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+
+        self.assertEqual(case["status"], "app_bridge_message_submitted_acceptance_pending")
+        self.assertFalse(case["passed"])
+        self.assertEqual(data["bridge_send_attempts"], 1)
+        self.assertEqual(data["app_bridge_send_verified_cases"], 0)
+        self.assertEqual(case["control_attempts"], 0)
+        self.assertEqual(case["window_input_attempts"], 0)
+
+    def test_cursor_pending_app_bridge_is_accepted_by_transcript_readback(self):
+        readback_calls = []
+
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="agent_native_connector_ready",
+                agent=kwargs["agent"],
+                agent_id="cursor",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_allowed=False,
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=1,
+                bridge_send_attempts=0,
+                endpoints=[
+                    {
+                        "endpoint_type": "ide_bridge",
+                        "bridge_url": "http://127.0.0.1:8787",
+                        "ready": True,
+                        "preferred_chat_adapter": "cursor",
+                        "adapter_mapping": {
+                            "cursor": {
+                                "label": "Cursor Chat",
+                                "commandId": "composer.startComposerPrompt",
+                                "available": True,
+                                "availableCandidates": ["composer.startComposerPrompt"],
+                                "commandCandidates": ["composer.startComposerPrompt"],
+                            }
+                        },
+                        "metadata": {
+                            "ide_name": "Cursor",
+                            "requested_workspace_path": "E:/ideaProjects/agent/openwukong",
+                            "requested_workspace_name": "openwukong",
+                            "readback_action_ready": True,
+                            "capabilities": ["agent_app_conversation.read_transcript"],
+                        },
+                    }
+                ],
+                app_uia_probe={
+                    "decision": "agent_app_task_not_visible",
+                    "matched_window_count": 1,
+                    "target_matched": False,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        def fake_bridge_sender(request):
+            return {
+                "mode": "agent-app-bridge-send",
+                "safety_mode": "native_bridge_execute",
+                "ok": False,
+                "decision": "app_bridge_message_submitted_acceptance_pending",
+                "accepted": False,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "bridge_send_attempts": 1,
+                "native_call_attempts": 1,
+                "request": request.to_dict(),
+                "action_result": {
+                    "bridgeOk": True,
+                    "messageSet": True,
+                    "submitAttempted": True,
+                    "submitVerified": True,
+                    "readbackText": "ide=Cursor\nworkspaceFolders=0\naction=chat_send",
+                },
+                "missing_required_markers": ["OPENWUKONG_ACCEPTANCE: PASS"],
+            }
+
+        def fake_cursor_transcript_readback(**kwargs):
+            readback_calls.append(dict(kwargs))
+            return _FakeProbeReport(
+                mode="cursor-transcript-readback",
+                safety_mode="read_only_local_storage",
+                ok=True,
+                decision="cursor_transcript_readback_accepted",
+                control_attempts=0,
+                window_input_attempts=0,
+                bridge_send_attempts=0,
+                required_markers_found=["OPENWUKONG_ACCEPTANCE: PASS"],
+                missing_required_markers=[],
+                forbidden_markers_found=[],
+                readback_text="OPENWUKONG_ACCEPTANCE: PASS",
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            report = run_agent_app_real_no_loss(
+                agents=("cursor",),
+                project_name="openwukong",
+                task_name="new-background-task",
+                output_root=td,
+                workspace_path="E:/ideaProjects/agent/openwukong",
+                probe_runner=fake_probe_runner,
+                allow_app_bridge_send=True,
+                app_bridge_sender=fake_bridge_sender,
+                bridge_message="Send this through the app surface.",
+                required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+                cursor_transcript_readback_runner=fake_cursor_transcript_readback,
+            )
+            data = report.to_dict()
+            case = data["cases"][0]
+
+        self.assertEqual(len(readback_calls), 1)
+        self.assertEqual(
+            readback_calls[0]["required_markers"],
+            ("OPENWUKONG_ACCEPTANCE: PASS",),
+        )
+        self.assertEqual(case["status"], "app_bridge_send_accepted")
+        self.assertTrue(case["passed"])
+        self.assertEqual(data["app_bridge_send_verified_cases"], 1)
+        self.assertEqual(case["bridge_send_attempts"], 1)
+        self.assertEqual(case["control_attempts"], 0)
+        self.assertEqual(case["window_input_attempts"], 0)
+        self.assertEqual(
+            case["app_bridge_send_report"]["decision"],
+            "app_bridge_send_accepted",
+        )
+        self.assertEqual(
+            case["app_bridge_send_report"]["cursor_transcript_readback_report"]["decision"],
+            "cursor_transcript_readback_accepted",
+        )
 
     def test_ready_devtools_app_bridge_runs_composer_probe_without_send(self):
         def fake_probe_runner(**kwargs):
@@ -603,6 +1115,545 @@ class AgentAppRealNoLossTests(unittest.TestCase):
             data["cases"][0]["probe"]["endpoints"][0]["endpoint_type"],
             "agent_native_bridge",
         )
+
+    def test_passes_explicit_codex_app_server_ws_urls_to_native_probe(self):
+        calls = []
+
+        def fake_probe_runner(**kwargs):
+            calls.append(dict(kwargs))
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="agent_native_connector_ready",
+                agent=kwargs["agent"],
+                agent_id="codex",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=1,
+                endpoints=[
+                    {
+                        "endpoint_type": "codex_app_server_ws",
+                        "bridge_url": "ws://127.0.0.1:19731",
+                        "debugger_url": "ws://127.0.0.1:19731",
+                        "ready": True,
+                        "commands": ["initialize", "thread/list"],
+                        "metadata": {
+                            "thread_api_ready": True,
+                            "turn_start_foreground_safe": True,
+                            "send_contract_ready": False,
+                            "selected_thread_id": "thread-abc",
+                            "selected_thread_cwd": "E:/ideaProjects/agent/openwukong",
+                            "observed_thread_count": 1,
+                        },
+                    }
+                ],
+                app_uia_probe={
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "semantic_composer_count": 0,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        report = run_agent_app_real_no_loss(
+            agents=("codex app",),
+            project_name="openwukong",
+            task_name="desktop-message",
+            bridge_message="Run background Codex app dry-run and report OPENWUKONG_ACCEPTANCE: PASS",
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+            probe_runner=fake_probe_runner,
+            codex_app_server_ws_urls=("ws://127.0.0.1:19731",),
+            workspace_path="E:/ideaProjects/agent/openwukong",
+        )
+        data = report.to_dict()
+
+        self.assertEqual(
+            calls[0]["codex_app_server_ws_urls"],
+            ("ws://127.0.0.1:19731",),
+        )
+        self.assertEqual(data["control_attempts"], 0)
+        self.assertEqual(data["bridge_send_attempts"], 0)
+        self.assertEqual(data["window_input_attempts"], 0)
+        self.assertEqual(data["cases"][0]["status"], "native_connector_ready")
+        self.assertEqual(
+            data["cases"][0]["probe"]["endpoints"][0]["endpoint_type"],
+            "codex_app_server_ws",
+        )
+        dry_run = data["cases"][0]["codex_app_server_turn_dry_run"]
+        self.assertEqual(
+            dry_run["decision"],
+            "codex_app_server_turn_dry_run_ready",
+        )
+        self.assertEqual(dry_run["control_attempts"], 0)
+        self.assertEqual(dry_run["window_input_attempts"], 0)
+        self.assertEqual(dry_run["native_call_attempts"], 0)
+        self.assertEqual(dry_run["app_server_turn_start_attempts"], 0)
+        params = dry_run["request"]["turn_start_params"]
+        self.assertEqual(params["threadId"], "thread-abc")
+        self.assertEqual(params["cwd"], "E:/ideaProjects/agent/openwukong")
+        self.assertIn("OPENWUKONG_ACCEPTANCE: PASS", params["input"][0]["text"])
+        self.assertFalse(data["cases"][0]["transport_matrix"]["send_ready"])
+        self.assertEqual(
+            data["cases"][0]["transport_matrix"]["best_available_transport"]["transport_id"],
+            "codex-app-server-ws",
+        )
+
+    def test_codex_app_server_ws_wrong_selected_thread_prepares_thread_start_contract(self):
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="agent_native_connector_ready",
+                agent=kwargs["agent"],
+                agent_id="codex",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=1,
+                endpoints=[
+                    {
+                        "endpoint_type": "codex_app_server_ws",
+                        "bridge_url": "ws://127.0.0.1:19731",
+                        "debugger_url": "ws://127.0.0.1:19731",
+                        "ready": True,
+                        "commands": ["initialize", "thread/list"],
+                        "metadata": {
+                            "thread_api_ready": True,
+                            "turn_start_foreground_safe": True,
+                            "selected_thread_id": "thread-other",
+                            "selected_thread_cwd": "E:/ideaProjects/agent/CyberHuaTuo",
+                            "observed_thread_count": 1,
+                            "observed_threads": [
+                                {
+                                    "id": "thread-other",
+                                    "cwd": "E:/ideaProjects/agent/CyberHuaTuo",
+                                    "preview": "other project",
+                                }
+                            ],
+                        },
+                    }
+                ],
+                app_uia_probe={
+                    "matched_window_count": 0,
+                    "target_matched": False,
+                    "semantic_composer_count": 0,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        report = run_agent_app_real_no_loss(
+            agents=("codex app",),
+            project_name="openwukong",
+            task_name="desktop-message",
+            bridge_message="OPENWUKONG_CODEX_APP_SERVER_TURN_DRY_RUN OPENWUKONG_ACCEPTANCE: PASS",
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+            probe_runner=fake_probe_runner,
+            codex_app_server_ws_urls=("ws://127.0.0.1:19731",),
+            workspace_path="E:/ideaProjects/agent/openwukong",
+        )
+        case = report.to_dict()["cases"][0]
+
+        self.assertEqual(case["control_attempts"], 0)
+        self.assertEqual(case["window_input_attempts"], 0)
+        self.assertEqual(case["bridge_send_attempts"], 0)
+        self.assertTrue(case["codex_app_server_thread_start_ready"])
+        self.assertFalse(case["codex_app_server_turn_start_ready"])
+        self.assertTrue(case["codex_app_server_thread_start_required"])
+        self.assertEqual(
+            case["codex_app_server_turn_dry_run"]["decision"],
+            "codex_app_server_thread_start_dry_run_ready",
+        )
+        self.assertEqual(
+            case["codex_app_server_turn_dry_run"]["request"]["thread_start_params"]["cwd"],
+            "E:/ideaProjects/agent/openwukong",
+        )
+        self.assertFalse(case["transport_matrix"]["send_ready"])
+
+    def test_codex_app_server_thread_start_opt_in_rechecks_turn_contract(self):
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="agent_native_connector_ready",
+                agent=kwargs["agent"],
+                agent_id="codex",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=1,
+                endpoints=[
+                    {
+                        "endpoint_type": "codex_app_server_ws",
+                        "bridge_url": "ws://127.0.0.1:19731",
+                        "debugger_url": "ws://127.0.0.1:19731",
+                        "ready": True,
+                        "commands": ["initialize", "thread/list"],
+                        "metadata": {
+                            "thread_api_ready": True,
+                            "turn_start_foreground_safe": True,
+                            "selected_thread_id": "thread-other",
+                            "selected_thread_cwd": "E:/ideaProjects/agent/CyberHuaTuo",
+                            "observed_thread_count": 1,
+                            "observed_threads": [
+                                {
+                                    "id": "thread-other",
+                                    "cwd": "E:/ideaProjects/agent/CyberHuaTuo",
+                                    "preview": "other project",
+                                }
+                            ],
+                        },
+                    }
+                ],
+                app_uia_probe={
+                    "matched_window_count": 0,
+                    "target_matched": False,
+                    "semantic_composer_count": 0,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        report = run_agent_app_real_no_loss(
+            agents=("codex app",),
+            project_name="openwukong",
+            task_name="desktop-message",
+            bridge_message="OPENWUKONG_CODEX_APP_SERVER_TURN_DRY_RUN OPENWUKONG_ACCEPTANCE: PASS",
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+            probe_runner=fake_probe_runner,
+            codex_app_server_ws_urls=("ws://127.0.0.1:19731",),
+            workspace_path="E:/ideaProjects/agent/openwukong",
+            allow_codex_app_server_thread_start=True,
+            codex_app_server_client=_FakeThreadStartClient(
+                thread_id="thread-openwukong",
+                cwd="E:/ideaProjects/agent/openwukong",
+            ),
+            codex_app_server_foreground_hwnd_provider=lambda: 9001,
+        )
+        case = report.to_dict()["cases"][0]
+
+        self.assertEqual(case["control_attempts"], 0)
+        self.assertEqual(case["window_input_attempts"], 0)
+        self.assertTrue(case["codex_app_server_thread_start_verified"])
+        self.assertEqual(case["codex_app_server_thread_start_attempts"], 1)
+        self.assertEqual(case["codex_app_server_native_call_attempts"], 1)
+        self.assertEqual(
+            case["codex_app_server_thread_start_report"]["decision"],
+            "codex_app_server_thread_start_verified",
+        )
+        after = case["codex_app_server_turn_after_thread_start_dry_run"]
+        self.assertEqual(after["decision"], "codex_app_server_turn_dry_run_ready")
+        self.assertTrue(after["turn_start_ready"])
+        self.assertFalse(after["thread_start_required"])
+        self.assertEqual(after["request"]["thread_id"], "thread-openwukong")
+        self.assertEqual(
+            after["request"]["turn_start_params"]["threadId"],
+            "thread-openwukong",
+        )
+
+    def test_codex_app_server_turn_start_opt_in_accepts_readback_marker(self):
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="agent_native_connector_ready",
+                agent=kwargs["agent"],
+                agent_id="codex",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=1,
+                endpoints=[
+                    {
+                        "endpoint_type": "codex_app_server_ws",
+                        "bridge_url": "ws://127.0.0.1:19731",
+                        "debugger_url": "ws://127.0.0.1:19731",
+                        "ready": True,
+                        "commands": ["initialize", "thread/list"],
+                        "metadata": {
+                            "thread_api_ready": True,
+                            "turn_start_foreground_safe": True,
+                            "selected_thread_id": "thread-other",
+                            "selected_thread_cwd": "E:/ideaProjects/agent/CyberHuaTuo",
+                            "observed_thread_count": 1,
+                            "observed_threads": [
+                                {
+                                    "id": "thread-other",
+                                    "cwd": "E:/ideaProjects/agent/CyberHuaTuo",
+                                    "preview": "other project",
+                                }
+                            ],
+                        },
+                    }
+                ],
+                app_uia_probe={
+                    "matched_window_count": 0,
+                    "target_matched": False,
+                    "semantic_composer_count": 0,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        client = _FakeThreadStartClient(
+            thread_id="thread-openwukong",
+            cwd="E:/ideaProjects/agent/openwukong",
+            assistant_text="OPENWUKONG_ACCEPTANCE: PASS",
+        )
+        report = run_agent_app_real_no_loss(
+            agents=("codex app",),
+            project_name="openwukong",
+            task_name="desktop-message",
+            bridge_message="Return OPENWUKONG_ACCEPTANCE: PASS",
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+            forbidden_markers=("OPENWUKONG_ACCEPTANCE: FAIL",),
+            probe_runner=fake_probe_runner,
+            codex_app_server_ws_urls=("ws://127.0.0.1:19731",),
+            workspace_path="E:/ideaProjects/agent/openwukong",
+            allow_codex_app_server_thread_start=True,
+            allow_codex_app_server_turn_start=True,
+            codex_app_server_client=client,
+            codex_app_server_foreground_hwnd_provider=lambda: 9001,
+        )
+        data = report.to_dict()
+        case = data["cases"][0]
+
+        self.assertEqual(case["status"], "codex_app_server_turn_start_verified")
+        self.assertTrue(case["codex_app_server_turn_start_verified"])
+        self.assertEqual(case["codex_app_server_thread_start_attempts"], 1)
+        self.assertEqual(case["codex_app_server_turn_start_attempts"], 1)
+        self.assertEqual(case["codex_app_server_native_call_attempts"], 2)
+        self.assertEqual(data["codex_app_server_turn_start_verified_cases"], 1)
+        self.assertEqual(data["app_side_send_verified_cases"], 1)
+        self.assertTrue(case["transport_matrix"]["send_ready"])
+        self.assertEqual(
+            case["transport_matrix"]["selected_send_transport"]["transport_id"],
+            "codex-app-server-ws",
+        )
+        self.assertTrue(
+            case["transport_matrix"]["selected_send_transport"]["evidence"][
+                "strict_assistant_readback_verified"
+            ]
+        )
+        self.assertEqual(case["control_attempts"], 0)
+        self.assertEqual(case["window_input_attempts"], 0)
+        self.assertIn(
+            "OPENWUKONG_ACCEPTANCE: PASS",
+            case["codex_app_server_turn_start_report"]["assistant_readback_text"],
+        )
+        self.assertEqual(client.turn_calls[0]["params"]["threadId"], "thread-openwukong")
+
+    def test_codex_app_server_turn_start_focus_failure_becomes_case_status(self):
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="agent_native_connector_ready",
+                agent=kwargs["agent"],
+                agent_id="codex",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=1,
+                endpoints=[
+                    {
+                        "endpoint_type": "codex_app_server_ws",
+                        "bridge_url": "ws://127.0.0.1:19731",
+                        "debugger_url": "ws://127.0.0.1:19731",
+                        "ready": True,
+                        "commands": ["initialize", "thread/list"],
+                        "metadata": {
+                            "thread_api_ready": True,
+                            "turn_start_foreground_safe": True,
+                            "selected_thread_id": "thread-other",
+                            "selected_thread_cwd": "E:/ideaProjects/agent/CyberHuaTuo",
+                            "observed_thread_count": 1,
+                            "observed_threads": [
+                                {
+                                    "id": "thread-other",
+                                    "cwd": "E:/ideaProjects/agent/CyberHuaTuo",
+                                    "preview": "other project",
+                                }
+                            ],
+                        },
+                    }
+                ],
+                app_uia_probe={
+                    "matched_window_count": 0,
+                    "target_matched": False,
+                    "semantic_composer_count": 0,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        client = _FakeThreadStartClient(
+            thread_id="thread-openwukong",
+            cwd="E:/ideaProjects/agent/openwukong",
+            assistant_text="OPENWUKONG_ACCEPTANCE: PASS",
+        )
+        report = run_agent_app_real_no_loss(
+            agents=("codex app",),
+            project_name="openwukong",
+            task_name="desktop-message",
+            bridge_message="Return OPENWUKONG_ACCEPTANCE: PASS",
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+            probe_runner=fake_probe_runner,
+            codex_app_server_ws_urls=("ws://127.0.0.1:19731",),
+            workspace_path="E:/ideaProjects/agent/openwukong",
+            allow_codex_app_server_thread_start=True,
+            allow_codex_app_server_turn_start=True,
+            codex_app_server_client=client,
+            codex_app_server_foreground_hwnd_provider=_FakeForegroundObserver(
+                before=[
+                    {
+                        "hwnd": 1001,
+                        "pid": 101,
+                        "process_name": "explorer.exe",
+                        "window_title": "",
+                    },
+                    {
+                        "hwnd": 1001,
+                        "pid": 101,
+                        "process_name": "explorer.exe",
+                        "window_title": "",
+                    },
+                ],
+                after=[
+                    {
+                        "hwnd": 1001,
+                        "pid": 101,
+                        "process_name": "explorer.exe",
+                        "window_title": "",
+                    },
+                    {
+                        "hwnd": 2002,
+                        "pid": 202,
+                        "process_name": "Codex.exe",
+                        "window_title": "Codex",
+                        "executable_path": (
+                            "C:/Program Files/WindowsApps/OpenAI.Codex/app/Codex.exe"
+                        ),
+                    },
+                ],
+            ),
+        )
+        data = report.to_dict()
+        case = data["cases"][0]
+
+        self.assertEqual(case["status"], "codex_app_server_turn_start_foreground_changed")
+        self.assertFalse(case["passed"])
+        self.assertFalse(case["codex_app_server_turn_start_verified"])
+        self.assertTrue(case["codex_app_server_thread_start_verified"])
+        self.assertIn("codex_app_server_turn_start_not_verified", case["errors"])
+        self.assertEqual(
+            case["codex_app_server_turn_start_report"]["foreground_change_classification"],
+            "changed_to_agent_surface",
+        )
+        self.assertFalse(
+            case["codex_app_server_turn_start_report"]["foreground_no_steal_verified"]
+        )
+        self.assertEqual(data["codex_app_server_turn_start_verified_cases"], 0)
+
+    def test_codex_app_server_preexisting_system_dialog_becomes_case_status_without_call(self):
+        def fake_probe_runner(**kwargs):
+            return _FakeProbeReport(
+                mode="agent-native-connector-probe",
+                safety_mode="read_only",
+                ok=True,
+                decision="agent_native_connector_ready",
+                agent=kwargs["agent"],
+                agent_id="codex",
+                project_name=kwargs["project_name"],
+                task_name=kwargs["task_name"],
+                control_attempts=0,
+                endpoint_count=1,
+                ready_endpoint_count=1,
+                endpoints=[
+                    {
+                        "endpoint_type": "codex_app_server_ws",
+                        "bridge_url": "ws://127.0.0.1:19731",
+                        "debugger_url": "ws://127.0.0.1:19731",
+                        "ready": True,
+                        "commands": ["initialize", "thread/list"],
+                        "metadata": {
+                            "thread_api_ready": True,
+                            "turn_start_foreground_safe": True,
+                            "selected_thread_id": "thread-openwukong",
+                            "selected_thread_cwd": "E:/ideaProjects/agent/openwukong",
+                            "observed_thread_count": 1,
+                            "observed_threads": [
+                                {
+                                    "id": "thread-openwukong",
+                                    "cwd": "E:/ideaProjects/agent/openwukong",
+                                    "preview": "target project",
+                                }
+                            ],
+                        },
+                    }
+                ],
+                app_uia_probe={
+                    "matched_window_count": 1,
+                    "target_matched": True,
+                    "semantic_composer_count": 0,
+                    "background_screenshot_focus_stable": True,
+                },
+            )
+
+        client = _FakeThreadStartClient(
+            thread_id="thread-openwukong",
+            cwd="E:/ideaProjects/agent/openwukong",
+            assistant_text="OPENWUKONG_ACCEPTANCE: PASS",
+        )
+        report = run_agent_app_real_no_loss(
+            agents=("codex app",),
+            project_name="openwukong",
+            task_name="desktop-message",
+            bridge_message="Return OPENWUKONG_ACCEPTANCE: PASS",
+            required_markers=("OPENWUKONG_ACCEPTANCE: PASS",),
+            probe_runner=fake_probe_runner,
+            codex_app_server_ws_urls=("ws://127.0.0.1:19731",),
+            workspace_path="E:/ideaProjects/agent/openwukong",
+            allow_codex_app_server_turn_start=True,
+            codex_app_server_client=client,
+            codex_app_server_system_dialog_observer=_FakeSystemDialogObserver(
+                [
+                    [
+                        {
+                            "hwnd": 301,
+                            "title": "Error",
+                            "process_name": "Codex.exe",
+                            "text": (
+                                "Error launching app\n"
+                                "Unable to find Electron app at "
+                                "C:/Program Files/WindowsApps/OpenAI.Codex_26.527/"
+                                "?type=click&tag=17888037027795083491\n"
+                                "Cannot find module"
+                            ),
+                        }
+                    ]
+                ]
+            ),
+        )
+        data = report.to_dict()
+        case = data["cases"][0]
+
+        self.assertEqual(
+            case["status"],
+            "codex_app_server_turn_start_system_dialog_detected",
+        )
+        self.assertFalse(case["passed"])
+        self.assertEqual(case["codex_app_server_turn_start_attempts"], 0)
+        self.assertEqual(case["codex_app_server_native_call_attempts"], 0)
+        self.assertEqual(client.turn_calls, [])
+        self.assertIn("codex_app_server_turn_start_not_verified", case["errors"])
 
     def test_passes_agent_native_bridge_registry_paths_to_native_probe(self):
         calls = []
@@ -1152,6 +2203,125 @@ class AgentAppRealNoLossTests(unittest.TestCase):
         self.assertEqual(data["control_attempts"], 0)
         self.assertFalse(data["background_screenshot_focus_stable"])
         self.assertEqual(data["cases"][0]["status"], "gated_native_endpoint_missing")
+
+    def test_status_distinguishes_app_window_not_found_from_generic_unavailable(self):
+        def fake_probe_runner(**kwargs):
+            return {
+                "mode": "agent-native-connector-probe",
+                "safety_mode": "read_only",
+                "ok": False,
+                "decision": "agent_app_window_not_found",
+                "agent": kwargs["agent"],
+                "agent_id": "claude",
+                "control_attempts": 0,
+                "endpoint_count": 0,
+                "ready_endpoint_count": 0,
+                "app_uia_probe": {
+                    "decision": "agent_app_window_not_found",
+                    "matched_window_count": 0,
+                    "target_matched": False,
+                    "background_screenshot_focus_stable": True,
+                },
+            }
+
+        report = run_agent_app_real_no_loss(
+            agents=("claude desktop",),
+            project_name="openwukong",
+            task_name="desktop-message",
+            probe_runner=fake_probe_runner,
+        )
+        case = report.to_dict()["cases"][0]
+
+        self.assertEqual(case["status"], "app_window_not_found")
+        self.assertTrue(case["passed"])
+        self.assertFalse(case["real_verified"])
+
+    def test_status_distinguishes_installed_app_not_running_from_missing_window(self):
+        def fake_probe_runner(**kwargs):
+            return {
+                "mode": "agent-native-connector-probe",
+                "safety_mode": "read_only",
+                "ok": False,
+                "decision": "agent_app_window_not_found",
+                "agent": kwargs["agent"],
+                "agent_id": "claude",
+                "control_attempts": 0,
+                "endpoint_count": 0,
+                "ready_endpoint_count": 0,
+                "app_uia_probe": {
+                    "decision": "agent_app_window_not_found",
+                    "matched_window_count": 0,
+                    "target_matched": False,
+                    "background_screenshot_focus_stable": True,
+                    "selected_transport": {
+                        "transport_id": "claude-desktop-shell",
+                        "transport": "desktop-shell-native-bridge-or-foreground",
+                        "source": "start-apps",
+                        "path": "Claude_pzs8sxrjxfjjc!Claude",
+                        "ready": True,
+                        "background_capable": False,
+                    },
+                },
+            }
+
+        report = run_agent_app_real_no_loss(
+            agents=("claude desktop",),
+            project_name="openwukong",
+            task_name="desktop-message",
+            probe_runner=fake_probe_runner,
+        )
+        case = report.to_dict()["cases"][0]
+
+        self.assertEqual(
+            case["status"],
+            "app_installed_not_running_connector_required",
+        )
+        self.assertTrue(case["passed"])
+        self.assertFalse(case["real_verified"])
+
+    def test_status_distinguishes_target_project_not_visible_from_missing_endpoint(self):
+        def fake_probe_runner(**kwargs):
+            return {
+                "mode": "agent-native-connector-probe",
+                "safety_mode": "read_only",
+                "ok": False,
+                "decision": "agent_native_connector_not_exposed",
+                "agent": kwargs["agent"],
+                "agent_id": "cursor",
+                "control_attempts": 0,
+                "endpoint_count": 0,
+                "ready_endpoint_count": 0,
+                "app_uia_probe": {
+                    "decision": "agent_app_project_not_visible",
+                    "matched_window_count": 1,
+                    "target_matched": False,
+                    "semantic_composer_count": 1,
+                    "submit_candidate_count": 1,
+                    "background_screenshot_count": 1,
+                    "background_screenshot_success_count": 1,
+                    "background_screenshot_focus_stable": True,
+                    "matched_windows": [
+                        {
+                            "process_name": "Cursor.exe",
+                            "pid": 40904,
+                            "window_title": "start.md - trustusb-2 [SSH: QLV10-1] - Cursor",
+                            "hwnd": 9966186,
+                        }
+                    ],
+                },
+            }
+
+        report = run_agent_app_real_no_loss(
+            agents=("cursor",),
+            project_name="openwukong",
+            task_name="desktop-message",
+            probe_runner=fake_probe_runner,
+        )
+        case = report.to_dict()["cases"][0]
+
+        self.assertEqual(case["status"], "target_project_not_visible")
+        self.assertTrue(case["passed"])
+        self.assertTrue(case["real_verified"])
 
     def test_main_writes_json_report(self):
         calls = []
