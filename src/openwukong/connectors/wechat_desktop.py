@@ -9,6 +9,11 @@ from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from typing import Any
 
+from openwukong.connectors.base import (
+    ConnectorActionResult,
+    ConnectorTarget,
+    SessionConnector,
+)
 from openwukong.control.surface_capabilities import (
     SurfaceCapabilityProfile,
     profile_from_accessibility_window,
@@ -160,6 +165,163 @@ class WeChatSurfaceObserver:
         if callable(snapshot):
             return tuple(snapshot())
         return tuple(source)  # type: ignore[arg-type]
+
+
+class WeChatActionExecutor:
+    """Dispatch typed WeChat actions to an injected surface backend."""
+
+    _ACTION_METHODS = {
+        "wechat.window.inspect": "inspect",
+        "wechat.window.attach": "inspect",
+        "wechat.chat.search": "search_contact",
+        "wechat.contact.search": "search_contact",
+        "wechat.group.search": "search_group",
+        "wechat.chat.open": "open_conversation",
+        "wechat.chat.read": "read_conversation",
+        "wechat.contact.read": "read_contact",
+        "wechat.group.read": "read_group",
+        "wechat.chat.draft": "draft_text",
+        "wechat.chat.copy": "copy_message",
+        "wechat.chat.quote": "quote_message",
+        "wechat.chat.reply": "reply_message",
+        "wechat.chat.forward": "forward_message",
+        "wechat.chat.favorite": "favorite_message",
+        "wechat.chat.translate": "translate_message",
+        "wechat.chat.mark_unread": "mark_unread",
+        "wechat.chat.pin": "pin_conversation",
+        "wechat.chat.mute": "mute_conversation",
+        "wechat.chat.archive": "archive_conversation",
+    }
+
+    def __init__(self, *, backend: object):
+        self._backend = backend
+
+    def execute(
+        self,
+        target: ConnectorTarget,
+        intent: object,
+    ) -> ConnectorActionResult:
+        action = _normalized_action(getattr(intent, "action", ""))
+        parameters = _intent_parameters(intent)
+        if not _is_personal_target(target):
+            return self._failure(action, "wechat_personal_target_required", target)
+        method_name = self._ACTION_METHODS.get(action)
+        if action == "wechat.chat.search" and str(
+            parameters.get("target_type", "conversation")
+        ).casefold() in {"group", "群"}:
+            method_name = "search_group"
+        if not method_name:
+            return self._failure(action, "wechat_capability_missing", target)
+        method = getattr(self._backend, method_name, None)
+        if not callable(method):
+            return self._failure(action, "wechat_capability_missing", target)
+        try:
+            result = method(target, parameters)
+        except Exception as exc:
+            return self._failure(action, f"wechat_backend_{exc.__class__.__name__.casefold()}", target)
+        if not isinstance(result, dict):
+            return self._failure(action, "wechat_backend_result_invalid", target)
+        payload = dict(result)
+        _set_default_counters(payload)
+        payload.setdefault("target_pid", int(target.pid or 0))
+        payload.setdefault("target_process_name", target.process_name)
+        payload.setdefault("target_window_title", target.window_title)
+        verified = _action_result_verified(action, payload)
+        payload["verification"] = dict(payload.get("verification", {}) or {})
+        payload["verification"].setdefault("verified", verified)
+        if not verified:
+            return ConnectorActionResult(
+                success=False,
+                connector_id="wechat-desktop",
+                action=action,
+                action_key=_action_key(target, action, parameters),
+                payload=payload,
+                error="wechat_verification_failed",
+            )
+        return ConnectorActionResult(
+            success=True,
+            connector_id="wechat-desktop",
+            action=action,
+            action_key=_action_key(target, action, parameters),
+            payload=payload,
+        )
+
+    @staticmethod
+    def _failure(
+        action: str,
+        error: str,
+        target: ConnectorTarget,
+    ) -> ConnectorActionResult:
+        return ConnectorActionResult(
+            success=False,
+            connector_id="wechat-desktop",
+            action=action or "unknown",
+            action_key=_action_key(target, action, {}),
+            payload={
+                "target_pid": int(target.pid or 0),
+                "target_process_name": target.process_name,
+                "target_window_title": target.window_title,
+                "control_attempts": 0,
+                "window_input_attempts": 0,
+                "keyboard_input_attempts": 0,
+                "clipboard_write_attempts": 0,
+            },
+            error=error,
+        )
+
+
+class WeChatDesktopConnector(SessionConnector):
+    """Capability-backed connector for personal desktop WeChat actions."""
+
+    connector_id = "wechat-desktop"
+    route_id = "wechat-desktop-capability"
+    display_name = "Personal WeChat Desktop"
+
+    def __init__(self, *, backend: object):
+        self._executor = WeChatActionExecutor(backend=backend)
+        self._backend = backend
+
+    def supports_target(self, target: ConnectorTarget) -> bool:
+        return _is_personal_target(target)
+
+    def match_score(self, target: ConnectorTarget) -> int:
+        return 45 if self.supports_target(target) else -1
+
+    def route_ready(self, route_id: str, target: ConnectorTarget) -> bool:
+        return route_id == self.route_id and self.supports_target(target)
+
+    def read_conversation(self, target: ConnectorTarget) -> str:
+        result = self.execute_action(
+            target,
+            _Intent("wechat.chat.read"),
+        )
+        if not result.success:
+            return ""
+        return str((result.payload or {}).get("text", "") or "")
+
+    def send_message(
+        self,
+        target: ConnectorTarget,
+        message: str,
+        cooldown: float = 10.0,
+    ) -> ConnectorActionResult:
+        del cooldown
+        return ConnectorActionResult(
+            success=False,
+            connector_id=self.connector_id,
+            action="send_message",
+            payload={"control_attempts": 0},
+            error="wechat_desktop_requires_typed_intent",
+        )
+
+    def execute_action(
+        self,
+        target: ConnectorTarget,
+        intent: object,
+        cooldown: float = 10.0,
+    ) -> ConnectorActionResult:
+        del cooldown
+        return self._executor.execute(target, intent)
 
 
 def _wechat_profile(
@@ -379,4 +541,99 @@ def _window_to_dict(window: AccessibilityWindowSnapshot) -> dict[str, Any]:
     }
 
 
-__all__ = ["WeChatSurfaceObserver", "WeChatSurfaceSnapshot"]
+def _is_personal_target(target: ConnectorTarget) -> bool:
+    process = str(target.process_name or "").strip().casefold()
+    return process in _PERSONAL_PROCESSES
+
+
+def _normalized_action(value: object) -> str:
+    action = str(value or "").strip().casefold()
+    aliases = {
+        "inspect": "wechat.window.inspect",
+        "read": "wechat.chat.read",
+        "read_conversation": "wechat.chat.read",
+        "send_message": "wechat.chat.send_text",
+        "write_text": "wechat.chat.draft",
+    }
+    return aliases.get(action, action)
+
+
+def _intent_parameters(intent: object) -> dict[str, Any]:
+    parameters = getattr(intent, "parameters", {})
+    return dict(parameters) if isinstance(parameters, dict) else {}
+
+
+def _set_default_counters(payload: dict[str, Any]) -> None:
+    for key in (
+        "control_attempts",
+        "send_attempts",
+        "window_input_attempts",
+        "keyboard_input_attempts",
+        "mouse_input_attempts",
+        "clipboard_write_attempts",
+    ):
+        payload.setdefault(key, 0)
+
+
+def _action_result_verified(action: str, payload: dict[str, Any]) -> bool:
+    if payload.get("verification", {}).get("verified") is True:
+        return True
+    if action in {"wechat.window.inspect", "wechat.window.attach"}:
+        return bool(payload.get("attached") or payload.get("login_state"))
+    if action in {
+        "wechat.chat.search",
+        "wechat.contact.search",
+        "wechat.group.search",
+    }:
+        verification = payload.get("verification")
+        return bool(payload.get("candidates") is not None and (
+            isinstance(verification, dict) and verification.get("stable") is True
+        ))
+    if action in {"wechat.chat.draft"}:
+        return bool(payload.get("draft_readback_verified"))
+    if action in {"wechat.chat.read", "wechat.contact.read", "wechat.group.read"}:
+        return bool(payload.get("readback_verified") or payload.get("messages") is not None)
+    if action == "wechat.chat.open":
+        return bool(payload.get("target_verified"))
+    if action in {
+        "wechat.chat.copy",
+        "wechat.chat.quote",
+        "wechat.chat.reply",
+        "wechat.chat.forward",
+        "wechat.chat.favorite",
+        "wechat.chat.translate",
+        "wechat.chat.mark_unread",
+        "wechat.chat.pin",
+        "wechat.chat.mute",
+        "wechat.chat.archive",
+    }:
+        return bool(payload.get("readback_verified"))
+    return False
+
+
+def _action_key(
+    target: ConnectorTarget,
+    action: str,
+    parameters: dict[str, Any],
+) -> str:
+    resource = (
+        parameters.get("conversation_name")
+        or parameters.get("message_id")
+        or target.conversation_name
+        or "surface"
+    )
+    return f"{int(target.pid or 0)}:{action}:{resource}"
+
+
+class _Intent:
+    def __init__(self, action: str):
+        self.action = action
+        self.parameters: dict[str, Any] = {}
+
+
+__all__ = [
+    "WeChatActionExecutor",
+    "WeChatSurfaceObserver",
+    "WeChatSurfaceSnapshot",
+    "WeChatDesktopConnector",
+]
