@@ -73,6 +73,8 @@ class WeChatSurfaceTests(unittest.TestCase):
         self.assertEqual(snapshot.profile.control_attempts, 0)
         self.assertEqual(snapshot.control_attempts, 0)
         self.assertEqual(snapshot.login_state, "logged_in")
+        self.assertTrue(snapshot.profile.supports("wechat.window.inspect", now=NOW))
+        self.assertTrue(snapshot.profile.supports("wechat.window.attach", now=NOW))
 
     def test_observer_maps_observed_controls_to_scoped_capabilities(self):
         snapshot = WeChatSurfaceObserver(

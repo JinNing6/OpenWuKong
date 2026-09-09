@@ -477,6 +477,8 @@ def _wechat_profile(
         ttl_seconds=ttl_seconds,
     )
     grants = {name: dict(value) for name, value in base.capabilities.items()}
+    grants["wechat.window.inspect"] = _read_grant("uia-structural-observe", 90)
+    grants["wechat.window.attach"] = _read_grant("uia-window-observe", 90)
     roles = {control.role for control in controls}
     if login_state != "logged_out":
         if targets or "message_list" in roles:
