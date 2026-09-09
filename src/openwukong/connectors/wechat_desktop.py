@@ -434,6 +434,134 @@ class WeChatForegroundBackend:
         return self.send_text(target, {**parameters, "text": emoji})
 
 
+class WeChatWindowsBackend:
+    """Compose read/UIA operations with an explicitly supplied foreground fallback."""
+
+    def __init__(
+        self,
+        *,
+        uia: object | None = None,
+        foreground: object | None = None,
+    ):
+        if uia is None:
+            from openwukong.connectors.desktop_uia import DesktopUIAConnector
+
+            uia = DesktopUIAConnector()
+        self._uia = uia
+        self._foreground = foreground or WeChatForegroundBackend()
+
+    def inspect(
+        self,
+        target: ConnectorTarget,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        del parameters
+        snapshot = self._uia.probe_target(target)
+        return {
+            "attached": bool(getattr(snapshot, "pid", 0)),
+            "login_state": "unknown",
+            "snapshot": snapshot.to_dict()
+            if hasattr(snapshot, "to_dict")
+            else {},
+            "readback_verified": bool(getattr(snapshot, "pid", 0)),
+        }
+
+    def read_conversation(
+        self,
+        target: ConnectorTarget,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        del parameters
+        snapshot = self._uia.probe_target(target)
+        messages = []
+        for element in tuple(getattr(snapshot, "elements", ()) or ()):
+            text = str(
+                getattr(element, "value_preview", "")
+                or getattr(element, "name", "")
+                or ""
+            ).strip()
+            if text:
+                messages.append({"text": text})
+        return {
+            "messages": messages,
+            "text": "\n".join(item["text"] for item in messages),
+            "readback_verified": bool(messages),
+            "control_attempts": 0,
+        }
+
+    def draft_text(
+        self,
+        target: ConnectorTarget,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshot = self._uia.probe_target(target)
+        locator = _composer_locator(snapshot)
+        if not locator:
+            return {
+                "composer_found": False,
+                "draft_readback_verified": False,
+                "send_attempts": 0,
+                "control_attempts": 0,
+            }
+        from openwukong.control.fabric import ControlIntent
+
+        text = str(parameters.get("text", parameters.get("message", "")) or "")
+        result = self._uia.execute_action(
+            target,
+            ControlIntent(
+                action="set_value",
+                text=text,
+                value=text,
+                parameters=locator,
+            ),
+        )
+        payload = dict(result.payload or {})
+        return {
+            "composer_found": True,
+            "value_set": bool(payload.get("value_set", result.success)),
+            "draft_text": text,
+            "draft_readback_verified": bool(
+                result.success
+                and (
+                    payload.get("readback_verified")
+                    or payload.get("readback_text") == text
+                    or payload.get("value_set")
+                )
+            ),
+            "send_attempts": 0,
+            "control_attempts": int(payload.get("control_attempts", 0) or 0),
+            "uia_value_set_attempts": int(
+                payload.get("uia_value_set_attempts", 0) or 0
+            ),
+            "keyboard_input_attempts": int(
+                payload.get("keyboard_input_attempts", 0) or 0
+            ),
+            "clipboard_write_attempts": int(
+                payload.get("clipboard_write_attempts", 0) or 0
+            ),
+        }
+
+    def send_text(
+        self,
+        target: ConnectorTarget,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshot = self._uia.probe_target(target)
+        if _semantic_composer_and_submit(snapshot):
+            return _semantic_send_text(self._uia, target, parameters, snapshot)
+        return dict(self._foreground.send_text(target, parameters))
+
+    def send_emoji(
+        self,
+        target: ConnectorTarget,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self.send_text(
+            target,
+            {**parameters, "text": parameters.get("emoji", "")},
+        )
+
+
 class WeChatDesktopConnector(SessionConnector):
     """Capability-backed connector for personal desktop WeChat actions."""
 
@@ -848,6 +976,76 @@ def _action_result_verified(action: str, payload: dict[str, Any]) -> bool:
     }:
         return bool(payload.get("readback_verified"))
     return False
+
+
+def _composer_locator(snapshot: object) -> dict[str, str]:
+    for element in tuple(getattr(snapshot, "elements", ()) or ()):
+        control_type = str(getattr(element, "control_type", "") or "").strip()
+        patterns = {str(item) for item in (getattr(element, "patterns", ()) or ())}
+        if control_type not in {"Edit", "Document", "ComboBox"}:
+            continue
+        if not patterns.intersection({"Value", "TextEdit"}):
+            continue
+        locator: dict[str, str] = {"control_type": control_type}
+        automation_id = str(getattr(element, "automation_id", "") or "").strip()
+        name = str(getattr(element, "name", "") or "").strip()
+        if automation_id:
+            locator["automation_id"] = automation_id
+        if name:
+            locator["name"] = name
+        return locator if len(locator) > 1 else {}
+    return {}
+
+
+def _semantic_composer_and_submit(snapshot: object) -> bool:
+    composer = bool(_composer_locator(snapshot))
+    submit = False
+    for element in tuple(getattr(snapshot, "elements", ()) or ()):
+        control_type = str(getattr(element, "control_type", "") or "").strip()
+        patterns = {str(item) for item in (getattr(element, "patterns", ()) or ())}
+        if (
+            control_type in {"Button", "Hyperlink", "MenuItem", "SplitButton"}
+            and "Invoke" in patterns
+        ):
+            submit = True
+            break
+    return composer and submit
+
+
+def _semantic_send_text(
+    uia: object,
+    target: ConnectorTarget,
+    parameters: dict[str, Any],
+    snapshot: object,
+) -> dict[str, Any]:
+    del uia
+    from openwukong.control.wechat_uia_action import (
+        WeChatUiaSemanticActionSenderAdapter,
+        build_wechat_uia_semantic_action_request,
+    )
+
+    text = str(parameters.get("text", parameters.get("message", "")) or "")
+    request = build_wechat_uia_semantic_action_request(
+        target_name=str(parameters.get("target_name", "") or target.conversation_name),
+        message=text,
+        windows=(snapshot,),
+        background_screenshot_focus_stable=bool(
+            parameters.get("background_screenshot_focus_stable", False)
+        ),
+        background_screenshot_count=int(
+            parameters.get("background_screenshot_count", 0) or 0
+        ),
+        background_screenshot_success_count=int(
+            parameters.get("background_screenshot_success_count", 0) or 0
+        ),
+        required_markers=(text,) if text else (),
+    )
+    report = WeChatUiaSemanticActionSenderAdapter().send(request)
+    data = report.to_dict()
+    data["sent"] = bool(report.ok)
+    data["readback_verified"] = bool(report.ok)
+    data.setdefault("send_attempts", report.send_attempts)
+    return data
 
 
 def _action_key(

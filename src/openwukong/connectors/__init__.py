@@ -38,6 +38,7 @@ from openwukong.connectors.wechat_native_bridge import WeChatNativeBridgeConnect
 from openwukong.connectors.wechat_desktop import (
     WeChatActionExecutor,
     WeChatDesktopConnector,
+    WeChatWindowsBackend,
     WeChatSurfaceObserver,
     WeChatSurfaceSnapshot,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "WeChatNativeBridgeConnector",
     "WeChatActionExecutor",
     "WeChatDesktopConnector",
+    "WeChatWindowsBackend",
     "WeChatSurfaceObserver",
     "WeChatSurfaceSnapshot",
     "build_control_route_matrix",
