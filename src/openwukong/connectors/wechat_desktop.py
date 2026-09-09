@@ -1,0 +1,382 @@
+# -*- coding: utf-8 -*-
+"""Read-only observation of the personal Windows WeChat desktop surface."""
+
+from __future__ import annotations
+
+import dataclasses
+import re
+from collections.abc import Callable, Iterable
+from datetime import datetime, timezone
+from typing import Any
+
+from openwukong.control.surface_capabilities import (
+    SurfaceCapabilityProfile,
+    profile_from_accessibility_window,
+)
+from openwukong.control.wechat_surface import (
+    WeChatControlCandidate,
+    WeChatTargetCandidate,
+)
+from openwukong.evaluation.accessibility_probe import AccessibilityWindowSnapshot
+
+
+_PERSONAL_PROCESSES = {"weixin.exe", "wechat.exe"}
+_GENERIC_LABELS = {
+    "微信",
+    "wechat",
+    "weixin",
+    "send",
+    "发送",
+    "publish",
+    "发布",
+    "moments",
+    "朋友圈",
+    "search",
+    "搜索",
+    "attachment",
+    "附件",
+    "file",
+    "文件",
+    "type a message",
+    "输入消息",
+    "登录",
+    "login",
+}
+_LOGIN_HINTS = ("登录", "login", "扫码", "sign in")
+
+
+@dataclasses.dataclass(frozen=True)
+class WeChatSurfaceSnapshot:
+    windows: tuple[AccessibilityWindowSnapshot, ...]
+    selected_window: AccessibilityWindowSnapshot | None
+    profile: SurfaceCapabilityProfile
+    controls: tuple[WeChatControlCandidate, ...] = ()
+    targets: tuple[WeChatTargetCandidate, ...] = ()
+    login_state: str = "unknown"
+    decision: str = "personal_wechat_window_not_found"
+    control_attempts: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": "wechat-surface-snapshot",
+            "safety_mode": "read_only",
+            "decision": self.decision,
+            "login_state": self.login_state,
+            "control_attempts": self.control_attempts,
+            "windows": [_window_to_dict(window) for window in self.windows],
+            "selected_window": (
+                _window_to_dict(self.selected_window)
+                if self.selected_window is not None
+                else {}
+            ),
+            "profile": self.profile.to_dict(),
+            "controls": [control.to_dict() for control in self.controls],
+            "targets": [target.to_dict() for target in self.targets],
+        }
+
+
+class WeChatSurfaceObserver:
+    """Observe a personal WeChat window without focusing or mutating it."""
+
+    def __init__(
+        self,
+        *,
+        window_source: object | None = None,
+        ttl_seconds: float = 60.0,
+    ):
+        self._window_source = window_source
+        self._ttl_seconds = float(ttl_seconds)
+
+    def inspect(
+        self,
+        windows: Iterable[AccessibilityWindowSnapshot] | None = None,
+        *,
+        observed_at: datetime | None = None,
+    ) -> WeChatSurfaceSnapshot:
+        observed = observed_at or datetime.now(timezone.utc)
+        all_windows = tuple(windows) if windows is not None else self._read_windows()
+        personal = tuple(
+            window
+            for window in all_windows
+            if _is_personal_wechat_window(window)
+        )
+        if not personal:
+            profile = SurfaceCapabilityProfile(
+                observed_at=observed,
+                ttl_seconds=self._ttl_seconds,
+            )
+            return WeChatSurfaceSnapshot(
+                windows=all_windows,
+                selected_window=None,
+                profile=profile,
+                decision="personal_wechat_window_not_found",
+            )
+        if len(personal) > 1:
+            profile = profile_from_accessibility_window(
+                personal[0],
+                observed_at=observed,
+                ttl_seconds=self._ttl_seconds,
+            )
+            return WeChatSurfaceSnapshot(
+                windows=personal,
+                selected_window=None,
+                profile=profile,
+                decision="multiple_personal_wechat_windows",
+            )
+
+        window = personal[0]
+        controls = _control_candidates(window)
+        targets = _target_candidates(window, controls)
+        login_state = _login_state(window, controls, targets)
+        profile = _wechat_profile(
+            window,
+            controls=controls,
+            targets=targets,
+            login_state=login_state,
+            observed_at=observed,
+            ttl_seconds=self._ttl_seconds,
+        )
+        return WeChatSurfaceSnapshot(
+            windows=personal,
+            selected_window=window,
+            profile=profile,
+            controls=controls,
+            targets=targets,
+            login_state=login_state,
+            decision="surface_ready",
+        )
+
+    def _read_windows(self) -> tuple[AccessibilityWindowSnapshot, ...]:
+        source = self._window_source
+        if source is None:
+            from openwukong.evaluation.accessibility_probe import (
+                PywinautoAccessibilityObserver,
+            )
+
+            return tuple(PywinautoAccessibilityObserver().snapshot())
+        if callable(source):
+            return tuple(source())
+        snapshot = getattr(source, "snapshot", None)
+        if callable(snapshot):
+            return tuple(snapshot())
+        return tuple(source)  # type: ignore[arg-type]
+
+
+def _wechat_profile(
+    window: AccessibilityWindowSnapshot,
+    *,
+    controls: tuple[WeChatControlCandidate, ...],
+    targets: tuple[WeChatTargetCandidate, ...],
+    login_state: str,
+    observed_at: datetime,
+    ttl_seconds: float,
+) -> SurfaceCapabilityProfile:
+    base = profile_from_accessibility_window(
+        window,
+        observed_at=observed_at,
+        ttl_seconds=ttl_seconds,
+    )
+    grants = {name: dict(value) for name, value in base.capabilities.items()}
+    roles = {control.role for control in controls}
+    if login_state != "logged_out":
+        if targets or "message_list" in roles:
+            grants["wechat.chat.read"] = _read_grant("uia-structural-observe", 85)
+        if "search_input" in roles or "search" in roles:
+            grants["wechat.chat.search"] = _read_grant("uia-semantic", 80)
+        if "composer" in roles:
+            grants["wechat.chat.draft"] = _write_grant("uia-semantic", 88)
+        if "composer" in roles and "submit" in roles:
+            grants["wechat.chat.send_text"] = _write_grant("uia-semantic", 88)
+        if "attachment" in roles and "composer" in roles:
+            grants["wechat.file.send"] = _write_grant("uia-semantic", 75)
+        if any(item.target_type == "group" for item in targets):
+            grants["wechat.group.read"] = _read_grant("uia-structural-observe", 75)
+        if targets:
+            grants["wechat.contact.read"] = _read_grant("uia-structural-observe", 75)
+        if "moments_entry" in roles:
+            grants["wechat.moments.read"] = _read_grant("uia-structural-observe", 82)
+        if "moments_entry" in roles and "moments_publish" in roles:
+            grants["wechat.moments.publish"] = _write_grant("uia-semantic", 82)
+    return dataclasses.replace(
+        base,
+        surface_id=f"wechat:{window.hwnd or window.pid}",
+        session_id=f"wechat:{window.pid}:{window.hwnd}",
+        capabilities=grants,
+    )
+
+
+def _control_candidates(
+    window: AccessibilityWindowSnapshot,
+) -> tuple[WeChatControlCandidate, ...]:
+    controls: list[WeChatControlCandidate] = []
+    for element in window.elements:
+        role = _control_role(element)
+        if not role:
+            continue
+        patterns = tuple(str(item) for item in (element.patterns or ()))
+        confidence = 90 if element.automation_id or element.name else 65
+        controls.append(
+            WeChatControlCandidate(
+                role=role,
+                name=str(element.name or "").strip(),
+                automation_id=str(element.automation_id or "").strip(),
+                control_type=str(element.control_type or "").strip(),
+                patterns=patterns,
+                rect=tuple(element.rect),
+                confidence=confidence,
+                source="uia",
+                hwnd=int(window.hwnd or 0),
+            )
+        )
+    return tuple(controls)
+
+
+def _target_candidates(
+    window: AccessibilityWindowSnapshot,
+    controls: tuple[WeChatControlCandidate, ...],
+) -> tuple[WeChatTargetCandidate, ...]:
+    targets: list[WeChatTargetCandidate] = []
+    seen: set[tuple[str, str]] = set()
+    for element in window.elements:
+        name = str(element.name or "").strip()
+        if not _is_target_label(name, element.control_type):
+            continue
+        target_type = _target_type(name)
+        key = (target_type, name.casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(
+            WeChatTargetCandidate(
+                target_type=target_type,
+                display_name=name,
+                target_id=str(element.automation_id or "").strip(),
+                confidence=80 if element.automation_id else 65,
+                source="uia",
+                evidence=(f"hwnd:{int(window.hwnd or 0)}",),
+            )
+        )
+    title_name = _conversation_name_from_title(window.window_title)
+    if title_name and ("conversation", title_name.casefold()) not in seen:
+        targets.append(
+            WeChatTargetCandidate(
+                target_type="conversation",
+                display_name=title_name,
+                target_id=f"hwnd:{int(window.hwnd or 0)}",
+                confidence=70,
+                source="window_title",
+                evidence=(f"hwnd:{int(window.hwnd or 0)}",),
+            )
+        )
+    return tuple(targets)
+
+
+def _control_role(element: object) -> str:
+    control_type = str(getattr(element, "control_type", "") or "").strip()
+    name = str(getattr(element, "name", "") or "").strip().casefold()
+    patterns = {str(item) for item in (getattr(element, "patterns", ()) or ())}
+    if control_type in {"Edit", "Document", "ComboBox"} and patterns & {
+        "Value",
+        "TextEdit",
+    }:
+        if any(token in name for token in ("搜索", "search", "查找")):
+            return "search_input"
+        if any(token in name for token in ("消息", "message", "输入", "type", "composer")):
+            return "composer"
+        return "input"
+    if control_type in {"Button", "Hyperlink", "MenuItem", "SplitButton"} and "Invoke" in patterns:
+        if any(token in name for token in ("发送", "send", "submit")):
+            return "submit"
+        if any(token in name for token in ("朋友圈", "moments")):
+            return "moments_entry"
+        if any(token in name for token in ("发布", "publish", "post")):
+            return "moments_publish"
+        if any(token in name for token in ("附件", "attachment", "file", "文件", "图片")):
+            return "attachment"
+        if any(token in name for token in ("搜索", "search", "查找")):
+            return "search"
+        return "action"
+    if control_type in {"Text", "List", "ListItem", "DataItem", "Document"}:
+        if any(token in name for token in ("消息", "message", "聊天", "chat", "conversation")):
+            return "message_list"
+    return ""
+
+
+def _is_target_label(name: str, control_type: str) -> bool:
+    normalized = _normalize(name)
+    if not normalized or normalized in _GENERIC_LABELS:
+        return False
+    if any(token in normalized for token in _LOGIN_HINTS):
+        return False
+    if control_type not in {"Text", "ListItem", "DataItem", "Document"}:
+        return False
+    if len(normalized) > 80:
+        return False
+    return True
+
+
+def _target_type(name: str) -> str:
+    normalized = _normalize(name)
+    if any(token in normalized for token in ("群", "group", "群聊")):
+        return "group"
+    if any(token in normalized for token in ("公众号", "official account")):
+        return "official_account"
+    return "conversation"
+
+
+def _conversation_name_from_title(title: str) -> str:
+    value = str(title or "").strip()
+    if not value or any(token in _normalize(value) for token in _LOGIN_HINTS):
+        return ""
+    for suffix in (" - WeChat", " - 微信", " | WeChat", " | 微信"):
+        if value.casefold().endswith(suffix.casefold()):
+            value = value[: -len(suffix)].strip()
+            break
+    if _normalize(value) in _GENERIC_LABELS or len(value) > 80:
+        return ""
+    return value
+
+
+def _login_state(
+    window: AccessibilityWindowSnapshot,
+    controls: tuple[WeChatControlCandidate, ...],
+    targets: tuple[WeChatTargetCandidate, ...],
+) -> str:
+    title = _normalize(window.window_title)
+    names = " ".join(_normalize(item.name) for item in controls)
+    if any(token in f"{title} {names}" for token in _LOGIN_HINTS):
+        return "logged_out"
+    if targets or any(item.role in {"composer", "message_list"} for item in controls):
+        return "logged_in"
+    return "unknown"
+
+
+def _is_personal_wechat_window(window: object) -> bool:
+    process = str(getattr(window, "process_name", "") or "").strip().casefold()
+    return process in _PERSONAL_PROCESSES
+
+
+def _normalize(value: object) -> str:
+    return " ".join(str(value or "").strip().casefold().split())
+
+
+def _read_grant(route: str, confidence: int) -> dict[str, Any]:
+    return {"route": route, "confidence": confidence, "read_only": True}
+
+
+def _write_grant(route: str, confidence: int) -> dict[str, Any]:
+    return {"route": route, "confidence": confidence, "read_only": False}
+
+
+def _window_to_dict(window: AccessibilityWindowSnapshot) -> dict[str, Any]:
+    return {
+        "pid": int(window.pid or 0),
+        "process_name": str(window.process_name or ""),
+        "window_title": str(window.window_title or ""),
+        "class_name": str(window.class_name or ""),
+        "hwnd": int(window.hwnd or 0),
+        "element_count": len(window.elements),
+    }
+
+
+__all__ = ["WeChatSurfaceObserver", "WeChatSurfaceSnapshot"]
