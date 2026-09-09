@@ -15,6 +15,18 @@ R290 preserved the complete current working-tree version as remote baseline comm
 - Codex app operation now has a verified owned loopback app-server path using `codex app-server --listen ws://127.0.0.1:<port>`.
 - The owned Codex app-server path does not use keyboard, mouse, clipboard, UIA set-value, or foreground desktop control.
 - R290 baseline push verified that local `HEAD` and remote `origin/codex/background-safe-control-layer` both resolve to `afe317c9148f894b8d19ddb8f1f2f2934e74068a`.
+- R291 implementation checkpoint:
+  - capability-first desktop action model, fresh surface profiles, route
+    negotiation, personal-WeChat observer/resolver, WeChat action dispatcher,
+    monitoring, side-effect gates, Moments contracts, and optional Windows
+    UIA/foreground backend are implemented on top of the preserved baseline
+  - focused WeChat/Desktop regression passed 96 tests
+  - current live dry-run bound personal Weixin PID 28976, HWND 133790, title 微信,
+    found only two structural elements, no semantic composer or submit
+    controls, unresolved 文件传输助手, and zero control/input attempts
+  - remote implementation checkpoint is
+    8b90e5012c842527544cf83aa93274669880441f; rollback baseline remains
+    afe317c9148f894b8d19ddb8f1f2f2934e74068a
 
 ## Verified Facts
 

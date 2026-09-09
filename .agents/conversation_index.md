@@ -16628,3 +16628,40 @@ When a new conversation starts in this repo:
   - keep `afe317c` as the rollback baseline
   - begin the approved capability-first WeChat implementation plan from the
     current branch after the baseline has been preserved
+
+## 2026-09-09 R291 - Capability-first WeChat implementation checkpoint
+
+- implemented contracts and execution layers:
+  - versioned DesktopAction with target, effect, approval, verification,
+    typed parameters, and safe audit serialization
+  - fresh PID/HWND-bound SurfaceCapabilityProfile with generic UIA
+    normalization and zero-control observational guarantees
+  - per-action route negotiation across optional native, UIA semantic,
+    approved foreground, and blocked paths
+  - read-only personal-WeChat observer and exact or explicitly selected target
+    resolver; enterprise WeChat is excluded
+  - WeChat action dispatcher for lifecycle, navigation, reading, drafting,
+    message management, text/emoji, media/file contracts, Moments, settings,
+    monitoring, and high-risk confirmation gates
+  - optional Windows backend using existing UIA probing and audited foreground
+    OCR send probe; it is not registered as a background-native route
+  - read-only wechat-basic-operations-demo CLI for live capability reports
+- validation:
+  - focused WeChat/Desktop regression: 96 tests passed
+  - live dry-run observed personal Weixin PID 28976, HWND 133790, title 微信,
+    two structural elements, no semantic composer or submit controls,
+    unresolved 文件传输助手, and zero control/window-input/keyboard/clipboard
+    attempts
+  - full repository discovery run remains separately known to contain
+    pre-existing failures outside this checkpoint; do not treat it as a clean
+    release gate
+- remote checkpoint:
+  - origin/codex/background-safe-control-layer points to
+    8b90e5012c842527544cf83aa93274669880441f
+  - rollback baseline remains afe317c9148f894b8d19ddb8f1f2f2934e74068a
+- remaining implementation:
+  - connect the Windows backend to a live explicit foreground request for one
+    user-selected contact, then add real attachment transfer and Moments
+    verification only after target and panel locators are proven
+  - add action-level readiness reporting and separate File Explorer, browser,
+    and Office adapter plans after WeChat evidence is complete
