@@ -201,6 +201,10 @@ class WeChatActionExecutor:
         "wechat.file.send": "send_file",
         "wechat.file.download": "download_file",
         "wechat.file.open": "open_file",
+        "wechat.moments.open": "open_moments",
+        "wechat.moments.read": "read_moments",
+        "wechat.moments.draft": "draft_moment",
+        "wechat.moments.publish": "publish_moment",
     }
     _SIDE_EFFECT_ACTIONS = {
         "wechat.chat.send_text",
@@ -210,6 +214,7 @@ class WeChatActionExecutor:
         "wechat.media.send_voice",
         "wechat.file.send",
         "wechat.file.download",
+        "wechat.moments.publish",
     }
 
     def __init__(self, *, backend: object):
@@ -255,6 +260,12 @@ class WeChatActionExecutor:
                 parameters["attachment"] = _attachment_metadata(target, parameters)
             except (FileNotFoundError, PermissionError, ValueError) as exc:
                 return self._failure(action, str(exc), target)
+        if action == "wechat.moments.publish":
+            try:
+                parameters = dict(parameters)
+                parameters["media"] = _media_metadata(target, parameters)
+            except (FileNotFoundError, PermissionError, ValueError) as exc:
+                return self._failure(action, str(exc), target)
         try:
             result = method(target, parameters)
         except Exception as exc:
@@ -264,6 +275,8 @@ class WeChatActionExecutor:
         payload = dict(result)
         if "attachment" in parameters:
             payload.setdefault("attachment", dict(parameters["attachment"]))
+        if "media" in parameters:
+            payload.setdefault("media", [dict(item) for item in parameters["media"]])
         _set_default_counters(payload)
         payload.setdefault("target_pid", int(target.pid or 0))
         payload.setdefault("target_process_name", target.process_name)
@@ -308,6 +321,7 @@ class WeChatActionExecutor:
                 "keyboard_input_attempts": 0,
                 "clipboard_write_attempts": 0,
                 "send_attempts": 0,
+                "publish_attempts": 0,
             },
             error=error,
         )
@@ -649,6 +663,14 @@ def _action_result_verified(action: str, payload: dict[str, Any]) -> bool:
         )
     if action in {"wechat.chat.read", "wechat.contact.read", "wechat.group.read"}:
         return bool(payload.get("readback_verified") or payload.get("messages") is not None)
+    if action == "wechat.moments.open":
+        return bool(payload.get("moments_open") and payload.get("readback_verified"))
+    if action == "wechat.moments.read":
+        return bool(payload.get("readback_verified") or payload.get("posts") is not None)
+    if action == "wechat.moments.draft":
+        return bool(payload.get("draft_readback_verified"))
+    if action == "wechat.moments.publish":
+        return bool(payload.get("published") and payload.get("readback_verified"))
     if action == "wechat.chat.open":
         return bool(payload.get("target_verified"))
     if action in {
@@ -718,6 +740,22 @@ def _attachment_metadata(
         "size": size,
         "sha256": digest.hexdigest(),
     }
+
+
+def _media_metadata(
+    target: ConnectorTarget,
+    parameters: dict[str, Any],
+) -> list[dict[str, Any]]:
+    raw_paths = parameters.get("media_paths", ())
+    if isinstance(raw_paths, (str, bytes)) or raw_paths is None:
+        raw_paths = (raw_paths,) if raw_paths else ()
+    paths = tuple(str(item or "").strip() for item in raw_paths if str(item or "").strip())
+    if len(paths) > 9:
+        raise ValueError("wechat_moments_media_count_exceeded")
+    return [
+        _attachment_metadata(target, {**parameters, "path": path})
+        for path in paths
+    ]
 
 
 class _Intent:
