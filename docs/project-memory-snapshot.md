@@ -373,3 +373,18 @@ R290 preserved the complete current working-tree version as remote baseline comm
 - OpenClaw-Weixin evidence must stay separate from desktop WeChat evidence. A configured iLink bot channel may prove background Weixin messaging as a bot, but it must not be reported as personal desktop WeChat control or File Transfer Assistant control.
 - OpenClaw-Weixin setup plans must not be reported as executed capability. A no-send setup gate may only become `ready_for_send_probe`; a separate opt-in send/readback artifact is required before bot-channel send proof exists.
 - Desktop WeChat login does not count as OpenClaw-Weixin bot-channel account auth. Account readiness must be proven by OpenClaw-Weixin's own redacted account credential state or capability readback.
+
+## R292 WeChat implementation checkpoint
+
+- Shared DesktopAction and SurfaceCapabilityProfile contracts, capability
+  planner, personal-WeChat observer/resolver, lifecycle/read/draft/message
+  dispatcher, send/media/file contracts, Moments, monitoring, side-effect
+  gates, and optional Windows UIA/foreground backend are present.
+- Focused WeChat/Desktop regression passed 98 tests.
+- Live dry-run still finds only two structural elements in personal Weixin
+  PID 28976/HWND 133790 and cannot resolve File Transfer Assistant or a
+  semantic composer; all control and input attempts stayed at zero.
+- Full repository discovery remains non-clean at 1020 tests with 11 failures
+  and 1 error from pre-existing areas and known expectation drift.
+- Remote implementation checkpoint is fdb1a2a; rollback baseline remains
+  afe317c9148f894b8d19ddb8f1f2f2934e74068a.

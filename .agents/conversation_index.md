@@ -16665,3 +16665,29 @@ When a new conversation starts in this repo:
     verification only after target and panel locators are proven
   - add action-level readiness reporting and separate File Explorer, browser,
     and Office adapter plans after WeChat evidence is complete
+## 2026-09-09 R292 - WeChat implementation and verification checkpoint
+
+- completed implementation slice:
+  - versioned desktop action and evidence-bound surface capability contracts
+  - capability-first planner that preserves foreground versus background mode
+  - personal-WeChat observer, exact target resolver, lifecycle/navigation/read/
+    draft dispatcher, text/emoji/media/file contracts, Moments contracts,
+    receive monitor, high-risk confirmation gate, and controlled dry-run CLI
+  - optional Windows backend that combines UIA probing with the audited
+    foreground OCR send probe; no live native background backend is claimed
+- validation:
+  - focused WeChat/Desktop regression ran 98 tests and passed
+  - live dry-run bound personal Weixin PID 28976, HWND 133790, title 微信; it
+    exposed two structural elements, no semantic composer or submit controls,
+    unresolved 文件传输助手, and zero control, keyboard, mouse, clipboard, or
+    window-input attempts
+  - full repository discovery ran 1020 tests with 11 failures and 1 error;
+    failures include the known generic-desktop expectation drift and other
+    pre-existing baseline tests outside this implementation slice
+- remote state:
+  - origin/codex/background-safe-control-layer points to fdb1a2a
+  - rollback baseline remains afe317c
+- next action:
+  - obtain an explicit user-selected contact and message only when a real
+    foreground send verification is authorized; then add attachment and
+    Moments panel locators, followed by readiness-matrix integration

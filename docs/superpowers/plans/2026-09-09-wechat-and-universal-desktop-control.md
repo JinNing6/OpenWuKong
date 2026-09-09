@@ -10,6 +10,22 @@
 
 ---
 
+## Progress checkpoint (2026-09-09)
+
+- Tasks 1 through 9 are implemented and committed: action contracts,
+  capability profiles, route planning, WeChat observation and target
+  resolution, lifecycle/read/draft actions, send/media/file contracts,
+  Moments, monitoring, and side-effect gates.
+- Task 10 is partially implemented: the WeChat desktop connector is exported
+  and route-aware, but it is never considered ready without a live backend.
+- Task 11 is partially implemented: the read-only wechat-basic-operations-demo
+  CLI and optional Windows UIA/foreground backend are available; current
+  machine dry-run evidence has no semantic composer or submit control, so no
+  real send or Moments publish was run.
+- The remaining checkboxes below describe follow-up verification and
+  real-surface adapter work; they must not be marked complete from fixtures
+  alone.
+
 ## Scope and acceptance rules
 
 - The WeChat action catalog includes application/window lifecycle, navigation and search, contact/group inspection, message reading and management, text and emoji, image/media, file transfer, Moments browsing and publishing, receive monitoring, ordinary notification/display/download settings, drafts, and state restoration.
