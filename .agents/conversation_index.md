@@ -16607,3 +16607,24 @@ When a new conversation starts in this repo:
   - build Cursor native submit/readback evidence, add an Office object-model
     connector, and pursue a concrete WeChat native adapter before claiming
     broader background control
+
+## 2026-09-09 R290 - Current version pushed as remote baseline
+
+- baseline commit:
+  - `afe317c9148f894b8d19ddb8f1f2f2934e74068a`
+  - subject: `chore: snapshot current agent control baseline`
+  - contains the complete current working-tree code, tests, extension,
+    documentation, project snapshot, and prior control evidence
+- remote location:
+  - `origin/codex/background-safe-control-layer`
+  - remote ref verified to point to the same SHA as local `HEAD`
+- pre-push checks:
+  - tracked and untracked repository scan found no PEM private key, bearer
+    token, credential-field, or common provider-token matches
+  - targeted regression ran `109` tests with `107` passing and `2` retaining
+    the known generic-desktop expectation drift (`read_only` versus the old
+    `foreground_required` assertion)
+- continuation point:
+  - keep `afe317c` as the rollback baseline
+  - begin the approved capability-first WeChat implementation plan from the
+    current branch after the baseline has been preserved

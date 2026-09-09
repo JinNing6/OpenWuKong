@@ -1,10 +1,12 @@
 # OpenWukong Project Memory Snapshot
 
-Updated: 2026-06-29
+Updated: 2026-09-09
 
 ## Current Decision
 
 OpenWukong is a developer-workstation AIOS Copilot. The current control strategy is connector-first: use deterministic CLI, native bridge, DevTools, app-server, or extension transports before UIA or foreground desktop input. As of R288, WeChat is temporarily classified as an explicit foreground implementation: the validated path is desktop WeChat File Transfer Assistant foreground takeover with target verification and Python WinRT OCR readback, and it must not be counted as background-native or no-foreground execution. Tencent OpenClaw-Weixin is paused as a desktop-control route because it is a separate iLink bot/API channel, not personal desktop WeChat control; it can be revived only as a separate bot-channel messaging surface if needed.
+
+R290 preserved the complete current working-tree version as remote baseline commit `afe317c9148f894b8d19ddb8f1f2f2934e74068a` on `origin/codex/background-safe-control-layer`. The approved next implementation direction is capability-first WeChat desktop control: one shared desktop action and verification kernel, with native bridges as optional accelerators and UIA or explicitly approved foreground fallback paths.
 
 ## Runtime / Deployment State
 
@@ -12,6 +14,7 @@ OpenWukong is a developer-workstation AIOS Copilot. The current control strategy
 - Python virtual environment is used through `.venv\Scripts\python.exe`.
 - Codex app operation now has a verified owned loopback app-server path using `codex app-server --listen ws://127.0.0.1:<port>`.
 - The owned Codex app-server path does not use keyboard, mouse, clipboard, UIA set-value, or foreground desktop control.
+- R290 baseline push verified that local `HEAD` and remote `origin/codex/background-safe-control-layer` both resolve to `afe317c9148f894b8d19ddb8f1f2f2934e74068a`.
 
 ## Verified Facts
 
