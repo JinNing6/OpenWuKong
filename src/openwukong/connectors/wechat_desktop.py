@@ -387,6 +387,53 @@ class WeChatActionExecutor:
         )
 
 
+from openwukong.evaluation.wechat_send_probe import run_wechat_file_helper_send_probe
+
+
+class WeChatForegroundBackend:
+    """Optional foreground backend backed by the existing audited send probe."""
+
+    transport_mode = "foreground_desktop"
+
+    def __init__(self, *, automation: object | None = None, output_dir: str | Path = ""):
+        self._automation = automation
+        self._output_dir = str(output_dir or "")
+
+    def send_text(
+        self,
+        target: ConnectorTarget,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        message = str(parameters.get("text", parameters.get("message", "")) or "")
+        target_name = str(
+            parameters.get("target_name", "") or target.conversation_name or ""
+        ).strip()
+        report = run_wechat_file_helper_send_probe(
+            message=message,
+            target_name=target_name,
+            allow_send=True,
+            allow_external_target=True,
+            confirm_target_after_open=bool(
+                parameters.get("confirm_target_after_open", False)
+            ),
+            automation=self._automation,
+            output_dir=self._output_dir,
+            foreground_takeover_request=parameters.get("foreground_takeover_request"),
+        )
+        data = report.to_dict()
+        data["sent"] = data.get("status") == "sent"
+        data["readback_verified"] = bool(data.get("post_send_verified", False))
+        return data
+
+    def send_emoji(
+        self,
+        target: ConnectorTarget,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        emoji = str(parameters.get("emoji", "") or "")
+        return self.send_text(target, {**parameters, "text": emoji})
+
+
 class WeChatDesktopConnector(SessionConnector):
     """Capability-backed connector for personal desktop WeChat actions."""
 
@@ -880,6 +927,7 @@ class _Intent:
 
 __all__ = [
     "WeChatActionExecutor",
+    "WeChatForegroundBackend",
     "WeChatSurfaceObserver",
     "WeChatSurfaceSnapshot",
     "WeChatDesktopConnector",

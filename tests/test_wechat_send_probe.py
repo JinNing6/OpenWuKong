@@ -9,6 +9,7 @@ from openwukong.evaluation.wechat_send_probe import (
     run_wechat_file_helper_send_probe,
     verify_wechat_post_send_message_from_screenshot,
 )
+import openwukong.evaluation.wechat_send_probe as wechat_send_probe_module
 
 
 def _wechat_takeover_request() -> ForegroundTakeoverRequest:
@@ -323,6 +324,21 @@ class WeChatSendProbeTests(unittest.TestCase):
         self.assertNotIn("-EncodedCommand", source)
         self.assertNotIn("ExecutionPolicy", source)
         self.assertNotIn("_run_ocr_powershell", source)
+
+    def test_real_automation_verifies_external_target_from_ocr(self):
+        automation = wechat_send_probe_module.Win32WeChatKeyboardAutomation()
+        original = wechat_send_probe_module._windows_media_ocr_text_from_image
+        wechat_send_probe_module._windows_media_ocr_text_from_image = (
+            lambda path, timeout=20.0: {
+                "ok": True,
+                "text": "聊天 张三",
+                "method": "fake-windows-media-ocr",
+            }
+        )
+        try:
+            self.assertTrue(automation.verify_target("张三", "target.png"))
+        finally:
+            wechat_send_probe_module._windows_media_ocr_text_from_image = original
 
     def test_explicit_confirmation_override_can_unlock_send(self):
         automation = FakeWeChatKeyboardAutomation(target_verified=False)

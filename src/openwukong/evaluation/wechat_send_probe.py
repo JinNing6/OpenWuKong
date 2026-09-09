@@ -261,8 +261,16 @@ class Win32WeChatKeyboardAutomation:
         return ""
 
     def verify_target(self, target_name: str, screenshot_path: str) -> bool:
-        del target_name, screenshot_path
-        return False
+        target = str(target_name or "").strip()
+        if not target:
+            return False
+        ocr = _windows_media_ocr_text_from_image(
+            str(screenshot_path or ""),
+            timeout=self.ocr_timeout,
+        )
+        if not isinstance(ocr, dict) or not bool(ocr.get("ok", False)):
+            return False
+        return _message_seen_in_text(target, str(ocr.get("text", "") or ""))
 
     def verify_post_send_message(self, target_name: str, message: str, screenshot_path: str) -> dict:
         return verify_wechat_post_send_message_from_screenshot(

@@ -3,8 +3,12 @@ import unittest
 from pathlib import Path
 
 from openwukong.connectors.base import ConnectorTarget
-from openwukong.connectors.wechat_desktop import WeChatDesktopConnector
+from openwukong.connectors.wechat_desktop import (
+    WeChatDesktopConnector,
+    WeChatForegroundBackend,
+)
 from openwukong.control.fabric import ControlIntent
+import openwukong.connectors.wechat_desktop as wechat_desktop_module
 
 
 class FakeWeChatSendBackend:
@@ -159,6 +163,47 @@ class WeChatDesktopSendTransferTests(unittest.TestCase):
         self.assertEqual(result.error, "wechat_verification_failed")
         self.assertEqual(result.payload["send_attempts"], 1)
         self.assertEqual(len(backend.events), 1)
+
+    def test_foreground_backend_adapts_existing_probe_report(self):
+        calls = []
+
+        class FakeReport:
+            def to_dict(self):
+                return {
+                    "status": "sent",
+                    "post_send_verified": True,
+                    "send_attempts": 1,
+                    "keyboard_input_attempts": 6,
+                    "clipboard_write_attempts": 2,
+                    "foreground_restore_attempts": 1,
+                }
+
+        def fake_probe(**kwargs):
+            calls.append(kwargs)
+            return FakeReport()
+
+        original = wechat_desktop_module.run_wechat_file_helper_send_probe
+        wechat_desktop_module.run_wechat_file_helper_send_probe = fake_probe
+        try:
+            backend = WeChatForegroundBackend()
+            connector = WeChatDesktopConnector(backend=backend)
+            result = connector.execute_action(
+                self._target(Path(".")),
+                self._intent(
+                    "wechat.chat.send_text",
+                    text="hello external",
+                    target_name="李四",
+                    foreground_takeover_request={"status": "approved"},
+                ),
+            )
+        finally:
+            wechat_desktop_module.run_wechat_file_helper_send_probe = original
+
+        self.assertTrue(result.success, result.error)
+        self.assertTrue(result.payload["readback_verified"])
+        self.assertEqual(calls[0]["target_name"], "李四")
+        self.assertTrue(calls[0]["allow_external_target"])
+        self.assertTrue(calls[0]["allow_send"])
 
 
 if __name__ == "__main__":
