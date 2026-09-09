@@ -152,7 +152,7 @@ class WeChatDesktopReadNavigationTests(unittest.TestCase):
     def test_unsupported_action_is_reported_as_missing_capability(self):
         result = self.connector.execute_action(
             TARGET,
-            ControlIntent(action="wechat.account.switch"),
+            ControlIntent(action="wechat.unknown.operation"),
         )
 
         self.assertFalse(result.success)

@@ -205,6 +205,22 @@ class WeChatActionExecutor:
         "wechat.moments.read": "read_moments",
         "wechat.moments.draft": "draft_moment",
         "wechat.moments.publish": "publish_moment",
+        "wechat.window.minimize": "minimize",
+        "wechat.window.restore": "restore",
+        "wechat.window.maximize": "maximize",
+        "wechat.window.close": "close",
+        "wechat.chat.delete": "delete_message",
+        "wechat.chat.recall": "recall_message",
+        "wechat.contact.add": "add_contact",
+        "wechat.group.add_member": "add_group_member",
+        "wechat.group.remove_member": "remove_group_member",
+        "wechat.chat.bulk_forward": "bulk_forward",
+        "wechat.chat.broadcast": "broadcast",
+        "wechat.account.switch": "switch_account",
+        "wechat.auth.login": "login_authorization",
+        "wechat.security.settings": "security_settings",
+        "wechat.settings.read": "read_settings",
+        "wechat.settings.update": "update_settings",
     }
     _SIDE_EFFECT_ACTIONS = {
         "wechat.chat.send_text",
@@ -215,6 +231,33 @@ class WeChatActionExecutor:
         "wechat.file.send",
         "wechat.file.download",
         "wechat.moments.publish",
+        "wechat.window.minimize",
+        "wechat.window.restore",
+        "wechat.window.maximize",
+        "wechat.window.close",
+        "wechat.chat.delete",
+        "wechat.chat.recall",
+        "wechat.contact.add",
+        "wechat.group.add_member",
+        "wechat.group.remove_member",
+        "wechat.chat.bulk_forward",
+        "wechat.chat.broadcast",
+        "wechat.account.switch",
+        "wechat.auth.login",
+        "wechat.security.settings",
+        "wechat.settings.update",
+    }
+    _HIGH_RISK_ACTIONS = {
+        "wechat.chat.delete",
+        "wechat.chat.recall",
+        "wechat.contact.add",
+        "wechat.group.add_member",
+        "wechat.group.remove_member",
+        "wechat.chat.bulk_forward",
+        "wechat.chat.broadcast",
+        "wechat.account.switch",
+        "wechat.auth.login",
+        "wechat.security.settings",
     }
 
     def __init__(self, *, backend: object):
@@ -238,6 +281,23 @@ class WeChatActionExecutor:
                 "wechat_side_effect_confirmation_required",
                 target,
             )
+        if action in self._HIGH_RISK_ACTIONS:
+            confirmed_effect_ids = set(
+                str(item)
+                for item in (
+                    getattr(intent, "confirmed_effect_ids", ())
+                    or parameters.get("confirmed_effect_ids", ())
+                    or ()
+                )
+            )
+            if not bool(getattr(intent, "allow_blocked_side_effects", False)) or (
+                action not in confirmed_effect_ids
+            ):
+                return self._failure(
+                    action,
+                    "wechat_high_risk_confirmation_required",
+                    target,
+                )
         method_name = self._ACTION_METHODS.get(action)
         if action == "wechat.chat.search" and str(
             parameters.get("target_type", "conversation")
@@ -671,6 +731,37 @@ def _action_result_verified(action: str, payload: dict[str, Any]) -> bool:
         return bool(payload.get("draft_readback_verified"))
     if action == "wechat.moments.publish":
         return bool(payload.get("published") and payload.get("readback_verified"))
+    if action in {
+        "wechat.window.minimize",
+        "wechat.window.restore",
+        "wechat.window.maximize",
+        "wechat.window.close",
+    }:
+        return bool(
+            payload.get("readback_verified")
+            and any(payload.get(key) for key in (
+                "minimized",
+                "restored",
+                "maximized",
+                "closed",
+            ))
+        )
+    if action in {
+        "wechat.chat.delete",
+        "wechat.chat.recall",
+        "wechat.contact.add",
+        "wechat.group.add_member",
+        "wechat.group.remove_member",
+        "wechat.chat.bulk_forward",
+        "wechat.chat.broadcast",
+        "wechat.account.switch",
+        "wechat.auth.login",
+        "wechat.security.settings",
+        "wechat.settings.update",
+    }:
+        return bool(payload.get("readback_verified"))
+    if action == "wechat.settings.read":
+        return bool(payload.get("readback_verified") or payload.get("settings") is not None)
     if action == "wechat.chat.open":
         return bool(payload.get("target_verified"))
     if action in {
