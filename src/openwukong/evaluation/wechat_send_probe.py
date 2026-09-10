@@ -22,6 +22,11 @@ from openwukong.control.foreground_takeover import (
     ForegroundTakeoverRequest,
     validate_foreground_takeover_request,
 )
+from openwukong.control.wechat_visual_evidence import (
+    find_chat_header,
+    recognize_frame,
+    verify_chat_send,
+)
 
 
 _FILE_HELPER_TARGET = "文件传输助手"
@@ -40,6 +45,8 @@ class WeChatSendProbeReport:
     clipboard_write_attempts: int = 0
     clipboard_restore_attempts: int = 0
     foreground_restore_attempts: int = 0
+    foreground_restored: bool | None = None
+    final_foreground_hwnd: int = 0
     target_verified: bool = False
     window_hwnd: int = 0
     previous_foreground_hwnd: int = 0
@@ -81,6 +88,8 @@ class WeChatSendProbeReport:
             "clipboard_write_attempts": self.clipboard_write_attempts,
             "clipboard_restore_attempts": self.clipboard_restore_attempts,
             "foreground_restore_attempts": self.foreground_restore_attempts,
+            "foreground_restored": self.foreground_restored,
+            "final_foreground_hwnd": self.final_foreground_hwnd,
             "target_verified": self.target_verified,
             "window_hwnd": self.window_hwnd,
             "previous_foreground_hwnd": self.previous_foreground_hwnd,
@@ -119,6 +128,7 @@ class FakeWeChatKeyboardAutomation:
 
     def set_foreground_window(self, hwnd: int) -> bool:
         self.events.append(f"set_foreground:{int(hwnd)}")
+        self.foreground_hwnd = int(hwnd)
         return True
 
     def hotkey(self, *keys: str) -> None:
@@ -199,17 +209,24 @@ class Win32WeChatKeyboardAutomation:
     def set_foreground_window(self, hwnd: int) -> bool:
         import ctypes
 
-        ok = bool(ctypes.windll.user32.SetForegroundWindow(int(hwnd)))
-        if self._window is not None:
+        requested = int(hwnd)
+        ctypes.windll.user32.SetForegroundWindow(requested)
+        if self._window is not None and int(self._window.handle) == requested:
             try:
                 self._window.set_focus()
-                ok = True
             except Exception:
                 pass
         self.sleep(self.action_delay)
-        return ok
+        return int(ctypes.windll.user32.GetForegroundWindow()) == requested
+
+    def _assert_bound_foreground(self) -> None:
+        if self._window is None:
+            raise RuntimeError("wechat_window_not_bound")
+        if self.get_foreground_window() != int(self._window.handle):
+            raise RuntimeError("wechat_foreground_changed_before_input")
 
     def hotkey(self, *keys: str) -> None:
+        self._assert_bound_foreground()
         from pywinauto.keyboard import send_keys
 
         if tuple(key.lower() for key in keys) == ("ctrl", "f"):
@@ -219,12 +236,14 @@ class Win32WeChatKeyboardAutomation:
         self.sleep(self.action_delay)
 
     def select_all(self) -> None:
+        self._assert_bound_foreground()
         from pywinauto.keyboard import send_keys
 
         send_keys("^a")
         self.sleep(self.action_delay)
 
     def paste_text(self, text: str) -> None:
+        self._assert_bound_foreground()
         import pyperclip
         from pywinauto.keyboard import send_keys
 
@@ -235,10 +254,12 @@ class Win32WeChatKeyboardAutomation:
                 self._saved_clipboard = ""
         pyperclip.copy(text)
         self.sleep(0.1)
+        self._assert_bound_foreground()
         send_keys("^v")
         self.sleep(self.action_delay)
 
     def press(self, key: str) -> None:
+        self._assert_bound_foreground()
         from pywinauto.keyboard import send_keys
 
         if key.lower() != "enter":
@@ -264,21 +285,29 @@ class Win32WeChatKeyboardAutomation:
         target = str(target_name or "").strip()
         if not target:
             return False
-        ocr = _windows_media_ocr_text_from_image(
-            str(screenshot_path or ""),
-            timeout=self.ocr_timeout,
-        )
-        if not isinstance(ocr, dict) or not bool(ocr.get("ok", False)):
+        try:
+            frame = recognize_frame(str(screenshot_path or ""), timeout=self.ocr_timeout)
+            evidence = find_chat_header(frame, target)
+        except Exception:
             return False
-        return _message_seen_in_text(target, str(ocr.get("text", "") or ""))
+        return bool(evidence.get("verified", False))
 
     def verify_post_send_message(self, target_name: str, message: str, screenshot_path: str) -> dict:
-        return verify_wechat_post_send_message_from_screenshot(
-            target_name=target_name,
-            message=message,
-            screenshot_path=screenshot_path,
-            ocr_timeout=self.ocr_timeout,
-        )
+        try:
+            frame = recognize_frame(str(screenshot_path or ""), timeout=self.ocr_timeout)
+            return verify_chat_send(
+                screenshot_path,
+                frame,
+                target_name=target_name,
+                message=message,
+            )
+        except Exception as exc:
+            return {
+                "verified": False,
+                "method": "positioned-chat-history-readback",
+                "target_name": target_name,
+                "error": f"positioned_ocr_error:{exc.__class__.__name__}",
+            }
 
     def restore_clipboard(self) -> None:
         if self._saved_clipboard is None:
@@ -374,6 +403,8 @@ def run_wechat_file_helper_send_probe(
     clipboard_writes = 0
     clipboard_restores = 0
     foreground_restores = 0
+    restore_fields: dict = {}
+    send_attempts = 0
     window_hwnd = 0
     previous_hwnd = 0
     screenshot = ""
@@ -382,7 +413,8 @@ def run_wechat_file_helper_send_probe(
         window_hwnd = int(active.find_wechat_window())
         previous_hwnd = int(active.get_foreground_window())
         phases.append({"phase": "bind_window", "status": "ok", "window_hwnd": window_hwnd})
-        active.set_foreground_window(window_hwnd)
+        if not active.set_foreground_window(window_hwnd):
+            raise RuntimeError("wechat_foreground_activation_failed")
         active.hotkey("ctrl", "f")
         keyboard_inputs += 1
         active.select_all()
@@ -407,7 +439,7 @@ def run_wechat_file_helper_send_probe(
         if not target_verified:
             active.restore_clipboard()
             clipboard_restores += 1
-            _restore_foreground(active, previous_hwnd)
+            restore_fields = _restore_foreground(active, previous_hwnd)
             foreground_restores += int(previous_hwnd > 0)
             phases.append({"phase": "restore_state", "status": "ok"})
             return _persist_report(
@@ -421,6 +453,7 @@ def run_wechat_file_helper_send_probe(
                 clipboard_write_attempts=clipboard_writes,
                 clipboard_restore_attempts=clipboard_restores,
                 foreground_restore_attempts=foreground_restores,
+                **restore_fields,
                 target_verified=False,
                 window_hwnd=window_hwnd,
                 previous_foreground_hwnd=previous_hwnd,
@@ -432,6 +465,7 @@ def run_wechat_file_helper_send_probe(
         active.paste_text(text)
         keyboard_inputs += 1
         clipboard_writes += 1
+        send_attempts = 1
         active.press("enter")
         keyboard_inputs += 1
         active.sleep(0.8)
@@ -467,7 +501,7 @@ def run_wechat_file_helper_send_probe(
         )
         active.restore_clipboard()
         clipboard_restores += 1
-        _restore_foreground(active, previous_hwnd)
+        restore_fields = _restore_foreground(active, previous_hwnd)
         foreground_restores += int(previous_hwnd > 0)
         phases.append({"phase": "restore_state", "status": "ok"})
         return _persist_report(
@@ -483,6 +517,7 @@ def run_wechat_file_helper_send_probe(
             clipboard_write_attempts=clipboard_writes,
             clipboard_restore_attempts=clipboard_restores,
             foreground_restore_attempts=foreground_restores,
+            **restore_fields,
             target_verified=True,
             window_hwnd=window_hwnd,
             previous_foreground_hwnd=previous_hwnd,
@@ -504,7 +539,7 @@ def run_wechat_file_helper_send_probe(
             pass
         if previous_hwnd:
             try:
-                _restore_foreground(active, previous_hwnd)
+                restore_fields = _restore_foreground(active, previous_hwnd)
                 foreground_restores += 1
             except Exception:
                 pass
@@ -516,10 +551,12 @@ def run_wechat_file_helper_send_probe(
             target_name=target,
             message=text,
             allow_send=True,
+            send_attempts=send_attempts,
             keyboard_input_attempts=keyboard_inputs,
             clipboard_write_attempts=clipboard_writes,
             clipboard_restore_attempts=clipboard_restores,
             foreground_restore_attempts=foreground_restores,
+            **restore_fields,
             window_hwnd=window_hwnd,
             previous_foreground_hwnd=previous_hwnd,
             pre_send_screenshot_path=screenshot,
@@ -530,10 +567,15 @@ def run_wechat_file_helper_send_probe(
         )
 
 
-def _restore_foreground(active: object, hwnd: int) -> None:
+def _restore_foreground(active: object, hwnd: int) -> dict:
     if int(hwnd or 0) <= 0:
-        return
+        return {"foreground_restored": None, "final_foreground_hwnd": 0}
     active.set_foreground_window(int(hwnd))
+    final_hwnd = int(active.get_foreground_window() or 0)
+    return {
+        "foreground_restored": final_hwnd == int(hwnd),
+        "final_foreground_hwnd": final_hwnd,
+    }
 
 
 def _capture_bound_screenshot(active: object, hwnd: int, output_path: Path) -> str:

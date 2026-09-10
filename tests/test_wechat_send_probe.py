@@ -3,15 +3,13 @@ import unittest
 from pathlib import Path
 
 import openwukong.evaluation.wechat_send_probe as wechat_send_probe_module
+from openwukong.control.wechat_visual_evidence import OcrFrame, OcrLine
 from openwukong.control.foreground_takeover import ForegroundTakeoverRequest
 from openwukong.evaluation.wechat_send_probe import (
     FakeWeChatKeyboardAutomation,
     run_wechat_file_helper_send_probe,
     verify_wechat_post_send_message_from_screenshot,
 )
-import openwukong.evaluation.wechat_send_probe as wechat_send_probe_module
-
-
 def _wechat_takeover_request() -> ForegroundTakeoverRequest:
     return ForegroundTakeoverRequest(
         status="approval_required",
@@ -226,6 +224,7 @@ class WeChatSendProbeTests(unittest.TestCase):
                     "background_screenshot:1001",
                     "restore_clipboard",
                     "set_foreground:9001",
+                    "get_foreground",
                 ],
             )
 
@@ -327,18 +326,19 @@ class WeChatSendProbeTests(unittest.TestCase):
 
     def test_real_automation_verifies_external_target_from_ocr(self):
         automation = wechat_send_probe_module.Win32WeChatKeyboardAutomation()
-        original = wechat_send_probe_module._windows_media_ocr_text_from_image
-        wechat_send_probe_module._windows_media_ocr_text_from_image = (
-            lambda path, timeout=20.0: {
-                "ok": True,
-                "text": "聊天 张三",
-                "method": "fake-windows-media-ocr",
-            }
+        original = wechat_send_probe_module.recognize_frame
+        wechat_send_probe_module.recognize_frame = lambda path, timeout=20.0: OcrFrame(
+            width=900,
+            height=650,
+            lines=(
+                OcrLine("搜索", (40, 50, 120, 74)),
+                OcrLine("张三", (380, 50, 440, 74)),
+            ),
         )
         try:
             self.assertTrue(automation.verify_target("张三", "target.png"))
         finally:
-            wechat_send_probe_module._windows_media_ocr_text_from_image = original
+            wechat_send_probe_module.recognize_frame = original
 
     def test_explicit_confirmation_override_can_unlock_send(self):
         automation = FakeWeChatKeyboardAutomation(target_verified=False)

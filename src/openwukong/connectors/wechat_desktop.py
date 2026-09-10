@@ -387,7 +387,13 @@ class WeChatActionExecutor:
         )
 
 
-from openwukong.evaluation.wechat_send_probe import run_wechat_file_helper_send_probe
+def run_wechat_file_helper_send_probe(*args, **kwargs):
+    """Lazy import to keep the connector/probe modules acyclic."""
+    from openwukong.evaluation.wechat_send_probe import (
+        run_wechat_file_helper_send_probe as implementation,
+    )
+
+    return implementation(*args, **kwargs)
 
 
 class WeChatForegroundBackend:
