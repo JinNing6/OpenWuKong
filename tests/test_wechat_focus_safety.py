@@ -44,6 +44,17 @@ class WeChatFocusSafetyTests(unittest.TestCase):
         with patch.object(ctypes, "windll", SimpleNamespace(user32=user32), create=True):
             self.assertFalse(automation.set_foreground_window(1001))
 
+    def test_screenshot_refuses_covered_window_instead_of_capturing_foreground_app(self):
+        automation = Win32WeChatKeyboardAutomation(action_delay=0)
+        automation._window = SimpleNamespace(
+            handle=1001,
+            capture_as_image=lambda: SimpleNamespace(save=lambda _path: None),
+        )
+        with patch.object(automation, "get_foreground_window", return_value=9001):
+            with tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(RuntimeError, "screenshot_target_not_foreground"):
+                    automation.screenshot(Path(directory) / "covered.png")
+
     def test_failed_focus_prevents_search_or_paste(self):
         class FailedFocus(FakeWeChatKeyboardAutomation):
             def set_foreground_window(self, hwnd):

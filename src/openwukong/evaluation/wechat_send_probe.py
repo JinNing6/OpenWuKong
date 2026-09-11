@@ -271,6 +271,11 @@ class Win32WeChatKeyboardAutomation:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if self._window is None:
             raise RuntimeError("wechat_window_not_bound")
+        window_hwnd = int(self._window.handle)
+        if self.get_foreground_window() != window_hwnd:
+            raise RuntimeError("screenshot_target_not_foreground")
+        if _capture_hwnd_with_print_window(window_hwnd, output_path):
+            return str(output_path)
         image = self._window.capture_as_image()
         image.save(output_path)
         return str(output_path)
