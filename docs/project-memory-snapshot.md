@@ -403,3 +403,24 @@ R290 preserved the complete current working-tree version as remote baseline comm
 - Boundary: this is explicit foreground text-send evidence only. It does not
   promote WeChat to background-native readiness and does not prove attachment,
   Moments, receive-monitor, or arbitrary-contact coverage.
+
+## R294 WeChat attachment and Moments foreground paths
+
+- Added an explicit File Transfer Assistant attachment probe with workspace
+  root containment, file size/SHA-256 metadata, CF_HDROP clipboard restore,
+  bound-window capture, and no-retry side-effect reporting.
+- Added positioned WinRT OCR evidence for Moments surface, publish panel, and
+  post-publish body readback. The isolated runtime now declares
+  `winrt-Windows.Foundation.Collections` alongside the other WinRT OCR
+  packages; `pip check` passed during setup.
+- Added `run_wechat_moments_text_publish_probe` and wired
+  `WeChatWindowsBackend.publish_moment`. The probe requires explicit publish
+  opt-in, a typed `publish_moments` foreground takeover request, relative
+  coordinates for the three UI steps, one publish attempt, and state restore.
+- Focused validation after this slice: 95 tests passed; compileall and
+  `git diff --check` passed.
+- Live attachment screenshot showed the expected attachment card, while the
+  machine report stayed `unverified` because composer-boundary OCR failed.
+  No real Moments post was executed in this checkpoint; therefore the code
+  path is implemented but live Moments publish/readback remains unverified.
+- Remote checkpoint: `b3207c9`; rollback baseline remains `afe317c9`.

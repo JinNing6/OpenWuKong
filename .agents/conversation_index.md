@@ -16711,3 +16711,33 @@ When a new conversation starts in this repo:
     Assistant, not background-native WeChat control or all-contact/media/
     Moments coverage
   - no payment, red-packet, or transfer action was involved
+
+## 2026-09-11 R294 - WeChat attachment and Moments foreground paths
+
+- completed implementation slice:
+  - explicit file-attachment probe for the personal WeChat File Transfer
+    Assistant with workspace-root and size/hash checks, CF_HDROP clipboard
+    handling, target-bound capture, and state restoration
+  - positioned WinRT OCR and target-window focus checks are used for send,
+    attachment, and Moments evidence; WinRT Foundation.Collections is part of
+    the isolated runtime dependency set
+  - explicit text Moments publish probe now covers entering 朋友圈, opening the
+    publish panel, pasting text, selecting visibility, publishing once, bound
+    readback, and clipboard/foreground restoration
+  - WeChatWindowsBackend.publish_moment is wired to the probe while keeping the
+    route foreground-only and requiring the typed side-effect confirmation
+- validation:
+  - focused WeChat/Desktop suite ran 95 tests and passed
+  - compileall and git diff --check passed
+  - attachment live test showed the sent attachment card in the File Transfer
+    Assistant screenshot, but its automated OCR report remained unverified due
+    to composer-boundary detection; this is diagnostic evidence, not a clean
+    machine-verified attachment-readback claim
+  - no real Moments post was performed in this checkpoint because the probe
+    requires an explicit body, visibility, and publish opt-in at execution time
+- remote checkpoint:
+  - origin/codex/background-safe-control-layer points to b3207c9
+  - rollback baseline remains afe317c9148f894b8d19ddb8f1f2f2934e74068a
+- next action:
+  - continue the shared desktop kernel with File Explorer and then browser and
+    Office adapters; keep real Moments publishing opt-in and foreground-only
