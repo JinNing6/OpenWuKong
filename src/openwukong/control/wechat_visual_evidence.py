@@ -161,6 +161,54 @@ def verify_chat_send(
     }
 
 
+def verify_chat_attachment(
+    image_path: str | Path,
+    frame: OcrFrame,
+    *,
+    target_name: str,
+    filename: str,
+) -> dict:
+    """Verify an attachment filename in the active chat history region."""
+    header = find_chat_header(frame, target_name)
+    result = {
+        "verified": False,
+        "target_verified": header["verified"],
+        "method": "positioned-chat-attachment-readback",
+        "ocr_method": frame.source,
+        "layout_verified": False,
+        "header_rect": header["header_rect"],
+        "composer_rect": [],
+        "normalized_filename_matched": False,
+        "filename_sha256": hashlib.sha256(filename.encode("utf-8")).hexdigest(),
+    }
+    if not header["verified"]:
+        return {**result, "error": header["error"]}
+    path = Path(image_path)
+    if not path.is_file():
+        return {**result, "error": "screenshot_missing"}
+    composer = _composer_rectangle(path, frame, header)
+    if not composer:
+        return {**result, "error": "composer_boundary_not_verified"}
+    left = composer[0]
+    top = header["header_rect"][3] + 10
+    bottom = composer[1]
+    history = (
+        item for item in frame.lines
+        if item.rect[0] >= left and item.rect[1] >= top and item.rect[3] < bottom
+    )
+    observed = "".join(_normalize(item.text) for item in history)
+    expected = _normalize(filename)
+    matched = bool(expected and expected in observed)
+    return {
+        **result,
+        "verified": matched,
+        "layout_verified": True,
+        "composer_rect": composer,
+        "normalized_filename_matched": matched,
+        "error": "" if matched else "attachment_not_in_chat_history",
+    }
+
+
 async def recognize_frame_async(image_path: str | Path) -> OcrFrame:
     """Read WinRT line/word rectangles while retaining their source coordinates."""
     from winrt.windows.graphics.imaging import BitmapDecoder

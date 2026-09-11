@@ -4,7 +4,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 from openwukong.control.wechat_visual_evidence import (
-    OcrFrame, OcrLine, find_chat_header, verify_chat_send,
+    OcrFrame, OcrLine, find_chat_header, verify_chat_attachment, verify_chat_send,
 )
 
 
@@ -67,6 +67,28 @@ class WeChatVisualEvidenceTests(unittest.TestCase):
         self.assertFalse(draft["verified"])
         self.assertFalse(sidebar["verified"])
         self.assertNotIn("ocr_text_preview", good)
+
+    def test_attachment_filename_must_be_in_chat_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frame.png"
+            image = Image.new("RGB", (900, 650), "white")
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((360, 480, 890, 640), outline=(215, 215, 215), width=2)
+            image.save(path)
+            common = (
+                line("搜索", 40, 50), line("文件传输助手", 380, 50, 190),
+                line("发送", 835, 605, 45),
+            )
+            good = verify_chat_attachment(
+                path, frame(*common, line("report.pdf", 580, 350, 150)),
+                target_name="文件传输助手", filename="report.pdf",
+            )
+            composer = verify_chat_attachment(
+                path, frame(*common, line("report.pdf", 400, 510, 150)),
+                target_name="文件传输助手", filename="report.pdf",
+            )
+        self.assertTrue(good["verified"], good)
+        self.assertFalse(composer["verified"])
 
 
 if __name__ == "__main__":

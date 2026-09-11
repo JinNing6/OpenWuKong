@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from openwukong.control.foreground_takeover import ForegroundTakeoverRequest
+from openwukong.control.windows_file_clipboard import ClipboardTextSnapshot
 from openwukong.evaluation.wechat_send_probe import (
     FakeWeChatKeyboardAutomation,
     Win32WeChatKeyboardAutomation,
@@ -96,6 +97,36 @@ class WeChatFocusSafetyTests(unittest.TestCase):
             )
         self.assertEqual(report.status, "failed")
         self.assertEqual(report.send_attempts, 1)
+
+    def test_file_paste_captures_and_restores_text_clipboard(self):
+        class Clipboard:
+            def __init__(self):
+                self.events = []
+
+            def capture_text(self):
+                self.events.append("capture")
+                return ClipboardTextSnapshot("old clipboard")
+
+            def set_files(self, paths):
+                self.events.append(("set_files", tuple(paths)))
+
+            def restore_text(self, snapshot):
+                self.events.append(("restore", snapshot.text))
+
+        clipboard = Clipboard()
+        automation = Win32WeChatKeyboardAutomation(
+            action_delay=0,
+            file_clipboard=clipboard,
+        )
+        automation._window = SimpleNamespace(handle=1001)
+        with patch.object(automation, "get_foreground_window", return_value=1001):
+            with patch("pywinauto.keyboard.send_keys") as send_keys:
+                automation.paste_files(["C:/approved/report.txt"])
+                automation.restore_clipboard()
+        self.assertEqual(clipboard.events[0], "capture")
+        self.assertEqual(clipboard.events[1][0], "set_files")
+        self.assertEqual(clipboard.events[-1], ("restore", "old clipboard"))
+        send_keys.assert_called_once_with("^v")
 
 
 if __name__ == "__main__":

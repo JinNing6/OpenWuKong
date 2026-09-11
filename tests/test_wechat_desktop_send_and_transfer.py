@@ -205,6 +205,48 @@ class WeChatDesktopSendTransferTests(unittest.TestCase):
         self.assertTrue(calls[0]["allow_external_target"])
         self.assertTrue(calls[0]["allow_send"])
 
+    def test_foreground_backend_adapts_attachment_probe_report(self):
+        calls = []
+
+        class FakeReport:
+            def to_dict(self):
+                return {
+                    "status": "sent",
+                    "post_send_verified": True,
+                    "send_attempts": 1,
+                    "file_name": "report.txt",
+                }
+
+        def fake_probe(**kwargs):
+            calls.append(kwargs)
+            return FakeReport()
+
+        original = wechat_desktop_module.run_wechat_file_helper_attachment_probe
+        wechat_desktop_module.run_wechat_file_helper_attachment_probe = fake_probe
+        try:
+            with tempfile.TemporaryDirectory() as root_name:
+                root = Path(root_name)
+                attachment = root / "report.txt"
+                attachment.write_text("file", encoding="utf-8")
+                backend = WeChatForegroundBackend()
+                connector = WeChatDesktopConnector(backend=backend)
+                result = connector.execute_action(
+                    self._target(root),
+                    self._intent(
+                        "wechat.file.send",
+                        path=str(attachment),
+                        approved_root=str(root),
+                        foreground_takeover_request={"status": "approved"},
+                    ),
+                )
+        finally:
+            wechat_desktop_module.run_wechat_file_helper_attachment_probe = original
+
+        self.assertTrue(result.success, result.error)
+        self.assertTrue(result.payload["readback_verified"])
+        self.assertEqual(calls[0]["target_name"], "张三")
+        self.assertTrue(calls[0]["allow_send"])
+
 
 if __name__ == "__main__":
     unittest.main()

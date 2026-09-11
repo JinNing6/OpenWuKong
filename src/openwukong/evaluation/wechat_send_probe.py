@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import hashlib
 import json
 import sys
 import threading
@@ -105,6 +106,7 @@ class WeChatSendProbeReport:
             "foreground_takeover_validated": self.foreground_takeover_validated,
             "foreground_takeover_validation": dict(self.foreground_takeover_validation),
             "foreground_takeover_request": dict(self.foreground_takeover_request),
+            "foreground_takeover_request": dict(self.foreground_takeover_request),
             "phases": [dict(phase) for phase in self.phases],
             "error": self.error,
             "elapsed_ms": round(self.elapsed_ms, 3),
@@ -168,10 +170,22 @@ class FakeWeChatKeyboardAutomation:
 
 
 class Win32WeChatKeyboardAutomation:
-    def __init__(self, *, action_delay: float = 0.35, ocr_timeout: float = 20.0):
+    def __init__(
+        self,
+        *,
+        action_delay: float = 0.35,
+        ocr_timeout: float = 20.0,
+        file_clipboard: object | None = None,
+    ):
         self.action_delay = action_delay
         self.ocr_timeout = ocr_timeout
         self._saved_clipboard: str | None = None
+        if file_clipboard is None:
+            from openwukong.control.windows_file_clipboard import Win32FileClipboard
+
+            file_clipboard = Win32FileClipboard()
+        self._file_clipboard = file_clipboard
+        self._saved_file_clipboard = None
         self._window = None
 
     def find_wechat_window(self) -> int:
@@ -258,6 +272,17 @@ class Win32WeChatKeyboardAutomation:
         send_keys("^v")
         self.sleep(self.action_delay)
 
+    def paste_files(self, paths: list[str] | tuple[str, ...]) -> None:
+        self._assert_bound_foreground()
+        snapshot = self._file_clipboard.capture_text()
+        self._saved_file_clipboard = snapshot
+        self._file_clipboard.set_files(paths)
+        self._assert_bound_foreground()
+        from pywinauto.keyboard import send_keys
+
+        send_keys("^v")
+        self.sleep(self.action_delay)
+
     def press(self, key: str) -> None:
         self._assert_bound_foreground()
         from pywinauto.keyboard import send_keys
@@ -314,15 +339,44 @@ class Win32WeChatKeyboardAutomation:
                 "error": f"positioned_ocr_error:{exc.__class__.__name__}",
             }
 
-    def restore_clipboard(self) -> None:
-        if self._saved_clipboard is None:
-            return
+    def verify_post_send_attachment(
+        self,
+        target_name: str,
+        filename: str,
+        screenshot_path: str,
+    ) -> dict:
         try:
-            import pyperclip
+            from openwukong.control.wechat_visual_evidence import verify_chat_attachment
 
-            pyperclip.copy(self._saved_clipboard)
-        finally:
-            self._saved_clipboard = None
+            frame = recognize_frame(str(screenshot_path or ""), timeout=self.ocr_timeout)
+            return verify_chat_attachment(
+                screenshot_path,
+                frame,
+                target_name=target_name,
+                filename=filename,
+            )
+        except Exception as exc:
+            return {
+                "verified": False,
+                "method": "positioned-chat-attachment-readback",
+                "target_name": target_name,
+                "filename": filename,
+                "error": f"positioned_ocr_error:{exc.__class__.__name__}",
+            }
+
+    def restore_clipboard(self) -> None:
+        if self._saved_clipboard is not None:
+            try:
+                import pyperclip
+
+                pyperclip.copy(self._saved_clipboard)
+            finally:
+                self._saved_clipboard = None
+        if self._saved_file_clipboard is not None:
+            try:
+                self._file_clipboard.restore_text(self._saved_file_clipboard)
+            finally:
+                self._saved_file_clipboard = None
 
     def sleep(self, seconds: float) -> None:
         time.sleep(max(0.0, float(seconds)))
@@ -572,6 +626,291 @@ def run_wechat_file_helper_send_probe(
         )
 
 
+def run_wechat_file_helper_attachment_probe(
+    *,
+    file_path: str | Path,
+    authorized_root: str | Path,
+    target_name: str = _FILE_HELPER_TARGET,
+    allow_send: bool = False,
+    automation: object | None = None,
+    output_dir: str | Path = "",
+    foreground_takeover_request: ForegroundTakeoverRequest | dict | None = None,
+    max_file_size: int = 100 * 1024 * 1024,
+):
+    started = time.perf_counter()
+    target = str(target_name or "").strip()
+    path = Path(str(file_path or "")).expanduser().resolve()
+    root_text = str(authorized_root or "").strip()
+    root = Path(root_text).expanduser().resolve()
+    try:
+        file_size = path.stat().st_size
+    except OSError:
+        file_size = 0
+    file_hash = ""
+    if path.is_file():
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        file_hash = digest.hexdigest()
+
+    def build(status: str, **kwargs):
+        report = WeChatAttachmentSendReport(
+            status=status,
+            target_name=target,
+            file_name=path.name,
+            file_size=file_size,
+            file_sha256=file_hash,
+            allow_send=allow_send,
+            elapsed_ms=(time.perf_counter() - started) * 1000,
+            **kwargs,
+        )
+        artifact = str(report.artifact_path or "")
+        if artifact:
+            artifact_path = Path(artifact)
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text(
+                json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        return report
+
+    if not allow_send:
+        return build("blocked_requires_explicit_opt_in")
+    if target != _FILE_HELPER_TARGET:
+        return build("blocked_external_target_requires_explicit_permission")
+    if not root_text:
+        return build("blocked_authorized_root_required")
+    if not path.is_file():
+        return build("blocked_file_not_found")
+    if file_size > max_file_size:
+        return build("blocked_file_too_large")
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return build("blocked_file_outside_authorized_root")
+
+    validation = validate_foreground_takeover_request(
+        foreground_takeover_request,
+        action="send_file",
+        target_process_names=("weixin.exe", "wechat.exe"),
+        selected_transport="foreground-keyboard-clipboard",
+    )
+    takeover_fields = _takeover_report_fields(validation)
+    if not validation.valid:
+        return build(
+            "blocked_foreground_takeover_request_required"
+            if validation.decision == "missing_foreground_takeover_request"
+            else "blocked_foreground_takeover_request_invalid",
+            error=validation.decision,
+            **takeover_fields,
+        )
+
+    active = automation or Win32WeChatKeyboardAutomation()
+    run_root = Path(
+        output_dir
+        or Path("logs") / "runtime" / "wechat-file-helper-attachment-send"
+    ).resolve()
+    pre_path = run_root / "pre_send_target.png"
+    post_path = run_root / "post_send_verify.png"
+    artifact_path = run_root / "report.json"
+    phases: list[dict] = []
+    keyboard_inputs = 0
+    clipboard_writes = 0
+    clipboard_restores = 0
+    foreground_restores = 0
+    send_attempts = 0
+    restore_fields: dict = {}
+    window_hwnd = 0
+    previous_hwnd = 0
+    try:
+        window_hwnd = int(active.find_wechat_window())
+        previous_hwnd = int(active.get_foreground_window())
+        phases.append(
+            {"phase": "bind_window", "status": "ok", "window_hwnd": window_hwnd}
+        )
+        if not active.set_foreground_window(window_hwnd):
+            raise RuntimeError("wechat_foreground_activation_failed")
+        active.hotkey("ctrl", "f")
+        keyboard_inputs += 1
+        active.select_all()
+        keyboard_inputs += 1
+        active.paste_text(target)
+        keyboard_inputs += 1
+        clipboard_writes += 1
+        active.press("enter")
+        keyboard_inputs += 1
+        active.sleep(1.0)
+        pre = str(active.screenshot(pre_path))
+        phases.append({"phase": "open_target", "status": "ok", "screenshot_path": pre})
+        target_verified = bool(active.verify_target(target, pre))
+        phases.append(
+            {
+                "phase": "verify_target",
+                "status": "ok" if target_verified else "blocked",
+                "target_verified": target_verified,
+            }
+        )
+        if not target_verified:
+            active.restore_clipboard()
+            clipboard_restores += 1
+            restore_fields = _restore_foreground(active, previous_hwnd)
+            foreground_restores += int(previous_hwnd > 0)
+            phases.append({"phase": "restore_state", "status": "ok"})
+            return build(
+                "blocked_target_not_verified",
+                clipboard_write_attempts=clipboard_writes,
+                clipboard_restore_attempts=clipboard_restores,
+                foreground_restore_attempts=foreground_restores,
+                target_verified=False,
+                pre_send_screenshot_path=pre,
+                artifact_path=str(artifact_path),
+                phases=tuple(phases),
+                **restore_fields,
+                **takeover_fields,
+            )
+        active.paste_files([str(path)])
+        clipboard_writes += 1
+        send_attempts = 1
+        active.press("enter")
+        keyboard_inputs += 1
+        active.sleep(1.0)
+        post = _capture_bound_screenshot(active, window_hwnd, post_path)
+        verification = _verify_post_send_attachment(active, target, path.name, post)
+        verified = bool(verification.get("verified"))
+        phases.append(
+            {
+                "phase": "send_file",
+                "status": "ok",
+                "send_attempts": 1,
+                "post_send_screenshot_bound": bool(post),
+            }
+        )
+        phases.append(
+            {
+                "phase": "post_action_verify",
+                "status": "ok" if verified else "unverified",
+                "verified": verified,
+            }
+        )
+        active.restore_clipboard()
+        clipboard_restores += 1
+        restore_fields = _restore_foreground(active, previous_hwnd)
+        foreground_restores += int(previous_hwnd > 0)
+        phases.append({"phase": "restore_state", "status": "ok"})
+        return build(
+            "sent" if verified else "unverified",
+            control_allowed=True,
+            send_attempts=send_attempts,
+            keyboard_input_attempts=keyboard_inputs,
+            clipboard_write_attempts=clipboard_writes,
+            clipboard_restore_attempts=clipboard_restores,
+            foreground_restore_attempts=foreground_restores,
+            target_verified=True,
+            post_send_verified=verified,
+            post_send_verification=verification,
+            pre_send_screenshot_path=pre,
+            post_send_screenshot_path=post,
+            post_send_screenshot_bound=bool(post),
+            artifact_path=str(artifact_path),
+            phases=tuple(phases),
+            **restore_fields,
+            **takeover_fields,
+        )
+    except Exception as exc:
+        try:
+            active.restore_clipboard()
+            clipboard_restores += 1
+        except Exception:
+            pass
+        if previous_hwnd:
+            try:
+                restore_fields = _restore_foreground(active, previous_hwnd)
+                foreground_restores += 1
+            except Exception:
+                pass
+        phases.append({"phase": "failed", "status": "failed", "error": str(exc)})
+        return build(
+            "failed",
+            control_allowed=bool(send_attempts),
+            send_attempts=send_attempts,
+            keyboard_input_attempts=keyboard_inputs,
+            clipboard_write_attempts=clipboard_writes,
+            clipboard_restore_attempts=clipboard_restores,
+            foreground_restore_attempts=foreground_restores,
+            artifact_path=str(artifact_path),
+            phases=tuple(phases),
+            error=str(exc),
+            **restore_fields,
+            **takeover_fields,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class WeChatAttachmentSendReport:
+    status: str
+    target_name: str
+    file_name: str
+    file_size: int
+    file_sha256: str
+    allow_send: bool
+    control_allowed: bool = False
+    send_attempts: int = 0
+    keyboard_input_attempts: int = 0
+    clipboard_write_attempts: int = 0
+    clipboard_restore_attempts: int = 0
+    foreground_restore_attempts: int = 0
+    foreground_restored: bool | None = None
+    final_foreground_hwnd: int = 0
+    target_verified: bool = False
+    post_send_verified: bool = False
+    post_send_verification: dict = dataclasses.field(default_factory=dict)
+    pre_send_screenshot_path: str = ""
+    post_send_screenshot_path: str = ""
+    post_send_screenshot_bound: bool = False
+    artifact_path: str = ""
+    transport: str = "foreground-keyboard-clipboard"
+    foreground_takeover_validated: bool = False
+    foreground_takeover_validation: dict = dataclasses.field(default_factory=dict)
+    foreground_takeover_request: dict = dataclasses.field(default_factory=dict)
+    phases: tuple[dict, ...] = ()
+    error: str = ""
+    elapsed_ms: float = 0.0
+
+    def to_dict(self) -> dict:
+        return {
+            "mode": "wechat-file-helper-attachment-send-probe",
+            "safety_mode": "explicit_opt_in_real_send",
+            "status": self.status,
+            "target_name": self.target_name,
+            "file_name": self.file_name,
+            "file_size": self.file_size,
+            "file_sha256": self.file_sha256,
+            "allow_send": self.allow_send,
+            "control_allowed": self.control_allowed,
+            "send_attempts": self.send_attempts,
+            "keyboard_input_attempts": self.keyboard_input_attempts,
+            "clipboard_write_attempts": self.clipboard_write_attempts,
+            "clipboard_restore_attempts": self.clipboard_restore_attempts,
+            "foreground_restore_attempts": self.foreground_restore_attempts,
+            "foreground_restored": self.foreground_restored,
+            "final_foreground_hwnd": self.final_foreground_hwnd,
+            "target_verified": self.target_verified,
+            "post_send_verified": self.post_send_verified,
+            "post_send_verification": dict(self.post_send_verification),
+            "pre_send_screenshot_path": self.pre_send_screenshot_path,
+            "post_send_screenshot_path": self.post_send_screenshot_path,
+            "post_send_screenshot_bound": self.post_send_screenshot_bound,
+            "artifact_path": self.artifact_path,
+            "transport": self.transport,
+            "foreground_takeover_validated": self.foreground_takeover_validated,
+            "foreground_takeover_validation": dict(self.foreground_takeover_validation),
+            "phases": [dict(phase) for phase in self.phases],
+            "error": self.error,
+            "elapsed_ms": round(self.elapsed_ms, 3),
+        }
+
+
 def _restore_foreground(active: object, hwnd: int) -> dict:
     if int(hwnd or 0) <= 0:
         return {"foreground_restored": None, "final_foreground_hwnd": 0}
@@ -629,6 +968,43 @@ def _verify_post_send_message(
     data.setdefault("screenshot_path", screenshot_path)
     data["verified"] = bool(data.get("verified"))
     return data
+
+
+def _verify_post_send_attachment(
+    active: object,
+    target_name: str,
+    filename: str,
+    screenshot_path: str,
+) -> dict:
+    verifier = getattr(active, "verify_post_send_attachment", None)
+    if callable(verifier):
+        try:
+            result = verifier(target_name, filename, screenshot_path)
+        except Exception as exc:
+            return {
+                "verified": False,
+                "method": "positioned-chat-attachment-readback",
+                "error": f"attachment_verifier_error:{exc.__class__.__name__}",
+            }
+        return dict(result) if isinstance(result, dict) else {
+            "verified": False,
+            "method": "positioned-chat-attachment-readback",
+            "error": "attachment_verifier_invalid_result",
+        }
+    try:
+        frame = recognize_frame(screenshot_path, timeout=20)
+        return verify_chat_attachment(
+            screenshot_path,
+            frame,
+            target_name=target_name,
+            filename=filename,
+        )
+    except Exception as exc:
+        return {
+            "verified": False,
+            "method": "positioned-chat-attachment-readback",
+            "error": f"positioned_ocr_error:{exc.__class__.__name__}",
+        }
 
 
 def verify_wechat_post_send_message_from_screenshot(

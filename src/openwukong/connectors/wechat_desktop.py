@@ -396,6 +396,15 @@ def run_wechat_file_helper_send_probe(*args, **kwargs):
     return implementation(*args, **kwargs)
 
 
+def run_wechat_file_helper_attachment_probe(*args, **kwargs):
+    """Lazy import for the explicit file-attachment probe."""
+    from openwukong.evaluation.wechat_send_probe import (
+        run_wechat_file_helper_attachment_probe as implementation,
+    )
+
+    return implementation(*args, **kwargs)
+
+
 class WeChatForegroundBackend:
     """Optional foreground backend backed by the existing audited send probe."""
 
@@ -438,6 +447,32 @@ class WeChatForegroundBackend:
     ) -> dict[str, Any]:
         emoji = str(parameters.get("emoji", "") or "")
         return self.send_text(target, {**parameters, "text": emoji})
+
+    def send_file(
+        self,
+        target: ConnectorTarget,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        report = run_wechat_file_helper_attachment_probe(
+            file_path=str(parameters.get("path", "") or ""),
+            authorized_root=str(
+                parameters.get("approved_root", "") or target.workspace_path or ""
+            ),
+            target_name=str(
+                parameters.get("target_name", "")
+                or target.conversation_name
+                or ""
+            ),
+            allow_send=True,
+            automation=self._automation,
+            output_dir=self._output_dir,
+            foreground_takeover_request=parameters.get("foreground_takeover_request"),
+        )
+        data = report.to_dict()
+        data["sent"] = data.get("status") == "sent"
+        data["uploaded"] = data["sent"]
+        data["readback_verified"] = bool(data.get("post_send_verified", False))
+        return data
 
 
 class WeChatWindowsBackend:
@@ -568,6 +603,20 @@ class WeChatWindowsBackend:
             target,
             {**parameters, "text": parameters.get("emoji", "")},
         )
+
+    def send_file(
+        self,
+        target: ConnectorTarget,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._foreground.send_file(target, parameters)
+
+    def send_media(
+        self,
+        target: ConnectorTarget,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        return self._foreground.send_file(target, parameters)
 
 
 class WeChatDesktopConnector(SessionConnector):
