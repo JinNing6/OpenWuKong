@@ -243,6 +243,26 @@ def build_control_route_plan(window) -> ControlRoutePlan:
         )
         decision = "prefer_deterministic_connector"
         fallbacks = _uia_fallbacks(window, family)
+    elif family == "system-shell" and process_name == "explorer.exe":
+        primary = _step(
+            "filesystem-native",
+            "connector",
+            "workspace-bound-filesystem-or-shell",
+            (
+                "list",
+                "search",
+                "read_metadata",
+                "copy",
+                "move",
+                "rename",
+                "mkdir",
+            ),
+            98,
+            "primary",
+            "File Explorer tasks use workspace-bound filesystem operations before UI input.",
+        )
+        decision = "prefer_deterministic_connector"
+        fallbacks = _uia_fallbacks(window, family)
     elif family == "agent-app":
         primary = _step(
             "app-native-bridge-required",

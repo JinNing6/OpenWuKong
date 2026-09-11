@@ -13,6 +13,7 @@ from openwukong.connectors.browser import (
     BrowserSessionConnector,
 )
 from openwukong.connectors.desktop_uia import DesktopUIAConnector
+from openwukong.connectors.filesystem import FileSystemConnector
 from openwukong.connectors.git import GitCommandConnector
 from openwukong.connectors.ide_specialized import (
     CodexDesktopConnector,
@@ -58,6 +59,7 @@ __all__ = [
     "CopilotIDEConnector",
     "CursorIDEConnector",
     "DesktopUIAConnector",
+    "FileSystemConnector",
     "GitCommandConnector",
     "IDEExtensionBridgeClient",
     "IDEExtensionConnector",

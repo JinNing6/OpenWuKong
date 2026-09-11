@@ -36,6 +36,10 @@ _READ_ACTIONS = {
 _CONFIRMATION_ACTIONS = {
     "external_send",
     "file_modify",
+    "file.copy",
+    "file.move",
+    "file.rename",
+    "file.mkdir",
     "send_message",
     "start_agent",
     "submit_form",
@@ -59,6 +63,7 @@ _CONNECTOR_TRANSPORTS = {
     "ide-extension-connector": "ide-extension-bridge",
     "office-object-model-or-addin": "office-object-model-or-addin",
     "terminal-native-session": "managed-shell-or-conpty",
+    "filesystem-native": "workspace-bound-filesystem",
 }
 
 
@@ -349,6 +354,8 @@ def _connector_verification(route_id: str) -> tuple[str, ...]:
         return ("native_bridge_response", "agent_transcript_readback", "focus_stability")
     if route_id == "office-object-model-or-addin":
         return ("object_model_readback",)
+    if route_id == "filesystem-native":
+        return ("filesystem_state_readback", "workspace_root_binding")
     return ("connector_result",)
 
 
