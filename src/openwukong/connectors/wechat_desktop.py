@@ -405,6 +405,15 @@ def run_wechat_file_helper_attachment_probe(*args, **kwargs):
     return implementation(*args, **kwargs)
 
 
+def run_wechat_moments_text_publish_probe(*args, **kwargs):
+    """Lazy import for the explicit Moments publish probe."""
+    from openwukong.evaluation.wechat_moments_probe import (
+        run_wechat_moments_text_publish_probe as implementation,
+    )
+
+    return implementation(*args, **kwargs)
+
+
 class WeChatForegroundBackend:
     """Optional foreground backend backed by the existing audited send probe."""
 
@@ -617,6 +626,28 @@ class WeChatWindowsBackend:
         parameters: dict[str, Any],
     ) -> dict[str, Any]:
         return self._foreground.send_file(target, parameters)
+
+    def publish_moment(
+        self,
+        target: ConnectorTarget,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        automation = getattr(self._foreground, "_automation", None)
+        report = run_wechat_moments_text_publish_probe(
+            body=str(parameters.get("body", parameters.get("text", "")) or ""),
+            visibility=str(parameters.get("visibility", "public") or "public"),
+            allow_publish=True,
+            automation=automation,
+            output_dir=str(parameters.get("output_dir", "") or ""),
+            foreground_takeover_request=parameters.get("foreground_takeover_request"),
+            moments_entry_relative=parameters.get("moments_entry_relative"),
+            publish_relative=parameters.get("publish_relative"),
+            publish_submit_relative=parameters.get("publish_submit_relative"),
+        )
+        data = report.to_dict()
+        data["published"] = data.get("status") == "sent"
+        data["readback_verified"] = bool(data.get("post_publish_verified", False))
+        return data
 
 
 class WeChatDesktopConnector(SessionConnector):

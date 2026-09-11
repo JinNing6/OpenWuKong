@@ -165,6 +165,52 @@ class WeChatWindowsBackendTests(unittest.TestCase):
         self.assertEqual(foreground.calls[0][1]["target_name"], "张三")
         self.assertEqual(uia.calls, [("probe", 7101)])
 
+    def test_moments_publish_uses_explicit_probe_and_preserves_report(self):
+        calls = []
+
+        class FakeReport:
+            def to_dict(self):
+                return {
+                    "status": "sent",
+                    "post_publish_verified": True,
+                    "publish_attempts": 1,
+                }
+
+        def fake_probe(**kwargs):
+            calls.append(kwargs)
+            return FakeReport()
+
+        import openwukong.connectors.wechat_desktop as module
+        original = module.run_wechat_moments_text_publish_probe
+        module.run_wechat_moments_text_publish_probe = fake_probe
+        try:
+            backend = WeChatWindowsBackend(
+                uia=FakeUiaConnector(_snapshot()),
+                foreground=FakeForegroundBackend(),
+            )
+            connector = WeChatDesktopConnector(backend=backend)
+            result = connector.execute_action(
+                TARGET,
+                ControlIntent(
+                    action="wechat.moments.publish",
+                    allow_submit=True,
+                    parameters={
+                        "body": "今天完成了一个小目标",
+                        "visibility": "public",
+                        "moments_entry_relative": (0.04, 0.28),
+                        "publish_relative": (0.62, 0.05),
+                        "publish_submit_relative": (0.90, 0.90),
+                        "foreground_takeover_request": {"status": "approved"},
+                    },
+                ),
+            )
+        finally:
+            module.run_wechat_moments_text_publish_probe = original
+
+        self.assertTrue(result.success, result.error)
+        self.assertEqual(result.payload["publish_attempts"], 1)
+        self.assertEqual(calls[0]["visibility"], "public")
+
 
 if __name__ == "__main__":
     unittest.main()

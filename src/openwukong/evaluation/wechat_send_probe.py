@@ -283,6 +283,22 @@ class Win32WeChatKeyboardAutomation:
         send_keys("^v")
         self.sleep(self.action_delay)
 
+    def click_relative(self, x: float, y: float) -> None:
+        self._assert_bound_foreground()
+        x_value = float(x)
+        y_value = float(y)
+        if not 0.0 <= x_value <= 1.0 or not 0.0 <= y_value <= 1.0:
+            raise ValueError("wechat_relative_click_out_of_range")
+        left, top, right, bottom = _window_rectangle(self._window)
+        absolute = (
+            left + int(round(x_value * max(0, right - left - 1))),
+            top + int(round(y_value * max(0, bottom - top - 1))),
+        )
+        from pywinauto import mouse
+
+        mouse.click(coords=absolute)
+        self.sleep(self.action_delay)
+
     def press(self, key: str) -> None:
         self._assert_bound_foreground()
         from pywinauto.keyboard import send_keys
@@ -361,6 +377,55 @@ class Win32WeChatKeyboardAutomation:
                 "method": "positioned-chat-attachment-readback",
                 "target_name": target_name,
                 "filename": filename,
+                "error": f"positioned_ocr_error:{exc.__class__.__name__}",
+            }
+
+    def verify_moments_surface(self, screenshot_path: str) -> bool:
+        from openwukong.control.wechat_visual_evidence import find_moments_surface
+
+        try:
+            frame = recognize_frame(str(screenshot_path or ""), timeout=self.ocr_timeout)
+            return bool(find_moments_surface(frame).get("verified"))
+        except Exception:
+            return False
+
+    def verify_publish_panel(self, screenshot_path: str) -> bool:
+        from openwukong.control.wechat_visual_evidence import find_publish_panel
+
+        try:
+            frame = recognize_frame(str(screenshot_path or ""), timeout=self.ocr_timeout)
+            return bool(find_publish_panel(frame).get("verified"))
+        except Exception:
+            return False
+
+    def verify_published_body(
+        self,
+        body: str,
+        before_screenshot_path: str,
+        after_screenshot_path: str = "",
+    ) -> dict:
+        from openwukong.control.wechat_visual_evidence import (
+            recognize_frame,
+            verify_moments_publish,
+        )
+
+        after_path = after_screenshot_path or before_screenshot_path
+        try:
+            before = recognize_frame(
+                str(before_screenshot_path or ""),
+                timeout=self.ocr_timeout,
+            )
+            after = recognize_frame(str(after_path or ""), timeout=self.ocr_timeout)
+            return verify_moments_publish(
+                after_path,
+                before,
+                after,
+                body=body,
+            )
+        except Exception as exc:
+            return {
+                "verified": False,
+                "method": "positioned-moments-publish-readback",
                 "error": f"positioned_ocr_error:{exc.__class__.__name__}",
             }
 
@@ -1197,6 +1262,22 @@ def _takeover_report_fields(validation) -> dict:
         "foreground_takeover_validation": data,
         "foreground_takeover_request": dict(data.get("request") or {}),
     }
+
+
+def _window_rectangle(window: object) -> tuple[int, int, int, int]:
+    rectangle = getattr(window, "rectangle", None)
+    if not callable(rectangle):
+        raise RuntimeError("wechat_window_rectangle_unavailable")
+    rect = rectangle()
+    values = (
+        int(getattr(rect, "left", 0)),
+        int(getattr(rect, "top", 0)),
+        int(getattr(rect, "right", 0)),
+        int(getattr(rect, "bottom", 0)),
+    )
+    if values[2] <= values[0] or values[3] <= values[1]:
+        raise RuntimeError("wechat_window_rectangle_invalid")
+    return values
 
 
 def _capture_hwnd_with_print_window(hwnd: int, output_path: Path) -> bool:

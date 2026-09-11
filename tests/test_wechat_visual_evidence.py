@@ -4,7 +4,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 from openwukong.control.wechat_visual_evidence import (
-    OcrFrame, OcrLine, find_chat_header, verify_chat_attachment, verify_chat_send,
+    OcrFrame, OcrLine, find_chat_header, find_moments_surface,
+    verify_chat_attachment, verify_chat_send, verify_moments_publish,
 )
 
 
@@ -89,6 +90,32 @@ class WeChatVisualEvidenceTests(unittest.TestCase):
             )
         self.assertTrue(good["verified"], good)
         self.assertFalse(composer["verified"])
+
+    def test_moments_surface_requires_feed_marker(self):
+        self.assertTrue(find_moments_surface(frame(
+            line("朋友圈", 80, 80, 120),
+            line("张三的朋友圈", 380, 80, 180),
+        ))["verified"])
+        self.assertFalse(find_moments_surface(frame(line("文件传输助手", 380, 80, 180)))["verified"])
+
+    def test_moments_publish_requires_new_body_after_publish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "frame.png"
+            Image.new("RGB", (900, 650), "white").save(path)
+            before = frame(line("朋友圈", 80, 80, 120), line("发布", 780, 80, 70))
+            after = frame(
+                line("朋友圈", 80, 80, 120),
+                line("张三的朋友圈", 380, 80, 180),
+                line("刚刚", 380, 160, 60),
+                line("今日完成", 380, 190, 120),
+            )
+            result = verify_moments_publish(
+                path, before, after, body="今日完成",
+            )
+        self.assertTrue(result["verified"], result)
+        self.assertFalse(
+            verify_moments_publish(path, before, before, body="今日完成")["verified"]
+        )
 
 
 if __name__ == "__main__":

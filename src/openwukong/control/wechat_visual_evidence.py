@@ -71,6 +71,78 @@ def find_chat_header(frame: OcrFrame, target_name: str) -> dict:
     }
 
 
+def find_moments_surface(frame: OcrFrame) -> dict:
+    markers = [
+        item for item in frame.lines
+        if any(token in _normalize(item.text) for token in ("朋友圈", "moments"))
+    ]
+    if not markers:
+        return {"verified": False, "method": "positioned-moments-surface", "error": "moments_marker_missing"}
+    return {
+        "verified": True,
+        "method": "positioned-moments-surface",
+        "marker_rects": [list(item.rect) for item in markers[:8]],
+        "error": "",
+    }
+
+
+def find_publish_panel(frame: OcrFrame) -> dict:
+    markers = [
+        item for item in frame.lines
+        if _normalize(item.text) in {"发布", "publish", "post"}
+    ]
+    if not markers:
+        return {
+            "verified": False,
+            "method": "positioned-moments-publish-panel",
+            "error": "publish_panel_marker_missing",
+        }
+    return {
+        "verified": True,
+        "method": "positioned-moments-publish-panel",
+        "marker_rects": [list(item.rect) for item in markers[:8]],
+        "error": "",
+    }
+
+
+def verify_moments_publish(
+    image_path: str | Path,
+    before: OcrFrame,
+    after: OcrFrame,
+    *,
+    body: str,
+) -> dict:
+    """Require a Moments marker and a new body visible only after publishing."""
+    result = {
+        "verified": False,
+        "method": "positioned-moments-publish-readback",
+        "ocr_method": after.source,
+        "before_moments_verified": bool(find_moments_surface(before)["verified"]),
+        "after_moments_verified": bool(find_moments_surface(after)["verified"]),
+        "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
+        "body_matched_after": False,
+        "body_present_before": False,
+    }
+    path = Path(image_path)
+    if not path.is_file():
+        return {**result, "error": "screenshot_missing"}
+    expected = _normalize(body)
+    before_text = "".join(_normalize(item.text) for item in before.lines)
+    after_text = "".join(_normalize(item.text) for item in after.lines)
+    before_present = bool(expected and expected in before_text)
+    after_matched = bool(expected and expected in after_text)
+    verified = bool(
+        result["after_moments_verified"] and after_matched and not before_present
+    )
+    return {
+        **result,
+        "verified": verified,
+        "body_matched_after": after_matched,
+        "body_present_before": before_present,
+        "error": "" if verified else "moments_publish_readback_not_verified",
+    }
+
+
 def _composer_rectangle(path: Path, frame: OcrFrame, header: dict) -> list[int]:
     from PIL import Image
 
