@@ -445,3 +445,12 @@ R290 preserved the complete current working-tree version as remote baseline comm
 - Combined focused validation passed 164 tests; broader repository failures
   remain the previously recorded unrelated baseline failures. No real browser
   submission or Office user-document mutation was executed.
+
+## R296 Typed browser actions reach the shared fabric
+
+- `ControlFabric.execute` now maps typed browser action names to the existing
+  health-gated DevTools runner and forwards typed selector/value/url parameters.
+- This removes the main-entry mismatch between `BrowserSessionConnector` and
+  the fabric's special DevTools dispatch branch.
+- Focused validation now passes 166 tests, including fabric-level typed browser
+  dispatch; `pip check` and `git diff --check` pass.

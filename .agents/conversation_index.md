@@ -16771,3 +16771,13 @@ When a new conversation starts in this repo:
     specific document surface
   - no real browser submit or Office user-document mutation was executed in
     this checkpoint
+
+## 2026-09-11 R296 - Typed browser actions reach the shared fabric
+
+- Fixed the shared `ControlFabric` DevTools branch to normalize typed browser
+  actions and forward selector/value/url fields from `ControlIntent.parameters`.
+- This closes the main-entry gap where the connector itself understood typed
+  actions but the fabric still passed the new action name directly to the
+  legacy runner.
+- Validation: 166 combined focused tests passed, including two fabric-level
+  typed browser dispatch tests; `pip check` and `git diff --check` passed.

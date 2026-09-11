@@ -629,14 +629,23 @@ class ControlFabric:
 
         if _dispatch_allows_browser_devtools_action(dispatch_report):
             runner = browser_action_runner or _default_browser_action_runner()
+            browser_parameters = (
+                dict(intent.parameters)
+                if isinstance(intent.parameters, dict)
+                else {}
+            )
             action_report_obj = runner(
                 debugger_url=dispatch_report.target.debugger_url,
                 window_title=dispatch_report.target.window_title,
                 resource_url=dispatch_report.target.resource_url,
-                action=intent.action,
-                url=intent.url,
-                selector=intent.selector,
-                value=intent.value or intent.text,
+                action=_browser_runner_action(intent.action),
+                url=intent.url or str(browser_parameters.get("url", "") or ""),
+                selector=intent.selector or str(browser_parameters.get("selector", "") or ""),
+                value=(
+                    intent.value
+                    or intent.text
+                    or str(browser_parameters.get("value", "") or "")
+                ),
             )
         else:
             resolution = self._resolve_executable_connector(dispatch_report)
@@ -1366,6 +1375,24 @@ def _dispatch_allows_browser_devtools_action(report: ControlDispatchReport) -> b
         and report.connector_ready
         and bool((report.target.debugger_url or "").strip())
     )
+
+
+def _browser_runner_action(value: object) -> str:
+    action = str(value or "").strip().casefold()
+    return {
+        "browser.page.read": "read_page",
+        "browser.read": "read_page",
+        "browser.navigate": "navigate_url",
+        "browser.navigate_url": "navigate_url",
+        "browser.input.set": "set_input_value",
+        "browser.set_input_value": "set_input_value",
+        "browser.click": "click_locator",
+        "browser.click_locator": "click_locator",
+        "browser.form.submit": "submit_form",
+        "browser.submit_form": "submit_form",
+        "browser.extract": "extract_results",
+        "browser.extract_results": "extract_results",
+    }.get(action, action)
 
 
 def _dispatch_allows_connector_action(report: ControlDispatchReport) -> bool:
