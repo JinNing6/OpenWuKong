@@ -379,6 +379,16 @@ def _fallback_transport_ids(route_plan: ControlRoutePlan) -> tuple[str, ...]:
 def _requires_confirmation(action: str, intent: object | None) -> bool:
     if action in _CONFIRMATION_ACTIONS:
         return True
+    if action.startswith("office.") and action not in {
+        "office.document.inspect",
+        "office.document.read",
+        "office.word.read",
+        "office.excel.read_cell",
+        "office.spreadsheet.read_cell",
+        "office.powerpoint.read",
+        "office.presentation.read",
+    }:
+        return True
     if bool(getattr(intent, "submit", False)) and not bool(getattr(intent, "allow_submit", False)):
         return True
     return False

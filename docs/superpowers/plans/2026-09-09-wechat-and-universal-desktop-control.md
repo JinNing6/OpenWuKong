@@ -542,6 +542,27 @@ After the shared kernel and WeChat acceptance report are stable, create separate
 
 These adapters must register capabilities with the same profile and use the same `ControlFabric`, side-effect gate, foreground takeover, trajectory recorder, and evidence schema.
 
+## Follow-on progress checkpoint (2026-09-11)
+
+- File Explorer is now represented by the workspace-bound `filesystem` connector
+  and `filesystem-native` route. It supports list/search/stat/mkdir/copy/move/
+  rename with containment, overwrite, confirmation, and readback gates.
+- Browser typed actions are projected through the existing health-gated DevTools
+  runner: page read, navigation, input value, click, form submit, and result
+  extraction. The legacy HTTP/text command path remains available for reads.
+- Office is now represented by `OfficeSessionConnector` on the
+  `office-object-model-or-addin` route. Word create/read/append, Excel cell
+  read/write, and PowerPoint read/add-text use a private COM instance and
+  close/reopen or direct object-model readback without foreground input.
+- The Windows dependency surface was refreshed on 2026-09-11: local Python
+  3.13.5 consumes pywin32 312; `pywin32>=312` is declared for Windows and
+  `pip check` passes. This is the latest stable package observed in the
+  official PyPI metadata at the checkpoint; negotiated Office COM behavior is
+  still dependent on the locally installed Office applications.
+- The combined focused regression for WeChat, File Explorer, browser, Office,
+  routing, and transport checks passed 164 tests; the broader repository suite
+  remains subject to its previously recorded unrelated failures.
+
 ## Final verification checklist
 
 - [ ] Re-read every changed module and test; run `git diff --check`.

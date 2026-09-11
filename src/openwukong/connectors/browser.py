@@ -37,6 +37,19 @@ _BROWSER_PROCESS_NAMES = {
 }
 
 
+def _normalize_browser_action(value: object) -> str:
+    action = str(value or "").strip().casefold()
+    aliases = {
+        "browser_read": "browser.page.read",
+        "browser_navigate": "browser.navigate",
+        "browser_input": "browser.input.set",
+        "browser_click": "browser.click",
+        "browser_submit": "browser.form.submit",
+        "browser_extract": "browser.extract",
+    }
+    return aliases.get(action, action)
+
+
 @dataclasses.dataclass(frozen=True)
 class BrowserDevToolsTarget:
     target_id: str
@@ -343,10 +356,16 @@ class BrowserSessionConnector(SessionConnector):
     devtools_route_id = "browser-devtools-or-extension"
     http_route_id = "browser-http-session"
 
-    def __init__(self, *, devtools_client: BrowserDevToolsClient | None = None):
+    def __init__(
+        self,
+        *,
+        devtools_client: BrowserDevToolsClient | None = None,
+        action_runner: object | None = None,
+    ):
         self._sessions: dict[str, _BrowserSession] = {}
         self._lock = threading.Lock()
         self._devtools_client = devtools_client or BrowserDevToolsClient()
+        self._action_runner = action_runner
 
     def supports_target(self, target: ConnectorTarget) -> bool:
         process_name = (target.process_name or "").strip().lower()
@@ -379,6 +398,94 @@ class BrowserSessionConnector(SessionConnector):
     def read_conversation(self, target: ConnectorTarget) -> str:
         session = self._ensure_session(target)
         return "\n".join(session.transcript[-40:]).strip()
+
+    def execute_action(
+        self,
+        target: ConnectorTarget,
+        intent: object,
+        cooldown: float = 10.0,
+    ) -> ConnectorActionResult:
+        """Execute a typed browser action through the verified DevTools route.
+
+        The legacy text command path remains available through ``send_message``.
+        Typed callers receive a structured action report and do not need to
+        encode CDP commands in a free-form string.
+        """
+        del cooldown
+        action = _normalize_browser_action(getattr(intent, "action", ""))
+        parameters = getattr(intent, "parameters", {})
+        parameters = dict(parameters) if isinstance(parameters, dict) else {}
+        if action == "browser.http.request":
+            method = str(parameters.get("method", "GET") or "GET").upper()
+            url = str(parameters.get("url", "") or getattr(intent, "url", "") or "")
+            body = str(parameters.get("body", "") or getattr(intent, "text", "") or "")
+            command = f"{method} {url}" + (f"\n\n{body}" if body else "")
+            return self.send_message(target, command)
+        runner_action = {
+            "browser.page.read": "read_page",
+            "browser.read": "read_page",
+            "browser.navigate": "navigate_url",
+            "browser.navigate_url": "navigate_url",
+            "browser.input.set": "set_input_value",
+            "browser.set_input_value": "set_input_value",
+            "browser.click": "click_locator",
+            "browser.click_locator": "click_locator",
+            "browser.form.submit": "submit_form",
+            "browser.submit_form": "submit_form",
+            "browser.extract": "extract_results",
+            "browser.extract_results": "extract_results",
+        }.get(action)
+        if not runner_action:
+            return ConnectorActionResult(
+                success=False,
+                connector_id=self.connector_id,
+                action=action or "unknown",
+                error="unsupported_browser_action",
+            )
+        debugger_url = str(target.debugger_url or "").strip()
+        if not debugger_url:
+            return ConnectorActionResult(
+                success=False,
+                connector_id=self.connector_id,
+                action=action,
+                payload={"route_id": self.devtools_route_id},
+                error="browser_debugger_url_required",
+            )
+        runner = self._action_runner
+        if not callable(runner):
+            from openwukong.evaluation.browser_devtools_action import (
+                run_browser_devtools_action,
+            )
+
+            runner = run_browser_devtools_action
+        report = runner(
+            debugger_url=debugger_url,
+            window_title=str(target.window_title or ""),
+            resource_url=str(target.resource_url or ""),
+            action=runner_action,
+            url=str(parameters.get("url", "") or getattr(intent, "url", "") or ""),
+            selector=str(parameters.get("selector", "") or getattr(intent, "selector", "") or ""),
+            value=str(
+                parameters.get("value", "")
+                or getattr(intent, "value", "")
+                or getattr(intent, "text", "")
+                or ""
+            ),
+        )
+        payload = report.to_dict() if hasattr(report, "to_dict") else dict(report or {})
+        return ConnectorActionResult(
+            success=bool(payload.get("ok")),
+            connector_id=self.connector_id,
+            action=action,
+            action_key=f"{self._session_key(target)}:{action}",
+            payload={
+                **payload,
+                "route_id": self.devtools_route_id,
+                "transport": "chrome-devtools-protocol",
+                "readback_verified": bool(payload.get("ok")),
+            },
+            error=str(payload.get("error", "") or ""),
+        )
 
     def send_message(
         self,

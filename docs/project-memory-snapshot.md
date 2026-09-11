@@ -424,3 +424,24 @@ R290 preserved the complete current working-tree version as remote baseline comm
   No real Moments post was executed in this checkpoint; therefore the code
   path is implemented but live Moments publish/readback remains unverified.
 - Remote checkpoint: `b3207c9`; rollback baseline remains `afe317c9`.
+
+## R295 File Explorer, browser, and Office adapters
+
+- File Explorer has a registered `filesystem` connector on the
+  `filesystem-native` route with workspace containment, overwrite and
+  confirmation gates, and state readback for list/search/stat/mkdir/copy/move/
+  rename.
+- Browser typed actions now map through the health-gated DevTools runner for
+  page read, navigation, input, click, form submit, and result extraction;
+  legacy HTTP/text commands remain available.
+- Office has a registered `OfficeSessionConnector` on
+  `office-object-model-or-addin`. Word create/read/append, Excel cell
+  read/write, and PowerPoint read/add-text use a private COM instance and
+  return object-model readback without foreground input.
+- Technology freshness checked 2026-09-11: official Microsoft automation and
+  object-model documentation plus official PyPI metadata were consulted;
+  Python 3.13.5 consumes pywin32 312, which is declared as
+  `pywin32>=312; sys_platform == 'win32'`; `pip check` passed.
+- Combined focused validation passed 164 tests; broader repository failures
+  remain the previously recorded unrelated baseline failures. No real browser
+  submission or Office user-document mutation was executed.

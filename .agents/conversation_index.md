@@ -16741,3 +16741,33 @@ When a new conversation starts in this repo:
 - next action:
   - continue the shared desktop kernel with File Explorer and then browser and
     Office adapters; keep real Moments publishing opt-in and foreground-only
+
+## 2026-09-11 R295 - File Explorer, browser, and Office adapters
+
+- completed implementation slice:
+  - workspace-bound File Explorer connector is present on the
+    `filesystem-native` route for list/search/stat/mkdir/copy/move/rename with
+    path containment, overwrite, confirmation, and readback gates
+  - BrowserSessionConnector now exposes typed DevTools actions for page read,
+    navigation, input, click, submit, and result extraction while preserving
+    the legacy HTTP/text command path
+  - OfficeSessionConnector is registered on the
+    `office-object-model-or-addin` route and covers Word create/read/append,
+    Excel cell read/write, and PowerPoint read/add-text through a private COM
+    instance
+- technology freshness:
+  - checked 2026-09-11; official Microsoft Office automation/object-model
+    references and PyPI pywin32 metadata were consulted
+  - local Python 3.13.5 consumes pywin32 312; `pywin32>=312` is declared for
+    Windows and `pip check` passes
+- validation:
+  - combined focused WeChat/File Explorer/browser/Office routing suite ran
+    164 tests and passed; the latest browser/Office subset ran 69 tests and
+    passed
+  - `compileall` and `git diff --check` passed
+- boundary:
+  - Office COM readiness proves the connector contract and fixture readback;
+    live Office behavior still depends on the installed Office product and
+    specific document surface
+  - no real browser submit or Office user-document mutation was executed in
+    this checkpoint
